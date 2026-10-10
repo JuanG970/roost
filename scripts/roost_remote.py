@@ -56,11 +56,16 @@ def text(value):
     return value if isinstance(value, str) and value else None
 
 
+# Descriptors the commands Roost runs inherit, as Git does the lock a
+# worktree's removal holds; see `remove_worktrees`.
+INHERITED = []
+
+
 def execute(argv, cwd=None, check=True, input=None):
     # A file name that is not UTF-8, possible on Linux, must not fail every
     # listing of the host: undecodable bytes are replaced, here and below.
     result = subprocess.run(argv, cwd=cwd, input=input, text=True, errors="replace",
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=tuple(INHERITED))
     if check and result.returncode:
         raise RoostError(result.stderr.strip() or result.stdout.strip()
                          or "Command failed: " + shlex.join(argv))
@@ -194,7 +199,25 @@ class Store:
         with (self.root / "registry.lock").open("a") as lock:
             os.chmod(lock.name, 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
+            self.lock = lock
+            try:
+                yield
+            finally:
+                self.lock = None
+
+    @contextlib.contextmanager
+    def released(self):
+        """Let hooks and other requests in while slow work runs, under
+        `locked`. Records read before may have changed after."""
+        lock = getattr(self, "lock", None)
+        if lock is None:
             yield
+            return
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_EX)
 
     def path(self, task_id):
         if not isinstance(task_id, str) or not re.fullmatch(r"[a-f0-9]{16}", task_id):
@@ -214,7 +237,7 @@ class Store:
     def remove(self, task_id):
         """Delete a task's record and hook settings. Conversations are kept."""
         path = self.path(task_id)
-        for stale in (path, path.with_suffix(".settings")):
+        for stale in (path, path.with_suffix(".settings"), path.with_suffix(".removing")):
             with contextlib.suppress(FileNotFoundError):
                 stale.unlink()
 
@@ -1058,6 +1081,8 @@ def add_git_stats(tasks, pull_requests=True):
     repository, or over the network, these take seconds. Without
     PULL_REQUESTS, GitHub is not asked."""
     for task in tasks:
+        if task.get("removing"):
+            continue  # Going, file by file.
         reply = last_message(task)
         if reply:
             task["lastMessage"] = reply
@@ -1441,12 +1466,9 @@ def retire(store, task, merge=False, merged_head=None, squash=False):
         task["retiringCommit"] = commit
         store.save(task)
     stop(store, task, inventory)
-    # Worktrees its agent made that hold nothing beyond the task's branch.
-    remove_agent_worktrees(task, [entry for entry in agent_work(task)
-                                  if entry["ahead"] == 0 and not entry["dirty"]])
-    if worktree_exists:
-        require_clean(str(worktree))
-        git(repo, "worktree", "remove", str(worktree))
+    # With worktrees its agent made that hold nothing beyond the task's branch.
+    remove_worktrees(store, task, worktree if worktree_exists else None,
+                     [entry for entry in agent_work(task) if entry["ahead"] == 0 and not entry["dirty"]])
     if branch_exists:
         delete_branch(repo, branch, commit)
     store.remove(task["id"])
@@ -1580,10 +1602,7 @@ def discard(store, task, expect=None, dry_run=False):
     if commit != (expect or None):
         raise RoostError("The task's branch has moved since you were asked; look at it again before discarding")
     stop(store, task)
-    remove_agent_worktrees(task, work)
-    if worktree_exists:
-        # Twice: also a worktree its agent locked.
-        git(repo, "worktree", "remove", "--force", "--force", str(worktree))
+    remove_worktrees(store, task, worktree if worktree_exists else None, work, force=True)
     if branch_exists:
         delete_branch(repo, branch, commit)
     store.remove(task["id"])
@@ -1815,6 +1834,58 @@ def remove_agent_worktrees(task, entries):
             git(task["repo"], "update-ref", "-d", "refs/heads/" + branch, commit, check=False)
 
 
+def removal_running(store, task):
+    """Whether a removal of TASK's worktree still runs. Its lock is held
+    for as long as the request removing it, or any command it started,
+    runs: Git goes on deleting files after a request Emacs gave up on."""
+    try:
+        with store.path(task["id"]).with_suffix(".removing").open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except FileNotFoundError:
+        return False
+    except BlockingIOError:
+        return True
+    return False
+
+
+def remove_worktrees(store, task, worktree, agents, force=False):
+    """Remove TASK's WORKTREE, if any, and AGENTS, entries of `agent_work`.
+    Without the registry lock: a worktree with dependencies installed can
+    hold hundreds of thousands of files, and every agent's hooks wait on
+    the lock. Meanwhile the record says the worktree is going, and a lock
+    of its own, which Git inherits, says it is still going, so nothing else
+    acts on the task. Without FORCE, changes there are refused."""
+    if not worktree and not agents:
+        return
+    with store.path(task["id"]).with_suffix(".removing").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RoostError("Roost is still removing this task's worktree; refresh in a moment")
+        marker = uuid.uuid4().hex
+        task["removing"] = marker
+        store.save(task)
+        INHERITED.append(lock.fileno())
+        try:
+            with store.released():
+                remove_agent_worktrees(task, agents)
+                if worktree and force:
+                    # Twice: also a worktree its agent locked.
+                    git(task["repo"], "worktree", "remove", "--force", "--force", str(worktree))
+                elif worktree:
+                    require_clean(str(worktree))
+                    git(task["repo"], "worktree", "remove", str(worktree))
+        finally:
+            INHERITED.remove(lock.fileno())
+            # The record may have changed meanwhile: clear only this mark.
+            task.pop("removing", None)
+            with contextlib.suppress(RoostError):
+                current = store.read(task["id"])
+                if current.get("removing") == marker:
+                    del current["removing"]
+                    store.save(current)
+
+
 def require_agent_work_kept(task):
     """Refuse to finish TASK while its agent's own worktrees hold work that
     is not on the task's branch: nothing else would show it."""
@@ -1929,6 +2000,20 @@ def runner(root, task_id, run_id, resume_conversation=False):
     return code
 
 
+def require_not_removing(store, task, action):
+    """Refuse ACTION on a task whose worktree is being removed. While that
+    runs, refuse all but looking: a retry after Emacs gave up waiting would
+    race it. Once it has stopped short, the worktree may be partly gone, so
+    refuse all but finishing the task."""
+    if not task.get("removing") or action in ("seen", "inspect"):
+        return
+    if removal_running(store, task):
+        raise RoostError("Roost is still removing this task's worktree; refresh in a moment")
+    if action not in ("retire", "merge", "discard", "forget"):
+        raise RoostError("Roost was removing this task's worktree when it stopped; "
+                         "merge, retire, discard or forget the task")
+
+
 # Kept in task records for the helper's own use, and not sent to Emacs.
 PRIVATE = ("lastReply", "transcript")
 
@@ -1974,6 +2059,7 @@ def rpc(request):
                 task = store.read(request["id"])
                 if task["status"] == "retired":
                     raise RoostError("Task is retired")
+                require_not_removing(store, task, action)
             if isinstance(task.get("pr"), dict) and task["pr"].get("number"):
                 pushed = push_pull_request(store, task)
                 with store.locked():
@@ -1998,6 +2084,7 @@ def rpc(request):
                 task = store.read(request["id"])
                 if task["status"] == "retired":
                     raise RoostError("Task is retired")
+                require_not_removing(store, task, action)
                 result = TASK_ACTIONS[action](store, task, request)
             else:
                 raise RoostError("Unknown action: " + str(action))

@@ -1,6 +1,7 @@
 """Real Git/tmux lifecycle tests. Isolated sockets; no API calls or user config."""
 import concurrent.futures
 import datetime
+import fcntl
 import http.server
 import importlib.util
 import hashlib
@@ -959,6 +960,78 @@ class Lifecycle(unittest.TestCase):
             self.assertFalse(self.request("retire", id=task["id"])["ok"])
         self.assertFalse(Path(task["worktree"]).exists())
         self.assertFalse(roost.ref_exists(self.repo, task["branch"]))
+        self.assertTrue(self.request("retire", id=task["id"])["ok"])
+        self.assertEqual(self.request("list")["result"], [])
+
+    def test_removing_a_worktree_lets_hooks_in_but_nothing_else(self):
+        # A worktree with dependencies installed takes seconds to delete,
+        # and every agent's hooks wait on the registry lock.
+        git = roost.git
+        task = self.create()
+        during = []
+
+        def removing(repo, *args, **kwargs):
+            if args[:2] == ("worktree", "remove"):
+                with open(self.state / "registry.lock", "a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # Free, or this raises.
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                # A retry after Emacs gave up waiting, or a resume, waits its
+                # turn; seeing the agent is recorded.
+                during.append([self.request(action, id=task["id"])["error"]
+                               for action in ("resume", "retire", "discard", "forget")])
+                self.assertTrue(self.request("seen", id=task["id"], updatedAt="seen meanwhile")["ok"])
+                if failing:
+                    raise roost.RoostError("simulated failure")
+            return git(repo, *args, **kwargs)
+
+        # Should it fail, the task can be started again, and what was
+        # recorded meanwhile stays.
+        failing = True
+        with patch.object(roost, "git", side_effect=removing):
+            self.assertFalse(self.request("retire", id=task["id"])["ok"])
+        self.assertTrue(all("still removing" in error for error in during[0]), during)
+        record = roost.Store(str(self.state)).read(task["id"])
+        self.assertNotIn("removing", record)
+        self.assertEqual(record["seen"], "seen meanwhile")
+        self.assertTrue(self.request("resume", id=task["id"])["ok"])
+        self.wait(task, "ready")
+        failing = False
+        with patch.object(roost, "git", side_effect=removing):
+            reply = self.request("retire", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(Path(task["worktree"]).exists())
+        self.assertEqual(self.request("list")["result"], [])
+
+    def test_a_removal_holds_while_a_command_it_started_runs(self):
+        # Emacs kills a local request it gave up waiting for, but not the
+        # Git deleting files for it, and a retry must not race that Git.
+        git = roost.git
+        task = self.create()
+
+        def removing(repo, *args, **kwargs):
+            if args[:2] == ("worktree", "remove"):
+                roost.execute(["sh", "-c", "sleep 1.5 > /dev/null 2>&1 &"])
+                raise roost.RoostError("simulated end of the request")
+            return git(repo, *args, **kwargs)
+
+        with patch.object(roost, "git", side_effect=removing):
+            self.assertFalse(self.request("retire", id=task["id"])["ok"])
+        self.assertIn("still removing", self.request("retire", id=task["id"])["error"])
+        deadline = time.monotonic() + 8
+        while not self.request("retire", id=task["id"])["ok"]:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.2)
+        self.assertEqual(self.request("list")["result"], [])
+
+    def test_a_removal_that_stopped_short_can_be_finished(self):
+        task = self.create()
+        self.request("stop", id=task["id"])
+        store = roost.Store(str(self.state))
+        record = store.read(task["id"])
+        # Marked as going, with nothing holding its lock.
+        record["removing"] = "an earlier request"
+        store.save(record)
+        self.assertIn("when it stopped", self.request("resume", id=task["id"])["error"])
         self.assertTrue(self.request("retire", id=task["id"])["ok"])
         self.assertEqual(self.request("list")["result"], [])
 
