@@ -1,4 +1,5 @@
 """Real Git/tmux lifecycle tests. Isolated sockets; no API calls or user config."""
+import base64
 import concurrent.futures
 import datetime
 import fcntl
@@ -8,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import signal
 from pathlib import Path
@@ -184,6 +186,70 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(record["exitCode"], -signal.SIGINT)
         output = roost.tmux(self.socket, "capture-pane", "-p", "-S", "-", "-t", task["paneId"]).stdout
         self.assertNotIn("in runner", output)
+
+    def wait_for(self, task, check):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            record = roost.Store(str(self.state)).read(task["id"])
+            if check(record):
+                return record
+            time.sleep(.04)
+        self.fail("Not as expected: %s" % record)
+
+    def test_an_agent_that_reports_its_status_needs_no_guessing(self):
+        # Claude Code says whether it works or waits on you to a terminal that
+        # answers its probe. tmux doesn't, so the runner relays one that does.
+        task = self.create(programStatus=True)
+        self.wait_for(task, lambda record: record.get("programStatusRun") == record["runId"])
+        # Esc runs no hook, and the transcript need not be read.
+        with patch.object(roost, "was_interrupted", side_effect=AssertionError("guessed")):
+            self.assertTrue(self.request("send", id=task["id"], text="interrupt")["ok"])
+            self.wait(task, "ready", "Interrupt")
+            self.request("list")
+        # An approval shows before the command ends, and no process is looked for.
+        self.assertTrue(self.request("send", id=task["id"], text="ask sleep 3")["ok"])
+        record = self.wait(task, "permission")
+        self.assertEqual(record["request"], "Asks to run sleep 3")
+        with patch.object(roost, "processes", side_effect=AssertionError("guessed")):
+            roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "yes", "Enter")
+            record = self.wait(task, "running", "Approved")
+            self.request("list")
+        self.assertNotIn("request", record)
+        self.assertEqual(record["activity"], "Running sleep 3")
+        record = self.wait(task, "ready", "Stop")
+        self.assertNotIn("activity", record)
+        # Declining a request runs no hook either.
+        self.assertTrue(self.request("send", id=task["id"], text="ask make")["ok"])
+        self.wait(task, "permission")
+        roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "decline", "Enter")
+        self.wait(task, "ready", "Interrupt")
+        output = roost.tmux(self.socket, "capture-pane", "-p", "-t", task["paneId"]).stdout
+        self.assertIn("FAKE_CLAUDE_READY", output)
+
+    def test_the_probe_is_answered_behind_output_still_going_to_tmux(self):
+        task = self.create(programStatus=True, command=[sys.executable, str(FAKE), "--noise"])
+        self.wait_for(task, lambda record: record.get("programStatusRun") == record["runId"])
+
+    def test_a_relayed_agent_follows_its_panes_size_and_gets_c_c(self):
+        task = self.create(programStatus=True)
+        roost.tmux(self.socket, "resize-window", "-t", task["windowId"], "-x", "91", "-y", "23")
+        self.assertTrue(self.request("send", id=task["id"], text="size")["ok"])
+        self.wait(task, "ready", "Stop")
+        output = roost.tmux(self.socket, "capture-pane", "-p", "-t", task["paneId"]).stdout
+        self.assertIn("SIZE 91x23", output)
+        roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "C-c")
+        record = self.wait(task, "failed")
+        self.assertEqual(record["exitCode"], -signal.SIGINT)
+
+    def test_resume_can_turn_the_relay_off(self):
+        task = self.create(programStatus=True)
+        self.assertTrue(self.request("stop", id=task["id"])["ok"])
+        self.assertTrue(self.request("resume", id=task["id"], programStatus=False)["ok"])
+        record = self.wait(task, "ready")
+        self.assertFalse(record["programStatus"])
+        self.assertTrue(self.request("send", id=task["id"], text="hello")["ok"])
+        record = self.wait(task, "ready", "Stop")
+        self.assertNotEqual(record.get("programStatusRun"), record["runId"])
 
     def test_a_turn_you_stop_leaves_the_agent_waiting_for_you(self):
         # Claude runs no hook for Esc or a declined request; its transcript
@@ -2167,6 +2233,179 @@ class LastMessage(unittest.TestCase):
         self.assertIsNone(roost.last_message(dict(agent="claude", worktree="/w", agentSession="bad")))
         self.assertIsNone(roost.last_message(dict(agent="unknown", worktree="/w")))
         self.assertIsNone(roost.last_message(dict(agent="claude")))
+
+
+class ProgramStatus(unittest.TestCase):
+    def filter(self):
+        self.replies, self.reports = [], []
+        return roost.ProgramStatusFilter(self.replies.append, self.reports.append)
+
+    def test_reports_and_the_probe_leave_the_output_however_it_is_split(self):
+        blocked = (b"\x1b]7501;state=blocked:kind=permission:app=claude-code:msg="
+                   + base64.b64encode(b"Bash command") + b"\x1b\\")
+        output = (b"before\x1b]7501;?\x1b\\\x1b[c\x1b]0;title\x07" + blocked
+                  + b"\x1b]7501;state=done\x07after\x1b")
+        for size in range(1, len(output) + 1):
+            statuses = self.filter()
+            shown = b"".join(statuses.feed(output[i:i + size]) for i in range(0, len(output), size))
+            self.assertEqual(shown + statuses.flush(everything=True), b"before\x1b[c\x1b]0;title\x07after\x1b")
+            self.assertEqual(self.replies, [roost.PROGRAM_STATUS_REPLY])
+            self.assertEqual([(r["state"], r.get("kind"), r.get("msg")) for r in self.reports],
+                             [("blocked", "permission", "Bash command"), ("done", None, None)])
+
+    def test_what_is_not_a_report_passes_on_as_it_is(self):
+        statuses = self.filter()
+        # One longer than the protocol allows is not read.
+        huge = b"\x1b]7501;state=done:msg=" + base64.b64encode(b"x" * 3100) + b"\x1b\\"
+        self.assertGreater(len(huge), roost.PROGRAM_STATUS_LIMIT)
+        self.assertEqual(statuses.feed(huge), b"")
+        cut = b"\x1b]7501;state=working\x1b[31mred"
+        self.assertEqual(statuses.feed(cut) + statuses.flush(everything=True), cut)
+        # An ESC at the end waits a moment for what may follow; a sequence
+        # under way waits for its end.
+        self.assertEqual(statuses.feed(b"text\x1b"), b"text")
+        self.assertTrue(statuses.waiting)
+        self.assertEqual(statuses.flush(), b"\x1b")
+        self.assertEqual(statuses.feed(b"\x1b]7501;state=wo"), b"")
+        self.assertFalse(statuses.waiting)
+        self.assertEqual(statuses.flush(), b"")
+        # One that never ends within the protocol's limit is not one.
+        endless = b"\x1b]7501;state=wo" + b"x" * roost.PROGRAM_STATUS_LIMIT
+        self.assertEqual(statuses.feed(b"x" * roost.PROGRAM_STATUS_LIMIT), endless)
+        self.assertEqual(self.reports, [])
+
+    def test_recording_starts_no_thread_before_the_first_report(self):
+        # The agent's process starts from the runner's before any report;
+        # its terminal is set up between fork and exec, unsafe with threads.
+        with tempfile.TemporaryDirectory() as root:
+            before = threading.active_count()
+            report, finish = roost.program_status_recorder(roost.Store(root), "0" * 16, "run")
+            self.assertEqual(threading.active_count(), before)
+            finish()
+            report(dict(state="idle"))
+            self.assertEqual(threading.active_count(), before + 1)
+            finish()
+            self.assertEqual(threading.active_count(), before)
+
+    def test_keys_typed_before_the_relay_starts_reach_the_agent(self):
+        pane, terminal = os.openpty()
+        os.write(pane, b"typed early\r")
+        relay = ("import importlib.util, os, sys\n"
+                 "spec = importlib.util.spec_from_file_location('roost_remote', sys.argv[1])\n"
+                 "roost = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(roost)\n"
+                 "sys.exit(roost.relay([sys.executable, '-c', 'print(\"GOT \" + input())'], '.',"
+                 " dict(os.environ), lambda fields: None))\n")
+        try:
+            done = subprocess.run([sys.executable, "-c", relay, str(SOURCE)], stdin=terminal, stdout=terminal,
+                                  stderr=terminal, timeout=10)
+            self.assertEqual(done.returncode, 0)
+            shown = b""
+            while select.select([pane], [], [], 0.2)[0]:
+                shown += os.read(pane, 65536)
+            self.assertIn(b"GOT typed early", shown)
+        finally:
+            os.close(pane)
+            os.close(terminal)
+
+    def test_the_relay_ends_with_its_agent_whatever_it_left_writing(self):
+        pane, terminal = os.openpty()
+        # A command left running in the background, which outlives the
+        # agent's hangup, as with nohup, and writes until its terminal goes.
+        writer = ("import signal, sys\nsignal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+                  "while True:\n    sys.stdout.write('x' * 100 + '\\n')\n    sys.stdout.flush()\n")
+        # The agent ends once the command ignores the hangup its end sends.
+        agent = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); time.sleep(1)" % writer
+        relay = ("import importlib.util, os, sys\n"
+                 "spec = importlib.util.spec_from_file_location('roost_remote', sys.argv[1])\n"
+                 "roost = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(roost)\n"
+                 "sys.exit(roost.relay([sys.executable, '-c', sys.argv[2]], '.', dict(os.environ),"
+                 " lambda fields: None))\n")
+        process = subprocess.Popen([sys.executable, "-c", relay, str(SOURCE), agent],
+                                   stdin=terminal, stdout=terminal, stderr=terminal)
+        try:
+            deadline = time.monotonic() + 10
+            while process.poll() is None and time.monotonic() < deadline:
+                if select.select([pane], [], [], 0.1)[0]:
+                    os.read(pane, 65536)
+            self.assertEqual(process.poll(), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            os.close(pane)
+            os.close(terminal)
+
+    def test_reading_a_report(self):
+        parse = roost.parse_program_status
+        self.assertIsNone(parse(b"state=sleeping"))
+        self.assertIsNone(parse(b"kind=permission"))
+        self.assertIsNone(parse("state=done:msg=é".encode()))
+        self.assertEqual(parse(b"state=idle:state=done:junk"), dict(state="done"))
+        msg = base64.b64encode("Run\n\x1b[2Jrm ‮-rf now".encode()).decode()
+        self.assertEqual(parse(("state=blocked:msg=" + msg).encode())["msg"], "Run [2Jrm -rf now")
+        self.assertEqual(parse(b"state=done:msg=not*base64"), dict(state="done"))
+
+    def apply(self, task, state, **fields):
+        roost.apply_program_status(task, dict(state=state, **fields), "run")
+        return {key: task.get(key) for key in ("status", "lastEvent", "request", "activity", "error")}
+
+    def test_the_agents_word_on_whether_it_works_waits_or_is_done(self):
+        task = dict(status="starting", runId="run")
+        self.assertEqual(self.apply(task, "idle")["lastEvent"], "SessionStart")
+        self.assertEqual(task["programStatusRun"], "run")
+        self.assertEqual(self.apply(task, "working", msg="Thinking"),
+                         dict(status="running", lastEvent="Working", request=None, activity="Thinking", error=None))
+        self.assertEqual(self.apply(task, "blocked", kind="permission", msg="Bash command"),
+                         dict(status="permission", lastEvent="Blocked", request="Bash command", activity=None,
+                              error=None))
+        self.assertEqual(self.apply(task, "working")["lastEvent"], "Approved")
+        self.assertIsNone(task.get("request"))
+        self.assertEqual(self.apply(task, "idle")["lastEvent"], "Interrupt")
+        self.apply(task, "blocked", kind="question")
+        self.assertEqual(self.apply(task, "idle")["lastEvent"], "Interrupt")
+        self.apply(task, "working")
+        self.assertEqual(self.apply(task, "done")["lastEvent"], "Stop")
+        self.assertEqual(self.apply(task, "error", msg="Rate limited"),
+                         dict(status="failed", lastEvent="Error", request=None, activity=None,
+                              error="Its turn ended on an error: Rate limited"))
+        self.assertIsNone(self.apply(task, "working")["error"])
+
+    def test_what_hooks_know_better_is_kept(self):
+        # A hook names the tool just before the agent says it waits.
+        task = dict(status="running", request="Asks to run make", requestCommand="make")
+        self.apply(task, "working", msg="Thinking")
+        self.assertEqual(self.apply(task, "blocked", kind="permission", msg="Bash command")["request"],
+                         "Asks to run make")
+        self.assertEqual(self.apply(dict(status="running"), "blocked", kind="question")["request"],
+                         "Asks you a question")
+        # The agent's own words give way to its next request, and to a hook's.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            task = dict(id="0" * 16, agent="claude", worktree="/w", status="running", runId="run",
+                        programStatusRun="run")
+            self.assertEqual(self.apply(task, "blocked", kind="permission", msg="approve Bash: ls")["request"],
+                             "approve Bash: ls")
+            self.assertEqual(self.apply(task, "blocked", kind="permission", msg="approve Bash: make")["request"],
+                             "approve Bash: make")
+            store.save(task)
+            roost.update_hook(store, task["id"], dict(hook_event_name="PermissionRequest", tool_name="Bash",
+                                                      tool_input=dict(command="make")), "run")
+            task = store.read(task["id"])
+            self.assertEqual((task["status"], task["request"]), ("permission", "Asks to run make"))
+            self.assertEqual(self.apply(task, "blocked", kind="permission", msg="approve Bash: make")["request"],
+                             "Asks to run make")
+            self.assertNotIn("requestFrom", roost.outgoing(task))
+        self.assertEqual(self.apply(dict(status="background"), "done")["status"], "background")
+        # Each report replaces the last: a step's description goes with it.
+        self.assertIsNone(self.apply(dict(status="running", activity="Reading notes.py"), "working")["activity"])
+        self.assertFalse(roost.apply_program_status(dict(status="running", programStatusRun="run"),
+                                                    dict(state="blocked", id="subagent"), "run"))
+        beside = roost.beside_program_status
+        hook = dict(status="running", updatedAt="t", lastEvent="PreToolUse", error=None, agentSession="s")
+        self.assertEqual(beside(hook, "permission"), dict(agentSession="s"))
+        self.assertEqual(beside(dict(hook, status="background"), "ready")["status"], "background")
+        self.assertEqual(beside(dict(hook, status="failed"), "running")["status"], "failed")
 
 
 if __name__ == "__main__":
