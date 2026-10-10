@@ -752,7 +752,14 @@
        (let ((transient--original-buffer (current-buffer)))
          (with-temp-buffer
            (should (string-match-p "\\`Task fix auth (ready)\\'"
-                                   (substring-no-properties (roost--dispatch-task-description))))))))
+                                   (substring-no-properties (roost--dispatch-task-description)))))))
+     ;; What to do next shows below, as in the task panel.
+     (roost--cache-task "dev" (append '((dirty . 2)) (roost-test--task)))
+     (with-temp-buffer
+       (setq roost--buffer-task-key (roost--key task))
+       (let ((transient--original-buffer (current-buffer)))
+         (should (equal (substring-no-properties (roost--dispatch-task-description))
+                        "Task fix auth (ready)\nReview and commit its changes in Magit: r")))))
    (let ((transient--original-buffer nil))
      (with-temp-buffer
        (should (equal (roost--dispatch-task-description) "Task (chosen when needed)"))))
@@ -1241,6 +1248,9 @@
      (should-not (roost--action-applies-p task 'roost-merge-retire))
      (should-not (roost--action-applies-p task 'roost-retire))
      (should (string-match-p "worktree of its own" (roost--next-step task)))
+     ;; The menu, away from the panel's buttons, names the key that shows them.
+     (should-not (string-match-p "shows it" (roost--next-step task)))
+     (should (string-suffix-p "or remove it; i shows it" (roost--next-step task t)))
      ;; A quiet poll, without Git statistics, keeps it.
      (roost--cache-task "dev" (append '((live . t)) (roost-test--task nil "ready")))
      (with-temp-buffer

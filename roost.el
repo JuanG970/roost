@@ -3446,10 +3446,14 @@ the buffer the menu was opened from."
     (ignore-errors (roost--task-at-point))))
 
 (defun roost--dispatch-task-description ()
-  "Heading for `roost-dispatch' naming the task its commands act on."
+  "Heading for `roost-dispatch' naming the task its commands act on.
+Below it, as in the task panel, what to do next, naming the key that
+does it in this menu."
   (if-let* ((task (roost--dispatch-task)))
-      (format "Task %s (%s)" (propertize (roost--field task 'name) 'face 'roost-title)
-              (roost--display-status task))
+      (concat (format "Task %s (%s)" (propertize (roost--field task 'name) 'face 'roost-title)
+                      (roost--display-status task))
+              (when-let* ((next (roost--next-step task t)))
+                (concat "\n" next)))
     "Task (chosen when needed)"))
 
 (defun roost--dispatch-inapt-p (command)
@@ -3495,8 +3499,10 @@ Unknown Git statistics count as making sense."
       ('roost-retire (and (not active) (not (roost--agent-work-left task))))
       (_ t))))
 
-(defun roost--next-step (task)
-  "What to do next with TASK, as a line naming its key, or nil."
+(defun roost--next-step (task &optional menu)
+  "What to do next with TASK, as a line naming its key, or nil.
+MENU non-nil means the line is for `roost-dispatch', away from the
+task panel's buttons."
   (let ((key (lambda (key) (propertize key 'face 'roost-key)))
         (status (roost--attention-status task))
         (pr (roost--field task 'prStatus)))
@@ -3523,7 +3529,9 @@ Unknown Git statistics count as making sense."
      ((roost--field task 'dirty)
       (concat "Review and commit its changes in Magit: " (funcall key "r")))
      ((roost--agent-work-left task)
-      "Its agent left work in a worktree of its own: merge it into this task in Magit, or remove it")
+      (concat "Its agent left work in a worktree of its own: merge it into this task in Magit, or remove it"
+              ;; The panel lists those worktrees, with buttons, below this line.
+              (when menu (concat "; " (funcall key "i") " shows it"))))
      ((equal (alist-get 'state pr) "MERGED")
       (concat "Its pull request is merged; " (funcall key "x") " retires it"))
      ((equal (alist-get 'state pr) "OPEN")
