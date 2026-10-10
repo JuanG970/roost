@@ -7,6 +7,7 @@ import datetime
 import errno
 import fcntl
 import hashlib
+import heapq
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import termios
 import threading
+import time
 import tty
 import unicodedata
 import uuid
@@ -244,8 +246,14 @@ class Store:
                     {key: value for key, value in task.items() if key not in TRANSIENT})
 
     def remove(self, task_id):
-        """Delete a task's record and hook settings. Conversations are kept."""
+        """Delete a task's record and hook settings. Conversations are kept,
+        and found by searching under the repository noted beside the worktrees,
+        also for tasks created before Roost noted it."""
         path = self.path(task_id)
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            repo = json.loads(path.read_text()).get("repo")
+            if isinstance(repo, str):
+                remember_repository(self, repo)
         for stale in (path, path.with_suffix(".settings"), path.with_suffix(".removing")):
             with contextlib.suppress(FileNotFoundError):
                 stale.unlink()
@@ -426,16 +434,17 @@ def last_message(task):
 CLAUDE_FOLDER_LIMIT = 200
 
 
-def claude_project_folder(directory):
+def claude_project_folder(directory, whole=False):
     """The folder in ~/.claude/projects that holds the transcripts of Claude
     Code sessions run in DIRECTORY, named as Claude Code names it: from the
     physical path, every UTF-16 unit but an ASCII letter or digit becomes
-    "-", and a longer name is cut and given a hash of the whole path."""
+    "-", and a longer name is cut and given a hash of the whole path.
+    WHOLE means the name before it is cut."""
     path = os.path.realpath(directory)
     data = path.encode("utf-16-le", "surrogatepass")
     units = [data[i] | data[i + 1] << 8 for i in range(0, len(data), 2)]
     name = "".join(chr(unit) if unit < 128 and chr(unit).isalnum() else "-" for unit in units)
-    if len(name) <= CLAUDE_FOLDER_LIMIT:
+    if whole or len(name) <= CLAUDE_FOLDER_LIMIT:
         return name
     value = 0
     for unit in units:
@@ -842,6 +851,7 @@ def create(store, request):
     repo_hash = hashlib.sha256(repo.encode()).hexdigest()[:10]
     worktree = store.root / "worktrees" / repo_hash / (slug + "-" + task_id[:6])
     worktree.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    remember_repository(store, repo)
     socket = text(request.get("socket")) or "main"
     prompt = text(request.get("prompt"))
     # The prompt is one argument to the agent, and Linux refuses one of 128 KB.
@@ -1643,6 +1653,236 @@ def forget(store, task):
     store.remove(task["id"])
     task.update(status="forgotten", updatedAt=now(), leftBehind=left, live=False)
     return task
+
+
+REPOSITORY_MARKER = ".repository"
+
+
+def remember_repository(store, repo):
+    """Note REPO beside its worktrees: searching a retired task's
+    conversations names its project from there."""
+    folder = store.root / "worktrees" / hashlib.sha256(repo.encode()).hexdigest()[:10]
+    marker = folder / REPOSITORY_MARKER
+    if not marker.is_file() or read_repository(marker) != repo:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic_text(marker, repo + "\n")
+
+
+def read_repository(marker):
+    """The repository noted in MARKER: its text but the newline written after
+    it, since a directory's name may end in a space."""
+    return marker.read_text().removesuffix("\n")
+
+SEARCH_TASK_LIMIT = 50
+SEARCH_HITS_PER_TASK = 10
+SEARCH_SNIPPET = 160
+SEARCH_TEXT_LIMIT = 1500
+# Well within Emacs's wait for a reply, which a host does not notice.
+SEARCH_SECONDS = 20
+
+
+class SearchTimeUp(Exception):
+    """A search has used its time."""
+
+
+def conversation_text(entry):
+    """(role, text) of what you or Claude wrote in transcript ENTRY, or None
+    for tool calls and their output, thinking, and Claude Code's own notes."""
+    if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant"):
+        return None
+    if entry.get("isMeta") or entry.get("isCompactSummary"):
+        return None
+    message = entry.get("message")
+    if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+        return None
+    found = message_text(message.get("content"))
+    # Claude Code records slash commands, their output, shell-mode commands
+    # and background task notices as tagged messages from you.
+    if not found or CLAUDE_NOTE.match(found):
+        return None
+    return message["role"], found
+
+
+CLAUDE_NOTE = re.compile(r"<(command-[a-z-]+|local-command-[a-z-]+|bash-[a-z]+|task-notification"
+                         r"|system-reminder|user-prompt-submit-hook)>")
+
+
+def word_patterns(words):
+    """Patterns for WORDS (in lower case) where they start: "test" finds
+    "tests", but not "latest"."""
+    return [re.compile((r"(?<!\w)" if re.match(r"\w", word) else "") + re.escape(word)) for word in words]
+
+
+def snippet(found, patterns):
+    """One line of FOUND, starting a little before the first match of PATTERNS."""
+    flat = " ".join(found.split())
+    lower = flat.lower()
+    at = min([match.start() for match in (pattern.search(lower) for pattern in patterns) if match] or [0])
+    start = max(0, at - SEARCH_SNIPPET // 3)
+    if start:
+        space = flat.find(" ", start, at)
+        start = space + 1 if space >= 0 else start
+    end = start + SEARCH_SNIPPET
+    return ("…" if start else "") + flat[start:end].rstrip() + ("…" if end < len(flat) else "")
+
+
+def search_transcript(path, words, owner, deadline=None):
+    """Messages in the transcript at PATH containing every one of WORDS (in
+    lower case), as (TASK, BRANCH, HIT), one at a time: TASK is what OWNER
+    says of the directory Claude recorded the message in, and messages for
+    which it says None are left out. Past DEADLINE, a `time.monotonic'
+    value, it raises SearchTimeUp."""
+    # JSON escapes quotes, backslashes and control characters, and may
+    # escape any non-ASCII character, as Python's does: so a line that
+    # lacks an ASCII word's escaped form cannot contain it, while other
+    # words are left to the parsed message.
+    needles = [json.dumps(word)[1:-1] for word in words if word.isascii()]
+    patterns = word_patterns(words)
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for number, line in enumerate(handle, 1):
+            if deadline and number % 1024 == 0 and time.monotonic() > deadline:
+                raise SearchTimeUp
+            lower = line.lower()
+            if not all(needle in lower for needle in needles):
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            found = conversation_text(entry)
+            if not found or not all(pattern.search(found[1].lower()) for pattern in patterns):
+                continue
+            task = owner(entry.get("cwd"))
+            if not task:
+                continue
+            body = found[1]
+            # The session and line name the message, even where times are equal or missing.
+            yield (task, text(entry.get("gitBranch")),
+                   dict(at=text(entry.get("timestamp")), role=found[0], session=path.stem,
+                        line=number, snippet=snippet(body, patterns),
+                        text=body if len(body) <= SEARCH_TEXT_LIMIT
+                        else body[:SEARCH_TEXT_LIMIT].rstrip() + "…"))
+
+
+def search(store, request):
+    """Messages in the Claude conversations of the store's tasks, live and
+    retired, that contain every word of the request's query; tasks with the
+    newest such message first. Retiring a task deletes its record and
+    worktree, but Claude keeps its conversations, in a folder named after
+    the worktree's path. That naming is lossy ("/a/b" and "/a-b" share a
+    name), so messages are told apart by the directory Claude recorded
+    with each: a live task's worktree, or a retired task's, which was
+    WORKTREES/REPO-HASH/SLUG-ID."""
+    words = (text(request.get("query")) or "").lower().split()
+    if not words:
+        raise RoostError("Search for at least one word")
+    # The time covers finding conversations too, on a slow disk say.
+    deadline = time.monotonic() + SEARCH_SECONDS
+    incomplete = False
+    tasks = [task for task in store.all() if isinstance(task.get("worktree"), str)]
+    projects = Path.home() / ".claude" / "projects"
+    worktrees = store.root / "worktrees"
+    root = os.path.realpath(worktrees)
+    worktree_of = {task["id"]: os.path.realpath(task["worktree"]) for task in tasks}
+    owners = {}
+
+    def owner(cwd):
+        """("task", ID) or ("past", REPO-HASH, DIRECTORY) for a message
+        recorded in CWD, or None for one recorded elsewhere, or nowhere."""
+        if not isinstance(cwd, str):
+            return None
+        if cwd not in owners:
+            path = os.path.realpath(cwd)
+            owners[cwd] = next((("task", task_id) for task_id, worktree in worktree_of.items()
+                                if path == worktree or path.startswith(worktree.rstrip(os.sep) + os.sep)),
+                               None)
+            parts = Path(os.path.relpath(path, root)).parts
+            if (not owners[cwd] and len(parts) > 1 and re.fullmatch(r"[0-9a-f]{10}", parts[0])
+                    and re.fullmatch(r".+-[0-9a-f]{6}", parts[1])):
+                owners[cwd] = ("past",) + parts[:2]
+        return owners[cwd]
+
+    repos = {}
+    with contextlib.suppress(OSError):
+        for marker in worktrees.glob("*/" + REPOSITORY_MARKER):
+            repos[marker.parent.name] = read_repository(marker)
+    for task in tasks:
+        if isinstance(task.get("repo"), str):
+            repos[hashlib.sha256(task["repo"].encode()).hexdigest()[:10]] = task["repo"]
+    # Folders of directories in the worktrees begin so; Claude cuts long
+    # names, and so the start of this one, at the same length.
+    prefix = (claude_project_folder(str(worktrees), whole=True) + "-")[:CLAUDE_FOLDER_LIMIT]
+    folders = {projects / claude_project_folder(task["worktree"]) for task in tasks}
+    with contextlib.suppress(OSError):
+        for folder in projects.iterdir():
+            if time.monotonic() > deadline:
+                incomplete = True
+                break
+            if folder.name[:CLAUDE_FOLDER_LIMIT].startswith(prefix):
+                folders.add(folder)
+    # Each task keeps only its newest messages as they are found, so a
+    # broad search of long conversations holds no more than it returns.
+    # Subagents' conversations are in subfolders; only the task's own are
+    # searched. The newest go first, so that a search cut short by its
+    # time has looked at the conversations most likely wanted.
+    transcripts = []
+    for folder in folders:
+        with contextlib.suppress(OSError):
+            for path in folder.glob("*.jsonl"):
+                if time.monotonic() > deadline:
+                    incomplete = True
+                    break
+                with contextlib.suppress(OSError):
+                    transcripts.append((path.stat().st_mtime, str(path), path))
+    transcripts.sort(reverse=True)
+    groups = {}
+    order = lambda hit: (hit["at"] or "", hit["session"], hit["line"])
+    for _, _, path in transcripts:
+        if time.monotonic() > deadline:
+            incomplete = True
+            break
+        try:
+            for task, branch, hit in search_transcript(path, words, owner, deadline):
+                group = groups.setdefault(task, dict(hits=[], count=0, branch=None))
+                group["count"] += 1
+                group["branch"] = group["branch"] or branch
+                entry = (order(hit), group["count"], hit)
+                if len(group["hits"]) < SEARCH_HITS_PER_TASK:
+                    heapq.heappush(group["hits"], entry)
+                else:
+                    heapq.heappushpop(group["hits"], entry)
+        except SearchTimeUp:
+            incomplete = True
+            break
+        except OSError:
+            pass
+    # Transcripts were read without the registry lock, so tasks may have
+    # been retired or created meanwhile: their records now say which are live.
+    by_id = {task["id"]: task for task in tasks}
+    current = {task["id"]: task for task in store.all() if isinstance(task.get("worktree"), str)}
+    layout = lambda task: Path(os.path.relpath(os.path.realpath(task["worktree"]), root)).parts
+    live_at = {layout(task): task for task in current.values()}
+    live = lambda task: dict(id=task["id"], name=task.get("name"), repo=task.get("repo"), branch=task.get("branch"))
+    results = []
+    for key, group in groups.items():
+        hits = [hit for _, _, hit in sorted(group["hits"])]
+        if key[0] == "task" and key[1] in current:
+            result = live(current[key[1]])
+        elif key[0] == "task":
+            gone = by_id[key[1]]
+            parts = layout(gone)
+            result = dict(key="/".join(parts) if len(parts) == 2 else "task/" + gone["id"], name=gone.get("name"),
+                          repo=gone.get("repo"), past=True, branch=gone.get("branch"))
+        elif key[1:] in live_at:
+            result = live(live_at[key[1:]])
+        else:
+            result = dict(key=key[1] + "/" + key[2], name=key[2][:-7].replace("-", " "),
+                          repo=repos.get(key[1]), past=True, branch=group["branch"])
+        result.update(hits=hits, more=group["count"] - len(hits))
+        results.append(result)
+    results.sort(key=lambda result: result["hits"][-1]["at"] or "", reverse=True)
+    return dict(tasks=results[:SEARCH_TASK_LIMIT], moreTasks=max(0, len(results) - SEARCH_TASK_LIMIT),
+                incomplete=incomplete)
 
 
 def version_of(text):
@@ -2470,6 +2710,10 @@ def rpc(request):
             return {"ok": True, "result": doctor(store, request)}
         if action == "issues":
             return {"ok": True, "result": issues(request)}
+        if action == "search":
+            # Records are written whole, and reading transcripts takes a
+            # while: hooks must not wait on the registry lock meanwhile.
+            return {"ok": True, "result": search(store, request)}
         if action == "pr":
             with store.locked():
                 task = store.read(request["id"])

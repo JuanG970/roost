@@ -17,6 +17,8 @@
          (roost--installed (make-hash-table :test 'equal))
          (roost--refreshing (make-hash-table :test 'equal))
          (roost--revisions (make-hash-table :test 'equal))
+         (roost--snapshots (make-hash-table :test 'equal))
+         (roost--list-requests (make-hash-table :test 'equal))
          (roost--full-refresh-pending (make-hash-table :test 'equal))
          (roost--failures (make-hash-table :test 'equal))
          (roost--hosts-loaded t) (roost--remembered-hosts nil)
@@ -357,6 +359,10 @@
        (dolist (callback callbacks) (funcall (nth 1 callback) (list (roost-test--task))))
        (should-not (gethash '("a" "0123456789abcdef") roost--tasks))
        (should (gethash '("b" "0123456789abcdef") roost--tasks))
+       ;; Each list request is counted, and Roost notes which one the list it
+       ;; holds answers: b's first, while its second measures the new task.
+       (should (equal (list (gethash "a" roost--list-requests) (gethash "b" roost--list-requests)) '(1 2)))
+       (should (equal (list (gethash "a" roost--snapshots) (gethash "b" roost--snapshots)) '(nil 1)))
        ;; Only b, which has a new task, goes on to fetch its Git statistics.
        (should (equal (hash-table-keys roost--refreshing) '("b")))
        (should (equal (car (car callbacks)) "b"))))))
@@ -785,6 +791,220 @@
    (should-not (eq (indirect-function 'roost-dispatch) (indirect-function 'roost-new-task)))
    (should (eq (lookup-key roost-dashboard-mode-map "h") 'roost-dispatch))
    (should (eq (lookup-key roost-task-info-mode-map "h") 'roost-dispatch))))
+
+(ert-deftest roost-search-shows-each-hosts-messages-and-opens-live-tasks ()
+  (roost-test--isolated
+   (let ((roost-hosts '("dev" "box")) requests opened fetched)
+     (roost--cache-task "dev" (roost-test--task))
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (host action params success failure)
+                  (push (list host action params success failure) requests)))
+               ((symbol-function 'roost--refresh-host) (lambda (host &rest _) (push host fetched)))
+               ((symbol-function 'roost-open-task) (lambda (task) (setq opened task))))
+       (unwind-protect
+           (save-window-excursion
+             (roost-search "  csv COMMAS ")
+             (set-buffer roost--search-buffer)
+             (should (equal (mapcar (lambda (r) (list (nth 0 r) (nth 1 r) (nth 2 r))) (reverse requests))
+                            '(("dev" "search" ((query . "csv COMMAS")))
+                              ("box" "search" ((query . "csv COMMAS"))))))
+             (should (string-match-p "Searching dev, box…" (buffer-string)))
+             (let ((dev (assoc "dev" requests)) (box (assoc "box" requests)))
+               (funcall (nth 3 dev)
+                        '((tasks ((id . "0123456789abcdef") (name . "fix auth") (repo . "/home/user/shop")
+                                  (hits ((at . "2026-10-01T10:01:00Z") (role . "user") (session . "s1") (line . 3)
+                                         (snippet . "Quote CSV fields with commas")
+                                         (text . "Quote CSV fields with commas, please."))
+                                        ((at . "2026-10-01T10:02:00Z") (role . "assistant") (session . "s1") (line . 4)
+                                         (snippet . "Done: CSV commas quoted") (text . "Done: CSV commas quoted.")))
+                                  (more . 0))
+                                 ;; Live, but not fetched yet, as before Roost first watches.
+                                 ((id . "1111111111111111") (name . "fresh task") (repo . "/home/user/shop")
+                                  (hits ((at . "2026-10-02T10:00:00Z") (role . "user") (session . "s3") (line . 1)
+                                         (snippet . "Fresh CSV commas") (text . "Fresh CSV commas")))
+                                  (more . 0))
+                                 ;; Live too, but retired before Roost fetches it.
+                                 ((id . "2222222222222222") (name . "gone task") (repo . "/home/user/shop")
+                                  (hits ((at . "2026-09-30T10:00:00Z") (role . "user") (session . "s4") (line . 1)
+                                         (snippet . "Gone CSV commas") (text . "Gone CSV commas")))
+                                  (more . 0))
+                                 ((past . t) (key . "0a1b2c3d4e/csv-import-9f8e7d") (name . "csv import") (repo)
+                                  (hits ((at . "2026-10-03T10:00:00Z") (role . "user") (session . "s2") (line . 7)
+                                         (snippet . "Import CSV with commas")
+                                         (text . "Import CSV with commas\nin quotes")))
+                                  (more . 3)))
+                          (moreTasks . 0)))
+               (should (string-match-p "Searching box…" (buffer-string)))
+               ;; Roost fetches the tasks of a host that has one it lacks.
+               (should (equal fetched '("dev")))
+               (funcall (nth 4 box) "ssh: no route")
+               (let ((shown (buffer-string)))
+                 (should-not (string-match-p "Searching" shown))
+                 (should (string-match-p "^Could not search box: ssh: no route$" shown))
+                 ;; The task with the newest message first; a past task has no status.
+                 (should (string-match-p (concat "csv import  dev  past task\n"
+                                                 "  3 earlier messages match too\n"
+                                                 "  2026-10-0.*You    Import CSV with commas\n"
+                                                 "\nfresh task  dev · shop\n"
+                                                 "  2026-10-0.*You    Fresh CSV commas\n"
+                                                 "\nfix auth  dev · shop  ready\n"
+                                                 "  2026-10-0.*You    Quote CSV fields with commas\n"
+                                                 "  2026-10-0.*Claude Done: CSV commas quoted\n")
+                                         shown)))
+               ;; The words searched for are highlighted where a word starts.
+               (goto-char (point-min))
+               (search-forward "Quote CSV")
+               (should (memq 'roost-search-match (ensure-list (get-text-property (1- (point)) 'face))))
+               (let ((shown (roost--search-highlight "latest tests" '("test"))))
+                 (should-not (get-text-property 3 'face shown))
+                 (should (memq 'roost-search-match (ensure-list (get-text-property 7 'face shown)))))
+               ;; Point starts on the first message: a past task's, which shows
+               ;; its whole message rather than opening anything.
+               (goto-char (point-min))
+               (roost--render-search)
+               (should (string-match-p "Import CSV" (thing-at-point 'line)))
+               (should-not (roost--task-at-point))
+               (let ((id (get-text-property (point) 'roost-search-id)))
+                 (roost-search-open)
+                 (should (equal (get-text-property (point) 'roost-search-id) id))
+                 (should (string-match-p "with commas\nin quotes\n" (buffer-string)))
+                 ;; A long line of it is wrapped, which the buffer's lines are not.
+                 (should (equal (roost--search-wrap (concat (make-string 30 ?a) " " (make-string 30 ?b) "\nshort") 40)
+                                (concat (make-string 30 ?a) "\n" (make-string 30 ?b) "\nshort")))
+                 ;; A word longer than the width, such as a URL, is broken within.
+                 (should (equal (roost--search-wrap (concat "see " (make-string 50 ?x)) 20)
+                                (concat "see\n" (make-string 20 ?x) "\n" (make-string 20 ?x) "\n" (make-string 10 ?x))))
+                 ;; Widths are columns: a CJK character takes two.
+                 (let ((wrapped (roost--search-wrap (make-string 30 ?漢) 40)))
+                   (should (seq-every-p (lambda (line) (<= (string-width line) 40)) (split-string wrapped "\n")))
+                   (should (equal (string-replace "\n" "" wrapped) (make-string 30 ?漢))))
+                 (roost-search-toggle)
+                 (should-not (string-match-p "in quotes" (buffer-string))))
+               ;; One not fetched yet can't open until it is, and Roost fetches it.
+               (roost-search-next)
+               (should (string-match-p "Fresh CSV" (thing-at-point 'line)))
+               (setq fetched nil)
+               (should-error (roost-search-open) :type 'user-error)
+               (should (equal fetched '("dev")))
+               (should (string-match-p "^gone task  dev · shop$" (buffer-string)))
+               ;; The host's list arrives, and its redraw shows the task; a
+               ;; task the list lacks has been retired since.
+               (roost--apply-snapshot "dev" (list (roost-test--task)
+                                                  (append '((name . "fresh task"))
+                                                          (roost-test--task "1111111111111111" "running"))))
+               (roost--redraw)
+               (should (string-match-p "^fresh task  dev · shop  running$" (buffer-string)))
+               (should (string-match-p "^gone task  dev · shop  past task$" (buffer-string)))
+               (should (string-match-p "Fresh CSV" (thing-at-point 'line)))
+               ;; Later lists redraw it too, so statuses stay current.
+               (roost--apply-snapshot "dev" (list (roost-test--task)
+                                                  (append '((name . "fresh task"))
+                                                          (roost-test--task "1111111111111111" "ready"))))
+               (roost--redraw)
+               (should (string-match-p "^fresh task  dev · shop  ready$" (buffer-string)))
+               ;; A live task's message opens the task, and task commands act on it.
+               (roost-search-next)
+               (should (string-match-p "Quote CSV" (thing-at-point 'line)))
+               ;; Showing a whole message keeps point on it, wherever it is.
+               (roost-search-toggle)
+               (should (string-match-p "Quote CSV" (thing-at-point 'line)))
+               (should (string-match-p "commas, please\\.\n" (buffer-string)))
+               ;; It wraps to the window, also once the window is resized.
+               (should (memq #'roost--search-resized window-size-change-functions))
+               (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 28)))
+                 (roost--search-resized (selected-window))
+                 ;; Within its indentation of 8 columns.
+                 (should (string-match-p "^Quote CSV fields\nwith commas, please\\.$" (buffer-string))))
+               (roost--render-search)
+               (roost-search-toggle)
+               (should (string-match-p "Quote CSV" (thing-at-point 'line)))
+               (should (equal (roost--key (roost--task-at-point)) '("dev" "0123456789abcdef")))
+               (roost-search-open)
+               (should (equal (roost--key opened) '("dev" "0123456789abcdef")))
+               (roost-search-previous 2)
+               (should (string-match-p "Import CSV" (thing-at-point 'line)))
+               (should-error (roost-search-previous) :type 'user-error)
+               ;; A task Roost had when the reply came, and whose host's next
+               ;; list lacks it, has been retired since too.
+               (roost--apply-snapshot "dev" (list (append '((name . "fresh task"))
+                                                          (roost-test--task "1111111111111111" "ready"))))
+               (roost--redraw)
+               (should (string-match-p "^fix auth  dev · shop  past task$" (buffer-string)))
+               ;; Searching again ignores replies to the search before.
+               (roost-search-again)
+               (funcall (nth 3 dev) '((tasks) (moreTasks . 0)))
+               (should (string-match-p "Searching dev, box…" (buffer-string)))))
+         (when (get-buffer roost--search-buffer) (kill-buffer roost--search-buffer)))))
+   (should-error (roost-search " ") :type 'user-error)
+   (should (eq (lookup-key roost-dashboard-mode-map "/") 'roost-search))
+   (should (eq (lookup-key roost-sidebar-list-mode-map "/") 'roost-search))
+   (should (eq (lookup-key roost-task-info-mode-map "/") 'roost-search))))
+
+(ert-deftest roost-search-shows-a-task-retired-after-its-reply-as-past ()
+  (roost-test--isolated
+   (let ((roost-hosts '("dev")) requests fetched)
+     (roost--cache-task "dev" (roost-test--task))
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (host _action _params success _failure) (push (list host success) requests)))
+               ((symbol-function 'roost--refresh-host) (lambda (host &rest _) (push host fetched))))
+       (unwind-protect
+           (save-window-excursion
+             (roost-search "csv")
+             (set-buffer roost--search-buffer)
+             (funcall (nth 1 (car requests))
+                      '((tasks ((id . "0123456789abcdef") (name . "fix auth") (repo . "/home/user/shop")
+                                (hits ((at . "2026-10-01T10:01:00Z") (role . "user") (session . "s1") (line . 1)
+                                       (snippet . "Quote CSV") (text . "Quote CSV")))
+                                (more . 0)))
+                        (moreTasks . 0)))
+             ;; Roost had the task, so nothing was fetched.
+             (should-not fetched)
+             (should (string-match-p "^fix auth  dev · shop  ready$" (buffer-string)))
+             ;; A list asked for before the reply may predate the task.
+             (roost--apply-snapshot "dev" nil (gethash "dev" roost--list-requests 0))
+             (roost--redraw)
+             (should (string-match-p "^fix auth  dev · shop$" (buffer-string)))
+             ;; One asked for after it lacks the task: retired since.
+             (roost--apply-snapshot "dev" nil)
+             (roost--redraw)
+             (should (string-match-p "^fix auth  dev · shop  past task$" (buffer-string))))
+         (when (get-buffer roost--search-buffer) (kill-buffer roost--search-buffer)))))))
+
+(ert-deftest roost-search-says-no-message-only-of-hosts-it-searched ()
+  (roost-test--isolated
+   (let ((roost-hosts '("dev" "box" nil)) requests)
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (host _action _params success failure) (push (list host success failure) requests))))
+       (unwind-protect
+           (save-window-excursion
+             (roost-search "zebra")
+             (set-buffer roost--search-buffer)
+             (funcall (nth 2 (assoc "dev" requests)) "ssh: no route")
+             (funcall (nth 1 (assoc "box" requests)) '((tasks) (moreTasks . 0) (incomplete . t)))
+             (funcall (nth 1 (assoc nil requests)) '((tasks) (moreTasks . 0) (incomplete)))
+             (should (string-match-p "^No message in your tasks' conversations on box, local contains every word\\.$"
+                                     (buffer-string)))
+             ;; A host that ran out of time says so.
+             (should (string-match-p "^box ran out of time; it searched its newest conversations only$"
+                                     (buffer-string)))
+             (should-not (string-match-p "^local ran out" (buffer-string)))
+             ;; A host added meanwhile was not asked, so it is not awaited.
+             (setq roost-hosts (cons "new" roost-hosts))
+             (roost--render-search)
+             (should-not (string-match-p "Searching" (buffer-string)))
+             ;; With every host failing, nothing was searched.
+             (setq requests nil)
+             (roost-search-again)
+             (dolist (request requests) (funcall (nth 2 request) "down"))
+             (should (string-match-p "^Could not search local: down$" (buffer-string)))
+             (should-not (string-match-p "No message" (buffer-string)))
+             ;; With every host searched, no host need be named.
+             (setq requests nil)
+             (roost-search-again)
+             (dolist (request requests) (funcall (nth 1 request) '((tasks) (moreTasks . 0))))
+             (should (string-match-p "^No message in your tasks' conversations contains every word\\.$"
+                                     (buffer-string))))
+         (when (get-buffer roost--search-buffer) (kill-buffer roost--search-buffer)))))))
 
 (ert-deftest roost-mode-line-counts-agents-waiting ()
   (roost-test--isolated
