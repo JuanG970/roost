@@ -50,6 +50,7 @@
 (declare-function magit-current-section "magit-section" ())
 (declare-function eieio-oref "eieio-core" (obj slot))
 (declare-function magit-section-match "magit-section" (condition &optional section))
+(declare-function magit-section-show "magit-section" (section))
 (declare-function magit-map-sections "magit-section" (function &optional section))
 (declare-function magit-insert-heading "magit-section" (&rest args))
 (declare-function magit-add-section-hook "magit-section" (hook function &optional at append local))
@@ -63,6 +64,10 @@
 (declare-function persp-names "perspective" ())
 (declare-function persp-format-name "perspective" (name))
 (declare-function evil-set-initial-state "evil-core" (mode state))
+(declare-function svg-create "svg" (width height &rest args))
+(declare-function svg-rectangle "svg" (svg x y width height &rest args))
+(declare-function svg-line "svg" (svg x1 y1 x2 y2 &rest args))
+(declare-function svg-image "svg" (svg &rest props))
 (declare-function evil-define-minor-mode-key "evil-core" (state mode key def &rest bindings))
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
 (declare-function org-back-to-heading "org" (&optional invisible-ok))
@@ -2146,6 +2151,23 @@ note.")
 (defvar roost--notes-loaded nil
   "Non-nil once `roost-notes-file' has been read.")
 
+(defvar roost--note-box nil
+  "The review note being written, as a plist, or nil.
+`:buffer' is the box's buffer, `:task' the note's task, `:place' what it
+is about and `:old' the note it edits, if any.  `:window' and `:source'
+are the Magit window and buffer it was opened from.  Where Emacs shows
+child frames, the box is `:frame', over `:room' pixels left for it.")
+
+(defvar-keymap roost--note-shown-map
+  :doc "Mouse keys on a review note shown in Magit."
+  "<mouse-1>" #'roost-note-mouse-menu
+  "<down-mouse-3>" #'roost-note-mouse-menu)
+
+(defvar roost--note-button nil
+  "Overlay showing the note button beside the line under the mouse.")
+(defvar roost--note-mouse-timer nil
+  "Timer moving the note button with the mouse, where the text cannot.")
+
 (defun roost--notes ()
   "All review notes not yet sent, read from `roost-notes-file' once."
   (unless roost--notes-loaded
@@ -2267,15 +2289,22 @@ no longer counts the note as its own, so sending it leaves the note."
 (defvar-keymap roost-magit-mode-map
   :doc "Roost's keys in Magit on a task's worktree."
   ";" #'roost-note
+  "'" #'roost-goto-note
+  "C-c ;" #'roost-note-actions
   "=" #'roost-diff-whole-file
   "@" #'roost-send
   ;; As in the task's terminal.
-  "C-c ?" #'roost-dispatch)
+  "C-c ?" #'roost-dispatch
+  ;; The note button, beside the diff line under the mouse.
+  "<left-margin> <mouse-1>" #'roost-note-mouse
+  "<left-margin> <drag-mouse-1>" #'roost-note-mouse)
 
 (easy-menu-define roost-magit-menu roost-magit-mode-map
   "Menu for Roost in Magit on a task's worktree."
   '("Roost"
     ["Note on This Line…" roost-note]
+    ["Go to Note…" roost-goto-note]
+    ["Note Actions…" roost-note-actions]
     ["Whole-File Diff" roost-diff-whole-file]
     ["Send to the Agent…" roost-send]
     ["Discard Notes…" roost-discard-notes]
@@ -2299,9 +2328,11 @@ less diff context.
       (setq roost--magit-evil-keys t)
       (evil-define-minor-mode-key '(normal visual motion) 'roost-magit-mode
         ";" #'roost-note
+        "'" #'roost-goto-note
         "@" #'roost-send
         "g=" #'roost-diff-whole-file))
-    (evil-normalize-keymaps)))
+    (evil-normalize-keymaps))
+  (roost--note-hover-setup))
 
 (defvar-local roost--note-overlays nil
   "Overlays showing review notes in this Magit buffer.")
@@ -2327,6 +2358,12 @@ less diff context.
     (remove-hook 'magit-status-headers-hook #'roost--magit-insert-task-header)
     (remove-hook 'magit-status-sections-hook #'roost--magit-insert-reply)
     (remove-hook 'magit-status-sections-hook #'roost--magit-insert-unmerged))
+  (roost--note-box-close)
+  (when (timerp roost--note-mouse-timer)
+    (cancel-timer roost--note-mouse-timer)
+    (setq roost--note-mouse-timer nil))
+  (when (overlayp roost--note-button)
+    (delete-overlay roost--note-button))
   (dolist (buffer (buffer-list))
     (when (buffer-local-value 'roost-magit-mode buffer)
       (with-current-buffer buffer
@@ -2341,7 +2378,11 @@ Run from Magit's hook, so an error only reports itself."
     (let ((task (roost--task-in-directory default-directory)))
       (unless (eq (not task) (not roost-magit-mode))
         (roost-magit-mode (if task 1 -1)))
-      (roost--show-notes-here task))))
+      (roost--show-notes-here task)
+      ;; Magit has inserted the buffer's text anew.
+      (roost--note-hover-setup)
+      (when (eq (plist-get roost--note-box :source) (current-buffer))
+        (roost--note-box-follow)))))
 
 (defun roost--magit-insert-task-header ()
   "In Magit's status of a task's worktree, insert a header naming the task.
@@ -2523,53 +2564,120 @@ text stands in for it."
 
 (defun roost--note-overlay (position notes)
   "An overlay showing NOTES after the line ending at POSITION.
-It holds the line's newline, so the notes fold away with the line."
-  (let ((overlay (make-overlay position (min (1+ position) (point-max))))
-        (text (mapconcat
-               (lambda (note)
-                 (mapconcat (lambda (line)
-                              ;; The note's own faces, rather than those of
-                              ;; the diff line it is shown before.
-                              (concat (propertize "  ┃ " 'face '((:slant normal) roost-note default))
-                                      (propertize line 'face '(roost-note default))
-                                      "\n"))
-                            (split-string (with-temp-buffer
-                                            (insert (alist-get 'text note))
-                                            (let ((fill-column 72))
-                                              (fill-region (point-min) (point-max)))
-                                            (buffer-string))
-                                          "\n")
-                            ""))
-               notes "")))
+It holds the line's newline, so the notes fold away with the line.
+Thin rules in the notes' color set each note apart from the diff."
+  (let* ((overlay (make-overlay position (min (1+ position) (point-max))))
+         (color (face-foreground 'roost-note nil t))
+         (last (car (last notes)))
+         (text (mapconcat
+                (lambda (note)
+                  (let ((lines (split-string (with-temp-buffer
+                                               (insert (alist-get 'text note))
+                                               (let ((fill-column 72))
+                                                 (fill-region (point-min) (point-max)))
+                                               (buffer-string))
+                                             "\n")))
+                    (propertize
+                     (mapconcat
+                      (lambda (line)
+                        ;; A rule over each note, and one under the last.
+                        (let ((rule (when color
+                                      (append (when (eq line (car lines)) `(:overline ,color))
+                                              (when (and (eq note last) (eq line (car (last lines))))
+                                                `(:underline (:color ,color :position t)))))))
+                          ;; The note's own faces, rather than those of the
+                          ;; diff line it is shown before.
+                          ;; The same in every frame showing the buffer: a
+                          ;; terminal may draw no rule over the note, but
+                          ;; shows its color and the one under it.
+                          (concat (propertize "    " 'face `(,rule (:slant normal) roost-note default))
+                                  (propertize line 'face `(,rule roost-note default))
+                                  ;; Rules go across the window, as the note's
+                                  ;; background does, whatever the next line is.
+                                  (when rule
+                                    (propertize " " 'display '(space :align-to right)
+                                                'face `(,rule roost-note default)))
+                                  (propertize "\n" 'face '(:inherit (roost-note default) :extend t)))))
+                      lines "")
+                     'roost-note-id (alist-get 'id note)
+                     'keymap roost--note-shown-map
+                     'mouse-face 'highlight
+                     'pointer 'hand
+                     'help-echo "mouse-1: edit, send or discard this note")))
+                notes "")))
     (overlay-put overlay 'roost-notes notes)
     (overlay-put overlay 'after-string text)
     overlay))
 
+(defun roost--note-room-overlay (position height window)
+  "An overlay leaving HEIGHT pixels for the note box, under the line at POSITION.
+POSITION is the line's end.  The room comes after the line's notes, and
+only in WINDOW, where the box is: other windows showing the buffer
+leave none."
+  (let ((overlay (make-overlay (min (1+ position) (point-max)) (min (1+ position) (point-max)))))
+    (overlay-put overlay 'roost-note-box height)
+    (overlay-put overlay 'roost-note-anchor position)
+    (overlay-put overlay 'window window)
+    (overlay-put overlay 'before-string
+                 (concat (propertize " " 'display `(space :width (1) :height (,height))) "\n"))
+    overlay))
+
 (defun roost--show-notes-here (task)
-  "Show TASK's review notes in this Magit buffer, under their lines."
+  "Show TASK's review notes in this Magit buffer, under their lines.
+When the note box was opened from here, leave room for it under its line,
+in place of the note it edits."
   (mapc #'delete-overlay roost--note-overlays)
   (setq roost--note-overlays nil)
-  (when-let* ((notes (and task (roost--task-notes task)))
-              ((bound-and-true-p magit-root-section)))
-    ;; For each file in the diffs here: its headings' ends, and its lines.
-    (let (files)
-      (magit-map-sections
-       (lambda (section)
-         (when (magit-section-match '(file hunk) section)
-           (let* ((hunk (magit-section-match 'hunk section))
-                  (file (roost--slot (if hunk (roost--slot section 'parent) section) 'value))
-                  (entry (or (assoc file files) (car (push (list file nil nil) files)))))
-             (if hunk
-                 (setf (nth 2 entry) (append (nth 2 entry) (roost--hunk-lines section)))
-               (push (save-excursion (goto-char (roost--slot section 'start)) (line-end-position))
-                     (nth 1 entry)))))))
-      (let (shown)
+  (let* ((box (and (eq (plist-get roost--note-box :source) (current-buffer))
+                   (plist-get roost--note-box :frame)
+                   roost--note-box))
+         (notes (and task (remq (plist-get box :old) (roost--task-notes task)))))
+    (when (and (or notes box) (bound-and-true-p magit-root-section))
+      (let ((files (roost--magit-file-lines)) shown room)
         (dolist (note notes)
           (when-let* ((entry (assoc (alist-get 'file note) files)))
             (dolist (position (roost--note-positions note (nth 1 entry) (nth 2 entry)))
               (push note (alist-get position shown)))))
         (pcase-dolist (`(,position . ,notes) shown)
-          (push (roost--note-overlay position (reverse notes)) roost--note-overlays))))))
+          (push (roost--note-overlay position (reverse notes)) roost--note-overlays))
+        ;; The box goes after the notes already under its line.
+        (when-let* ((place (plist-get box :place))
+                    (entry (assoc (alist-get 'file place) files)))
+          ;; The copy the box was opened at, of a note shown more than once.
+          (let ((positions (roost--note-positions place (nth 1 entry) (nth 2 entry))))
+            (setq room (or (nth (or (plist-get box :copy) 0) positions) (car positions))))
+          (when room
+            (push (roost--note-room-overlay room (plist-get box :room) (plist-get box :window))
+                  roost--note-overlays)))))))
+
+(defun roost--magit-file-lines ()
+  "For each file in this Magit buffer's diffs, (FILE HEADINGS LINES).
+HEADINGS are the ends of its headings, and LINES its lines, from
+`roost--hunk-lines'."
+  (let (files)
+    (magit-map-sections
+     (lambda (section)
+       (when (magit-section-match '(file hunk) section)
+         (let* ((hunk (magit-section-match 'hunk section))
+                (file (roost--slot (if hunk (roost--slot section 'parent) section) 'value))
+                (entry (or (assoc file files) (car (push (list file nil nil) files)))))
+           (if hunk
+               (setf (nth 2 entry) (append (nth 2 entry) (roost--hunk-lines section)))
+             (push (save-excursion (goto-char (roost--slot section 'start)) (line-end-position))
+                   (nth 1 entry)))))))
+    files))
+
+(defun roost--note-copy (place)
+  "Which of the places this Magit buffer shows PLACE is nearest point.
+A note on a whole file shows under each of its headings, as when it is
+both staged and unstaged.  The result indexes `roost--note-positions'."
+  (when-let* (((bound-and-true-p magit-root-section))
+              (entry (assoc (alist-get 'file place) (roost--magit-file-lines)))
+              (positions (roost--note-positions place (nth 1 entry) (nth 2 entry))))
+    (let* ((here (line-end-position))
+           (nearest (car (sort (copy-sequence positions)
+                               (lambda (a b) (< (abs (- a here)) (abs (- b here))))))))
+      (seq-position positions nearest))))
 
 (defun roost--show-notes-everywhere ()
   "Show the current review notes in every Magit buffer on a task."
@@ -2592,53 +2700,752 @@ It holds the line's newline, so the notes fold away with the line."
   "Write a note for the agent on the diff line at point, or the region's lines.
 A region stays within one hunk.  On a file's name the note is about the
 whole file, and on a hunk's heading about the whole hunk.  On a line
-already noted, edit its note; leave it empty to remove it.  Notes show
-under their lines in Magit, and go to the agent with your next prompt
-to it: \\<roost-magit-mode-map>\\[roost-send] opens one."
+already noted, edit its note.  You write the note in a box that opens
+under its line: \\<roost-note-box-mode-map>\\[roost-note-box-save] saves it, and saving it empty removes it.
+With the mouse, click the + that shows beside a diff line, or drag
+along lines from there, and click a note to edit it.  Notes show under
+their lines in Magit, and go to the agent with your next prompt to it:
+\\<roost-magit-mode-map>\\[roost-send] opens one."
   (interactive)
   (unless (derived-mode-p 'magit-mode)
     (user-error "Write notes in Magit, on a task's changes"))
   (roost--magit-setup)
-  (let* ((task (or (roost--task-in-directory default-directory)
-                   (user-error "This repository is not a Roost task's worktree")))
-         (shown (unless (use-region-p) (roost--notes-at-point)))
-         (place (roost--magit-note-place))
-         (old (seq-find
-               (lambda (note)
-                 (and (equal (roost--note-key note) (roost--key task))
-                      (or (seq-every-p (lambda (field)
-                                         (equal (alist-get field note) (alist-get field place)))
-                                       '(file line end removed))
-                          ;; The one note shown here, though its line has moved.
-                          (and (not (cdr shown))
-                               (equal (alist-get 'id note) (alist-get 'id (car shown)))))))
-               (roost--notes)))
-         (text (string-trim
-                (read-string (format "Note on %s: " (roost--note-location (or old place)))
-                             (alist-get 'text old)))))
-    (deactivate-mark)
-    (cond ((and old (string-empty-p text))
-           (roost--remove-notes (lambda (note) (eq note old))))
-          ((string-empty-p text))
-          (old (roost--edit-note old text))
-          (t
-           (setq roost--notes
-                 (append (roost--notes)
-                         (list (append `((id . ,(roost--note-id))
-                                         (host . ,(roost--field task 'host))
-                                         (task . ,(roost--field task 'id)))
-                                       place
-                                       `((text . ,text))))))
-           (roost--save-notes)))
-    (roost--show-notes-everywhere)
-    (roost--redraw)
-    (let ((count (length (roost--task-notes task))))
-      (message "%s" (substitute-command-keys
-                     (if (zerop count)
-                         (format "%s has no review notes" (roost--field task 'name))
-                       (format "%d review note%s for %s; \\<roost-magit-mode-map>\\[roost-send] sends %s"
-                               count (if (= count 1) "" "s") (roost--field task 'name)
-                               (if (= count 1) "it" "them"))))))))
+  (let ((task (or (roost--task-in-directory default-directory)
+                  (user-error "This repository is not a Roost task's worktree"))))
+    ;; A note being written elsewhere is kept, before looking for the
+    ;; note here, which it may be.
+    (roost--note-box-set-aside)
+    (let* ((shown (unless (use-region-p) (roost--notes-at-point)))
+           (place (roost--magit-note-place))
+           (old (seq-find
+                 (lambda (note)
+                   (and (equal (roost--note-key note) (roost--key task))
+                        (or (seq-every-p (lambda (field)
+                                           (equal (alist-get field note) (alist-get field place)))
+                                         '(file line end removed))
+                            ;; The one note shown here, though its line has moved.
+                            (and (not (cdr shown))
+                                 (equal (alist-get 'id note) (alist-get 'id (car shown)))))))
+                 (roost--notes))))
+      (deactivate-mark)
+      (roost--note-box task place old))))
+
+(defun roost--note-task-live-p (task)
+  "Whether Roost still has TASK, which notes can then be for."
+  (and (gethash (roost--key task) roost--tasks) t))
+
+(defun roost--note-save (task place old text)
+  "Save TEXT as TASK's note on PLACE, or as note OLD's new text.
+Empty TEXT removes OLD.  A task Roost no longer has, as one retired
+while you wrote, gets no note."
+  (unless (roost--note-task-live-p task)
+    (user-error "Roost no longer has %s, so the note can't be kept" (roost--field task 'name)))
+  (setq text (string-trim text))
+  ;; OLD may have been sent, or discarded, while you wrote.
+  (unless (memq old (roost--notes)) (setq old nil))
+  (cond ((and old (string-empty-p text))
+         (roost--remove-notes (lambda (note) (eq note old))))
+        ((string-empty-p text))
+        (old (roost--edit-note old text))
+        (t
+         (setq roost--notes
+               (append (roost--notes)
+                       (list (append `((id . ,(roost--note-id))
+                                       (host . ,(roost--field task 'host))
+                                       (task . ,(roost--field task 'id)))
+                                     ;; PLACE may be a note that has gone since:
+                                     ;; only what that was about.
+                                     (seq-remove (lambda (field)
+                                                   (memq (car-safe field) '(id host task text)))
+                                                 place)
+                                     `((text . ,text))))))
+         (roost--save-notes)))
+  (roost--show-notes-everywhere)
+  (roost--redraw)
+  (let ((count (length (roost--task-notes task))))
+    (message "%s" (substitute-command-keys
+                   (if (zerop count)
+                       (format "%s has no review notes" (roost--field task 'name))
+                     (format "%d review note%s for %s; \\<roost-magit-mode-map>\\[roost-send] sends %s"
+                             count (if (= count 1) "" "s") (roost--field task 'name)
+                             (if (= count 1) "it" "them")))))))
+
+;;;; The note box
+
+(defface roost-note-box-header '((t :inherit (roost-dim default)))
+  "The heading of the box where you write a review note.")
+
+(defface roost-note-box-button
+  '((t :inherit default :box (:line-width (6 . 1) :style flat-button)))
+  "Buttons in the heading of the note box.")
+
+(defface roost-note-box-default-button
+  '((t :inherit roost-note-button :inverse-video t
+        :box (:line-width (6 . 1) :style flat-button)))
+  "The button saving the note, in the heading of the note box.")
+
+(defcustom roost-note-box-lines 4
+  "How many lines of text the box for writing a review note shows."
+  :type 'natnum)
+
+(defvar-keymap roost-note-box-mode-map
+  :doc "Keys for writing a review note."
+  "C-c C-c" #'roost-note-box-save
+  "C-c C-k" #'roost-note-box-cancel)
+
+(define-derived-mode roost-note-box-mode text-mode "Roost Note"
+  "Write a review note for the agent; see `roost-note'.
+\\{roost-note-box-mode-map}"
+  (setq-local mode-line-format nil
+              face-remapping-alist (append '((header-line . roost-note-box-header)
+                                             (header-line-active . roost-note-box-header)
+                                             (header-line-inactive . roost-note-box-header))
+                                           face-remapping-alist))
+  (visual-line-mode 1)
+  (add-hook 'kill-buffer-hook #'roost--note-box-killed nil t)
+  (add-hook 'after-change-major-mode-hook #'roost--quiet-display 90 t)
+  (roost--evil-state 'roost-note-box-mode 'insert)
+  (roost--quiet-display))
+
+(defun roost--note-box (task place old)
+  "Open the box for writing TASK's note on PLACE, or editing note OLD.
+It opens under the line, from the selected window: in a child frame,
+over room left for it, where Emacs shows them, or in a window below."
+  (let ((buffer (get-buffer-create "*roost note*")))
+    (setq roost--note-box (list :buffer buffer :task task :place (or old place) :old old
+                                :window (selected-window) :source (current-buffer)
+                                :copy (roost--note-copy (or old place))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)) (erase-buffer))
+      (roost-note-box-mode)
+      (insert (or (alist-get 'text old) ""))
+      (set-buffer-modified-p nil)
+      (setq header-line-format '(:eval (roost--note-box-header))))
+    (if (display-graphic-p)
+        (roost--note-box-float)
+      (select-window (display-buffer buffer `((display-buffer-below-selected)
+                                              (window-height . ,(+ roost-note-box-lines 2))
+                                              (dedicated . t)))))
+    (message "%s" (substitute-command-keys
+                   "\\<roost-note-box-mode-map>\\[roost-note-box-save] saves the note, \\[roost-note-box-cancel] cancels it"))))
+
+(defun roost--note-box-header ()
+  "The heading of the note box: what the note is about, then buttons."
+  (let* ((box roost--note-box)
+         (old (plist-get box :old))
+         (buttons
+          (mapconcat
+           (pcase-lambda (`(,label ,command ,face ,help))
+             (propertize label 'face face 'mouse-face 'highlight 'pointer 'hand
+                         'help-echo (substitute-command-keys help)
+                         'local-map (define-keymap "<header-line> <mouse-1>" command)))
+           (delq nil
+                 (list (when old
+                         '(" Remove " roost-note-box-remove roost-note-box-button
+                           "mouse-1: remove this note"))
+                       '(" Cancel " roost-note-box-cancel roost-note-box-button
+                         "mouse-1 or \\<roost-note-box-mode-map>\\[roost-note-box-cancel]: close without saving")
+                       `(,(if old " Save " " Add note ") roost-note-box-save roost-note-box-default-button
+                         "mouse-1 or \\<roost-note-box-mode-map>\\[roost-note-box-save]: save the note")))
+           " ")))
+    (when box
+      (concat " " (if old "Edit the note on " "Note on ")
+              (roost--note-location (plist-get box :place))
+              (propertize " " 'display `(space :align-to (- right (,(+ (string-pixel-width buttons)
+                                                                         (frame-char-width))))))
+              buttons))))
+
+(defun roost--note-box-text ()
+  "What the note box holds, or nil when it is closed."
+  (when-let* ((buffer (plist-get roost--note-box :buffer))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun roost-note-box-save ()
+  "Save the review note being written; saved empty, it is removed."
+  (interactive)
+  (let ((box roost--note-box)
+        (text (or (roost--note-box-text) (user-error "No note is being written"))))
+    ;; Refused with the box still open, so what you wrote is not lost.
+    (unless (roost--note-task-live-p (plist-get box :task))
+      (user-error "Roost no longer has %s, so the note can't be kept"
+                  (roost--field (plist-get box :task) 'name)))
+    (roost--note-box-close)
+    (roost--note-save (plist-get box :task) (plist-get box :place) (plist-get box :old) text)))
+
+(defun roost-note-box-cancel ()
+  "Close the note box without saving."
+  (interactive)
+  (roost--note-box-close))
+
+(defun roost-note-box-remove ()
+  "Remove the review note being edited."
+  (interactive)
+  (let ((box roost--note-box))
+    (roost--note-box-close)
+    ;; A task Roost no longer has took its notes with it.
+    (when (roost--note-task-live-p (plist-get box :task))
+      (roost--note-save (plist-get box :task) (plist-get box :place) (plist-get box :old) ""))))
+
+(defun roost--note-box-close (&optional keep gone)
+  "Close the note box.  With KEEP, save the note first if you changed it.
+Focus goes back to the Magit window it was opened from.  GONE is the
+buffer or frame being killed or deleted already, the box's own or its
+frame's parent."
+  (when-let* ((box roost--note-box))
+    (let ((text (roost--note-box-text))
+          (frame (plist-get box :frame))
+          (buffer (plist-get box :buffer))
+          (window (plist-get box :window))
+          (source (plist-get box :source)))
+      (setq roost--note-box nil)
+      (remove-hook 'window-size-change-functions #'roost--note-box-follow)
+      (remove-hook 'window-buffer-change-functions #'roost--note-box-follow)
+      (remove-hook 'delete-frame-functions #'roost--note-box-frame-deleted)
+      (when (and (frame-live-p frame) (not (eq frame gone))) (delete-frame frame))
+      (when (buffer-live-p buffer)
+        (dolist (shown (get-buffer-window-list buffer nil t))
+          (quit-restore-window shown))
+        (unless (eq buffer gone) (kill-buffer buffer)))
+      (when (buffer-live-p source)
+        (with-current-buffer source
+          (remove-hook 'window-scroll-functions #'roost--note-box-follow t)
+          (roost--show-notes-here (roost--task-in-directory default-directory))))
+      (when (and (window-live-p window) (not (eq (window-frame window) gone)))
+        (select-frame-set-input-focus (window-frame window))
+        (select-window window))
+      ;; Kept as Save would: emptied, a note is removed.  A new note
+      ;; left empty, or a note left as it was, stays as it is, and so
+      ;; does nothing for a task Roost no longer has.
+      (when (and keep text
+                 (roost--note-task-live-p (plist-get box :task))
+                 (not (equal (string-trim text) (or (alist-get 'text (plist-get box :old)) ""))))
+        (roost--note-save (plist-get box :task) (plist-get box :place) (plist-get box :old) text)))))
+
+(defun roost--note-box-set-aside ()
+  "Close the note box, keeping what it holds, and stay where you are.
+Closing it otherwise selects the window it was opened from."
+  (save-excursion
+    (let ((window (selected-window)))
+      (roost--note-box-close t)
+      (when (and (window-live-p window) (not (eq window (selected-window))))
+        (unless (eq (window-frame window) (selected-frame))
+          (select-frame-set-input-focus (window-frame window)))
+        (select-window window)))))
+
+(defun roost--note-box-killed ()
+  "Forget the note box when its buffer is killed some other way."
+  (when (eq (current-buffer) (plist-get roost--note-box :buffer))
+    (roost--note-box-close nil (current-buffer))))
+
+(defun roost--note-box-frame-deleted (frame)
+  "Close the note box, keeping what it holds, if FRAME is its frame or the parent.
+Run from `delete-frame-functions' while the box is open, as when you
+delete its frame with \\[delete-frame]."
+  (when-let* ((box-frame (plist-get roost--note-box :frame))
+              ((or (eq frame box-frame) (eq frame (frame-parent box-frame)))))
+    (with-demoted-errors "Roost: %S"
+      (roost--note-box-close t frame))))
+
+(defun roost--note-box-float ()
+  "Show the note box in a child frame, over room left under its line."
+  (let* ((box roost--note-box)
+         (window (plist-get box :window))
+         (parent (window-frame window))
+         (edges (window-inside-pixel-edges window))
+         (numbers (with-selected-window window
+                    (if display-line-numbers (line-number-display-width t) 0)))
+         (frame (make-frame
+                 `((parent-frame . ,parent)
+                   (minibuffer . ,(minibuffer-window parent))
+                   (name . "Roost note")
+                   (visibility . nil)
+                   (undecorated . t)
+                   (no-other-frame . t)
+                   (unsplittable . t)
+                   (skip-taskbar . t)
+                   (desktop-dont-save . t)
+                   (no-special-glyphs . t)
+                   (menu-bar-lines . 0)
+                   (tool-bar-lines . 0)
+                   (tab-bar-lines . 0)
+                   (vertical-scroll-bars . nil)
+                   (horizontal-scroll-bars . nil)
+                   (left-fringe . 8)
+                   (right-fringe . 8)
+                   (internal-border-width . 0)
+                   (child-frame-border-width . 1)
+                   (width . (text-pixels . ,(roost--note-box-width window)))
+                   (height . ,(+ roost-note-box-lines 1))
+                   (left . ,(+ (nth 0 edges) numbers))
+                   (top . ,(nth 1 edges)))))
+         (root (frame-root-window frame)))
+    (set-face-background 'child-frame-border (face-foreground 'shadow nil t) frame)
+    ;; The fringes are the box's padding.
+    (set-face-background 'fringe (face-background 'default nil t) frame)
+    (set-window-buffer root (plist-get box :buffer))
+    (set-window-dedicated-p root t)
+    (setq roost--note-box (plist-put (plist-put box :frame frame)
+                                     :room (+ (frame-pixel-height frame) 2 8)))
+    ;; Room under the line, which then has to be in sight.
+    (with-current-buffer (plist-get box :source)
+      (add-hook 'window-scroll-functions #'roost--note-box-follow nil t)
+      (roost--show-notes-here (plist-get box :task)))
+    (add-hook 'window-size-change-functions #'roost--note-box-follow)
+    (add-hook 'window-buffer-change-functions #'roost--note-box-follow)
+    (add-hook 'delete-frame-functions #'roost--note-box-frame-deleted)
+    (unless (roost--note-box-spot)
+      (with-selected-window window (recenter 3)))
+    (roost--note-box-place)
+    (unless (frame-visible-p frame)
+      (set-frame-position frame (+ (nth 0 edges) numbers)
+                          (max (nth 1 edges) (- (nth 3 edges) (frame-pixel-height frame))))
+      (make-frame-visible frame))
+    (select-frame-set-input-focus frame)))
+
+(defun roost--note-box-width (window)
+  "How wide the note box's text is, in pixels, to span WINDOW's text.
+Its fringes and border take 18 pixels more."
+  (let ((edges (window-inside-pixel-edges window)))
+    (max (* 30 (frame-char-width (window-frame window)))
+         (- (nth 2 edges) (nth 0 edges) 18 (frame-char-width (window-frame window))
+            (with-selected-window window
+              (if display-line-numbers (line-number-display-width t) 0))))))
+
+(defun roost--note-box-spot ()
+  "Where the note box goes, as pixels in its window's frame, or nil.
+It goes over the room left under its line, while that room is in sight
+in the window it was opened from."
+  (let* ((box roost--note-box)
+         (source (plist-get box :source))
+         (window (if (and (window-live-p (plist-get box :window))
+                          (eq (window-buffer (plist-get box :window)) source))
+                     (plist-get box :window)
+                   ;; Its buffer may have moved to another window of
+                   ;; the frame the box belongs to.
+                   (when-let* ((window (get-buffer-window
+                                        source (or (frame-parent (plist-get box :frame))
+                                                   (selected-frame)))))
+                     (setq roost--note-box (plist-put box :window window))
+                     window))))
+    (when window
+      (redisplay)
+      (when-let* ((overlay (with-current-buffer source
+                             (seq-find (lambda (overlay) (overlay-get overlay 'roost-note-box))
+                                       roost--note-overlays)))
+                  (room (overlay-get overlay 'roost-note-box))
+                  ((progn (overlay-put overlay 'window window) t))
+                  (line (posn-at-point (overlay-get overlay 'roost-note-anchor) window))
+                  (below (cdr (posn-x-y line)))
+                  ;; The room is the first row that tall below its line,
+                  ;; and has to be in sight whole.  Each row is given by
+                  ;; its bottom.
+                  (top (let ((top 0) found)
+                         (pcase-dolist (`(,_ . ,bottom) (window-lines-pixel-dimensions window nil nil t))
+                           (when (and (not found) (> top below) (>= (- bottom top) (- room 2)))
+                             (setq found top))
+                           (setq top bottom))
+                         found)))
+        (let ((edges (window-inside-pixel-edges window)))
+          (cons (+ (nth 0 edges)
+                   (with-selected-window window
+                     (if display-line-numbers (line-number-display-width t) 0)))
+                (+ (nth 1 edges) top 5)))))))
+
+(defun roost--note-box-place ()
+  "Put the note box over the room left for it.
+While that room is out of sight, the box is hidden; once the Magit
+buffer it came from is gone, it closes, keeping what you wrote."
+  (when-let* ((frame (plist-get roost--note-box :frame))
+              ((frame-live-p frame)))
+    (if (not (buffer-live-p (plist-get roost--note-box :source)))
+        (roost--note-box-close t)
+      (if-let* ((spot (roost--note-box-spot)))
+          (let ((width (roost--note-box-width (plist-get roost--note-box :window))))
+            (unless (= width (frame-text-width frame))
+              (set-frame-width frame width nil t))
+            (set-frame-position frame (car spot) (cdr spot))
+            (make-frame-visible frame))
+        (when (frame-visible-p frame)
+          (when (eq (selected-frame) frame)
+            (let ((window (plist-get roost--note-box :window)))
+              (when (window-live-p window)
+                (select-frame-set-input-focus (window-frame window))
+                (select-window window))))
+          (make-frame-invisible frame))))))
+
+(defun roost--note-box-follow (&rest _)
+  "Move the note box with its line, once Emacs has redrawn its window.
+Run from window hooks, so an error only reports itself."
+  (when roost--note-box
+    (run-at-time 0 nil (lambda () (with-demoted-errors "Roost: %S" (roost--note-box-place))))))
+
+;;;; Writing notes with the mouse
+
+(defface roost-note-button '((t :inherit link :underline nil :weight bold))
+  "The note button beside the diff line under the mouse.
+Its foreground fills the button.")
+
+(defvar-local roost--note-hover nil
+  "Overlay across this Magit buffer through which Emacs reports the mouse.")
+(defvar roost--note-button-images nil
+  "The note button's image, made for the colors and sizes in its key.")
+
+(defvar-local roost--note-margin nil
+  "A list of the left margin this buffer had before the note button widened it.
+Nil while it hasn't; the margin itself can be nil, meaning none.")
+
+(defun roost--note-margin-p ()
+  "Whether this Magit buffer shows note buttons, in its left margin.
+It does in graphic frames: those showing it, or the selected one before
+any does."
+  (and roost-magit-mode
+       (derived-mode-p 'magit-status-mode 'magit-diff-mode)
+       (seq-some (lambda (window) (display-graphic-p (window-frame window)))
+                 (or (get-buffer-window-list nil nil t) (list (selected-window))))))
+
+(defun roost--note-hover-setup ()
+  "Make room for the note button in this Magit buffer, and follow the mouse.
+Emacs calls the help-echo of text as the mouse moves over it, so an
+overlay across the buffer has `roost--note-hover-echo' as its help-echo.
+A window that shows the buffer later is set up then."
+  (let ((on (roost--note-margin-p))
+        (had roost--note-margin))
+    (if (and roost-magit-mode (derived-mode-p 'magit-status-mode 'magit-diff-mode))
+        (add-hook 'window-buffer-change-functions #'roost--note-margins-shown nil t)
+      (remove-hook 'window-buffer-change-functions #'roost--note-margins-shown t))
+    ;; A margin at least as wide is kept, and the one the buffer had comes
+    ;; back once the button is off.
+    (cond ((and on (not had))
+           (setq roost--note-margin (list left-margin-width)
+                 left-margin-width (max (or left-margin-width 0) 2)))
+          ((and had (not on))
+           (setq left-margin-width (car had)
+                 roost--note-margin nil)))
+    (dolist (window (get-buffer-window-list nil nil t))
+      ;; A text frame shows no button, so its windows keep the margin.
+      (let ((left (if (and on (not (display-graphic-p (window-frame window))))
+                      (car roost--note-margin)
+                    left-margin-width)))
+        (unless (eql (car (window-margins window)) left)
+          (set-window-margins window left (cdr (window-margins window))))))
+    (when (and (overlayp roost--note-button) (eq (overlay-buffer roost--note-button) (current-buffer)))
+      (delete-overlay roost--note-button))
+    (cond (on
+           (unless (overlayp roost--note-hover)
+             (setq roost--note-hover (make-overlay (point-min) (point-max) nil nil t))
+             (overlay-put roost--note-hover 'help-echo #'roost--note-hover-echo))
+           (move-overlay roost--note-hover (point-min) (point-max)))
+          ((overlayp roost--note-hover)
+           (delete-overlay roost--note-hover)
+           (setq roost--note-hover nil)))))
+
+(defun roost--note-margins-shown (window)
+  "Set up the note button for WINDOW, if it has started showing this buffer.
+The hook runs, with this buffer current, for a window that stopped
+showing it too; that one is left alone."
+  (when (eq (window-buffer window) (current-buffer))
+    (roost--note-hover-setup)))
+
+(defun roost--note-line-start (position)
+  "Where the diff line at POSITION starts, if notes can be written on it."
+  (save-excursion
+    (goto-char position)
+    (let* ((start (line-beginning-position))
+           (section (get-text-property start 'magit-section)))
+      (and section
+           (magit-section-match 'hunk section)
+           (not (roost--slot section 'combined))
+           (>= start (roost--slot section 'content))
+           (memq (char-after start) '(?+ ?- ?\s))
+           start))))
+
+(defconst roost--note-mouse-interval 0.25
+  "Seconds between looks at the mouse while the note button shows.
+Once the mouse has rested for 2 seconds, it is looked at once a second.")
+
+(defun roost--note-hover-echo (window object position)
+  "Show the note button beside the diff line at POSITION in WINDOW.
+Emacs calls this, the help-echo of `roost--note-hover' OBJECT, as the
+mouse moves over the text.  It returns the text's own help, if any."
+  (when (and (overlayp object) (window-live-p window) (integerp position))
+    (with-current-buffer (overlay-buffer object)
+      (roost--note-show-button (roost--note-line-start position) window)
+      (let ((help (get-text-property position 'help-echo)))
+        (and (stringp help) help)))))
+
+(defun roost--note-show-button (start &optional window)
+  "Show the note button beside the line starting at START, in WINDOW only.
+The line is in the current buffer, which WINDOW shows; with START nil,
+hide the button."
+  (cond ((not start)
+         (when (overlayp roost--note-button) (delete-overlay roost--note-button)))
+        (t
+         (unless (overlayp roost--note-button)
+           (setq roost--note-button (make-overlay start start))
+           (delete-overlay roost--note-button))
+         (unless (and (eq (overlay-buffer roost--note-button) (current-buffer))
+                      (eql (overlay-start roost--note-button) start)
+                      (eq (overlay-get roost--note-button 'window) window))
+           (overlay-put roost--note-button 'before-string (roost--note-button-string window))
+           (overlay-put roost--note-button 'window window)
+           (move-overlay roost--note-button start start (current-buffer)))
+         (unless (timerp roost--note-mouse-timer)
+           (roost--note-watch-mouse roost--note-mouse-interval)))))
+
+(defun roost--note-watch-mouse (interval &optional state)
+  "Look at the mouse every INTERVAL seconds, with STATE as it was last seen."
+  (when (timerp roost--note-mouse-timer) (cancel-timer roost--note-mouse-timer))
+  (setq roost--note-mouse-timer
+        (run-with-timer interval interval #'roost--note-follow-mouse
+                        (or state (list nil 0)) interval)))
+
+(defun roost--note-follow-mouse (state interval)
+  "Move the note button to the diff line under the mouse, or hide it.
+Emacs reports the mouse only over text, not past the ends of lines or
+outside the window, so this runs every INTERVAL seconds while the button
+shows.  STATE holds the mouse's last position and how many looks it has
+rested there; while it rests, the looks slow down."
+  (let* ((mouse (mouse-pixel-position))
+         ;; Outside its frames, Emacs gives the last frame the mouse was
+         ;; in, at a place outside it.
+         (window (and (cadr mouse) (cddr mouse)
+                      (window-at-x-y (cadr mouse) (cddr mouse) (car mouse))))
+         (posn (and window (posn-at-x-y (cadr mouse) (cddr mouse) (car mouse))))
+         (buffer (and posn (eq (posn-window posn) window) (window-buffer window))))
+    (if (equal mouse (car state))
+        (cl-incf (cadr state))
+      (setcar state mouse)
+      (setcar (cdr state) 0))
+    (with-current-buffer (or buffer (current-buffer))
+      (roost--note-show-button
+       (and buffer
+            roost--note-hover
+            (memq (posn-area posn) '(nil left-margin))
+            (posn-point posn)
+            (roost--note-line-start (posn-point posn)))
+       window))
+    (cond ((not (overlay-buffer roost--note-button))
+           (cancel-timer roost--note-mouse-timer)
+           (setq roost--note-mouse-timer nil))
+          ((and (= interval roost--note-mouse-interval) (> (cadr state) 8))
+           (roost--note-watch-mouse 1 state))
+          ((and (/= interval roost--note-mouse-interval) (zerop (cadr state)))
+           (roost--note-watch-mouse roost--note-mouse-interval state)))))
+
+(defun roost--note-button-string (&optional window)
+  "The note button, as a string to show in the left margin of WINDOW."
+  (propertize "+" 'display `((margin left-margin)
+                             ,(if (window-live-p window)
+                                  (with-selected-window window (roost--note-button-image))
+                                (roost--note-button-image)))
+              'help-echo "mouse-1: write a note on this line; drag for more lines"
+              'pointer 'hand))
+
+(defun roost--note-button-image ()
+  "The note button: a rounded square holding a plus, or text without SVG."
+  (if (not (and (display-images-p) (image-type-available-p 'svg) (require 'svg nil t)))
+      (propertize "+ " 'face '(:inherit roost-note-button :inverse-video t))
+    (let* ((width (* 2 (frame-char-width)))
+           (height (default-line-height))
+           (fill (or (face-foreground 'roost-note-button nil t) "RoyalBlue"))
+           (plus (or (face-background 'default nil t) "white"))
+           (key (list width height fill plus)))
+      (or (cdr (assoc key roost--note-button-images))
+          (let* ((size (min width (- height 2)))
+                 (x (/ (- width size) 2.0))
+                 (y (/ (- height size) 2.0))
+                 (inset (/ size 4.0))
+                 (svg (svg-create width height)))
+            (svg-rectangle svg x y size size :rx (/ size 4.0) :fill fill)
+            (dolist (line `((,(+ x inset) ,(+ y (/ size 2.0)) ,(- (+ x size) inset) ,(+ y (/ size 2.0)))
+                            (,(+ x (/ size 2.0)) ,(+ y inset) ,(+ x (/ size 2.0)) ,(- (+ y size) inset))))
+              (apply #'svg-line svg (append line (list :stroke plus :stroke-width (/ size 7.0)
+                                                       :stroke-linecap "round"))))
+            (let ((image (svg-image svg :ascent 'center :pointer 'hand)))
+              (push (cons key image) roost--note-button-images)
+              image))))))
+
+(defun roost-note-mouse (event)
+  "Write a note on the diff line clicked beside, or the lines dragged along.
+EVENT is the click or drag, in the left margin of Magit on a task.
+Elsewhere, the click moves point, as usual."
+  (interactive "e")
+  (let* ((start (event-start event))
+         (from (posn-point start))
+         (to (or (posn-point (event-end event)) from)))
+    (select-window (posn-window start))
+    (if (not (and from (roost--note-line-start from)))
+        (mouse-set-point event)
+      (goto-char (min from to))
+      (beginning-of-line)
+      (if (= (line-number-at-pos from) (line-number-at-pos to))
+          (deactivate-mark)
+        (push-mark (point) t)
+        (activate-mark)
+        (goto-char (max from to))
+        (end-of-line))
+      (roost-note))))
+
+(defun roost-note-mouse-menu (event)
+  "Choose what to do with the review note clicked: edit, send or discard it.
+EVENT is the click on the note, in Magit."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (string (posn-string posn))
+         (id (and string (get-text-property (cdr string) 'roost-note-id (car string))))
+         (note (or (seq-find (lambda (note) (equal (alist-get 'id note) id)) (roost--notes))
+                   (user-error "That note has gone"))))
+    (select-window (posn-window posn))
+    ;; The copy clicked, of a note shown more than once.
+    (roost--note-act note event
+                     (seq-find (lambda (overlay) (eq (overlay-get overlay 'after-string) (car string)))
+                               roost--note-overlays))))
+
+(defun roost-note-actions ()
+  "Choose what to do with a review note under the line at point.
+It can be edited, sent alone to the agent, or discarded, as clicking it
+offers; with more than one note there, first choose which."
+  (interactive)
+  (unless roost-magit-mode
+    (user-error "Use this in Magit, on a task's changes"))
+  (let* ((overlay (or (seq-find (lambda (overlay) (overlay-get overlay 'roost-notes))
+                                (overlays-in (line-end-position) (1+ (line-end-position))))
+                      (user-error "No review note under this line")))
+         (notes (overlay-get overlay 'roost-notes))
+         (where (let ((posn (posn-at-point (line-end-position))))
+                  (if posn
+                      (list (list (car (posn-x-y posn)) (+ (cdr (posn-x-y posn)) (default-line-height)))
+                            (selected-window))
+                    (list '(0 0) (selected-window)))))
+         (note (if (not (cdr notes))
+                   (car notes)
+                 (or (x-popup-menu where `("Review notes"
+                                           ("" ,@(mapcar (lambda (note)
+                                                           (cons (truncate-string-to-width
+                                                                  (car (split-string (alist-get 'text note) "\n"))
+                                                                  60 nil nil "…")
+                                                                 note))
+                                                         notes))))
+                     (keyboard-quit)))))
+    (roost--note-act note where overlay)))
+
+(defun roost--note-act (note where overlay)
+  "Do what is chosen, in a menu at WHERE, with NOTE shown by OVERLAY.
+WHERE is a position for `x-popup-menu'."
+  (pcase (x-popup-menu where `(,(concat "Note on " (roost--note-location note))
+                               ("" ("Edit…" . edit) ("Send to the Agent" . send)
+                                "--" ("Discard" . discard))))
+    ('edit (roost--note-edit-shown note overlay))
+    ('send (roost-note-send note))
+    ('discard (roost--note-save (roost--note-task note) note note ""))))
+
+(defun roost--note-task (note)
+  "The task NOTE is for."
+  (or (gethash (roost--note-key note) roost--tasks)
+      (user-error "Roost no longer has the task this note is for")))
+
+(defun roost--note-shown-overlay (note &optional buffer)
+  "The overlay showing NOTE in BUFFER, a Magit buffer, if any."
+  (with-current-buffer (or buffer (current-buffer))
+    (and roost-magit-mode
+         (seq-find (lambda (overlay)
+                     (seq-some (lambda (shown) (equal (alist-get 'id shown) (alist-get 'id note)))
+                               (overlay-get overlay 'roost-notes)))
+                   roost--note-overlays))))
+
+(defun roost--note-edit-shown (note &optional overlay)
+  "Edit NOTE, shown in this Magit buffer, in the note box under it.
+OVERLAY is the one showing it there, if NOTE shows more than once."
+  (let ((overlay (or overlay (roost--note-shown-overlay note) (user-error "That note has gone"))))
+    (goto-char (overlay-start overlay))
+    (beginning-of-line)
+    (roost--note-box-set-aside)
+    ;; Saving the note being written may have removed this one.
+    (when (memq note (roost--notes))
+      (roost--note-box (roost--note-task note) note note))))
+
+(defvar roost--notes-sending nil
+  "Identifiers of the review notes being sent alone.")
+
+(defun roost-note-send (note)
+  "Send review NOTE alone to its task's agent; once sent, it is cleared.
+A note edited while it was being sent stays, with your edit.  A note is
+sent once at a time."
+  (let ((task (roost--note-task note))
+        (text (alist-get 'text note))
+        (id (alist-get 'id note)))
+    (when (member id roost--notes-sending)
+      (user-error "Already sending the note on %s" (roost--note-location note)))
+    (push id roost--notes-sending)
+    (condition-case err
+        (roost--send-text
+         task (roost--format-note note)
+         (lambda (_task)
+           (setq roost--notes-sending (delete id roost--notes-sending))
+           (when (roost--remove-notes (lambda (shown)
+                                        (and (eq shown note) (equal (alist-get 'text shown) text))))
+             (roost--redraw))
+           (message "Sent the note on %s to %s" (roost--note-location note) (roost--field task 'name)))
+         (lambda (err)
+           (setq roost--notes-sending (delete id roost--notes-sending))
+           (message "Roost could not send the note to %s: %s" (roost--field task 'name) err)))
+      ;; A declined confirmation leaves the note ready to send again.
+      ((quit error)
+       (setq roost--notes-sending (delete id roost--notes-sending))
+       (signal (car err) (cdr err))))))
+
+;;;###autoload
+(defun roost-goto-note (&optional task)
+  "Go to one of TASK's review notes, chosen in the minibuffer.
+The note shows in Magit, under its line, with point on the line:
+\\<roost-magit-mode-map>\\[roost-note] there edits it."
+  (interactive)
+  (setq task (or task (roost--task-in-directory default-directory) (roost--choose)))
+  (let* ((notes (or (roost--task-notes task)
+                    (user-error "%s has no review notes" (roost--field task 'name))))
+         (choices (seq-map-indexed
+                   (lambda (note index)
+                     (cons (format "%d. %s  %s" (1+ index) (roost--note-location note)
+                                   (car (split-string (alist-get 'text note) "\n")))
+                           note))
+                   notes))
+         (note (cdr (assoc (completing-read "Go to note: " (roost--in-order (mapcar #'car choices))
+                                            nil t)
+                           choices))))
+    (roost--goto-note task note)))
+
+(defun roost--goto-note (task note)
+  "Show TASK's NOTE in Magit, with point on its line.
+A Magit buffer already showing it is used, else Magit's status of the
+task's worktree, else a diff of the note's file since the task began."
+  (let* ((find (lambda ()
+                 (seq-find (lambda (buffer) (roost--note-shown-overlay note buffer))
+                           (cons (current-buffer)
+                                 (seq-filter (lambda (buffer)
+                                               (buffer-local-value 'roost-magit-mode buffer))
+                                             (buffer-list))))))
+         (buffer (or (funcall find)
+                     (progn (roost-review task) (funcall find))
+                     ;; Committed changes show in the diff since the
+                     ;; task's fork point.
+                     (progn (roost--diff-file task `((path . ,(alist-get 'file note))))
+                            (funcall find))
+                     (user-error "The note's line is no longer in the task's changes"))))
+    (if-let* ((window (get-buffer-window buffer)))
+        (select-window window)
+      (pop-to-buffer-same-window buffer))
+    (with-current-buffer buffer
+      (let ((overlay (roost--note-shown-overlay note)))
+        (goto-char (overlay-start overlay))
+        ;; Its hunk and file may be folded away.
+        (let ((section (magit-current-section)))
+          (while section
+            (magit-section-show section)
+            (setq section (roost--slot section 'parent))))
+        (goto-char (overlay-start overlay))
+        (beginning-of-line)
+        (when (eq (window-buffer) buffer) (recenter))))))
 
 ;;;###autoload
 (defun roost-diff-whole-file ()
@@ -3829,7 +4636,8 @@ keeps one process-wide registration per mode; a nil STATE removes it."
 (defun roost--quiet-display ()
   "Turn off line numbers and wrapping that global modes enable in Roost buffers."
   (when (derived-mode-p 'roost-dashboard-mode 'roost-task-info-mode 'roost-compose-mode
-                      'roost-send-mode 'roost-pr-mode 'roost-search-mode 'roost-doctor-mode)
+                      'roost-send-mode 'roost-pr-mode 'roost-search-mode 'roost-doctor-mode
+                      'roost-note-box-mode)
     (display-line-numbers-mode -1)
     (when (derived-mode-p 'roost-dashboard-mode 'roost-search-mode)
       (visual-line-mode -1)
@@ -3902,7 +4710,7 @@ With no task at all, none of the task commands do."
 ;; `roost--stop-inapt-p': older transient doesn't say which entry it asks about.
 (dolist (command '(roost-open-task roost-shell roost-files roost-send roost-task-info roost-review
                    roost-diff roost-update roost-pr roost-merge-retire roost-retire roost-forget
-                   roost-stop roost-resume))
+                   roost-stop roost-resume roost-goto-note))
   (defalias (intern (format "roost--%s-inapt-p" (string-remove-prefix "roost-" (symbol-name command))))
     (lambda () (roost--dispatch-inapt-p command))
     (format "Whether `%s' does not apply to the task of `roost-dispatch'." command)))
@@ -3932,6 +4740,7 @@ Unknown Git statistics count as making sense."
                                 (not (roost--agent-work-left task))))
       ;; Retires the task, or discards work merged nowhere.
       ('roost-retire (and (not active) (not (roost--agent-work-left task))))
+      ('roost-goto-note (and worktree (roost--task-notes task) t))
       (_ t))))
 
 (defun roost--next-step (task &optional menu)
@@ -3989,7 +4798,8 @@ terminal or worktree, or ask which task."
    ["Review"
     ("r" "Magit" roost-review :inapt-if roost--review-inapt-p)
     ("D" "Diff" roost-diff :inapt-if roost--diff-inapt-p)
-    ("u" "Update from integration" roost-update :inapt-if roost--update-inapt-p)]
+    ("u" "Update from integration" roost-update :inapt-if roost--update-inapt-p)
+    ("'" "Go to note" roost-goto-note :inapt-if roost--goto-note-inapt-p)]
    ["Finish"
     ("P" "Pull request" roost-pr :inapt-if roost--pr-inapt-p)
     ("m" "Merge and retire" roost-merge-retire :inapt-if roost--merge-retire-inapt-p)
