@@ -130,6 +130,12 @@ Larger, or undecided.
 - **Answering the agent's prompts from Roost** (approval inboxes, approve
   keys). The agent's own terminal stays the way you talk to it, so its
   menus and new features work on day one. Calyx and octomux have inboxes.
+- **Watching a pull request for the agent:** review comments and failed
+  checks turned into prompts, or fixed on their own. The agents do this:
+  Claude Code can subscribe a session to its pull request's reviews and CI,
+  and autofix it. Roost keeps `P`, the `#12` line with checks and review,
+  and `x` once it merges; when the agent's watcher sets it to work, the
+  status lights show it like any other turn.
 - **A docked review column.** Magit, opened with `r`, stages and takes
   notes; see [the Orca comparison](orca-comparison.md#review-notes-and-staging-in-magit).
 - **Built-in browsers and design modes** (Orca, cmux, Superset), **a kanban

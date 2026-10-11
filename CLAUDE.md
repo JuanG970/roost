@@ -43,6 +43,20 @@ The [manual](docs/manual.md#how-it-works) says how it fits together.
 - Wrap ERT tests in `roost-test--isolated`. It fails on an unstubbed
   `y-or-n-p` or `yes-or-no-p`, which would otherwise hang batch Emacs.
 
+## Where features stop
+
+Advice rather than a rule. Roost stays small by leaving to the agents what
+they can do themselves.
+
+- Ask whether a feature would still belong in Roost if every agent could do
+  it. What sits between tasks or around them passes: which agent needs you,
+  worktrees, merging, review in Magit, remote hosts. What happens inside one
+  conversation, such as watching a pull request, fixing CI or answering
+  review comments, is the agent's, through its own features and plugins.
+- Prefer what works the same for every agent, or does nothing for one that
+  can't, and what uses data Roost already has or one `git` or `gh` call. A
+  new dependency, option or key has to earn its place.
+
 ## Trying it for real
 
 - Leave the user's running Emacs, their Roost state and their tmux server
