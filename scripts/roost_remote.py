@@ -1995,6 +1995,35 @@ def push_check(check, repo):
 
 REQUEST_LIMIT = 300
 
+# A cd at the start of a command, as agents write it to be sure where it
+# runs: `cd DIR &&`, `cd "DIR";`, `cd DIR 2>/dev/null || true;`.
+CD_PREFIX = re.compile(r"""\A\s*cd\s+(?P<path>"[^"]*"|'[^']*'|[^\s;&|]+)"""
+                       r"""(?:\s*2>\s*/dev/null)?(?:\s*\|\|\s*(?:true|:|exit(?:\s+\d+)?))?\s*(?:&&|;)\s*""")
+
+
+def shown_command(command, worktree):
+    """COMMAND as a request shows it. Agents often start with a cd into the
+    worktree they already run in, which would fill the line before the
+    command itself; that is left out, and the worktree's path elsewhere
+    becomes relative to it."""
+    if not worktree:
+        return command
+    roots = sorted({str(worktree).rstrip("/"), os.path.realpath(str(worktree)).rstrip("/")},
+                   key=len, reverse=True)
+    match = CD_PREFIX.match(command)
+    if match:
+        target = match.group("path")
+        if target[:1] in "\"'":
+            target = target[1:-1]
+        if target.rstrip("/") in roots:
+            command = command[match.end():]
+    for root in roots:
+        # The whole path, not one that only ends with it.
+        start = r"(?<![^\s;&|'\"(=])" + re.escape(root)
+        command = re.sub(start + r"/+", "", command)
+        command = re.sub(start + r"(?![^\s;&|'\")])", ".", command)
+    return command
+
 
 def permission_request(payload, worktree=None):
     """What a permission request asks, as a sentence: "Asks to run python3
@@ -2014,7 +2043,7 @@ def permission_request(payload, worktree=None):
         return None
     args = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
 
-    def arg(*keys):
+    def raw(*keys):
         for key in keys:
             value = args.get(key)
             if isinstance(value, list) and value and all(isinstance(x, str) for x in value):
@@ -2023,8 +2052,12 @@ def permission_request(payload, worktree=None):
                 if key in ("file_path", "notebook_path", "path") and worktree:
                     with contextlib.suppress(ValueError):
                         value = str(Path(value).relative_to(worktree))
-                return clip(value)
+                return value
         return None
+
+    def arg(*keys):
+        value = raw(*keys)
+        return clip(value) if value else None
 
     if tool == "AskUserQuestion":
         questions = [q.get("question") for q in args.get("questions") or [] if isinstance(q, dict)]
@@ -2039,7 +2072,10 @@ def permission_request(payload, worktree=None):
         return "Asks to edit files"
     detail = None
     if tool in ("Bash", "shell", "exec_command", "local_shell"):
-        verb, detail = "run", arg("command", "cmd")
+        # Shortened before it is clipped, so a long path can't crowd out
+        # the command.
+        command = raw("command", "cmd")
+        verb, detail = "run", command and (clip(shown_command(command, worktree)) or clip(command))
     elif tool in ("Edit", "MultiEdit", "NotebookEdit", "Write", "Read"):
         verb, detail = {"Write": "write", "Read": "read"}.get(tool, "edit"), arg("file_path", "notebook_path")
     elif tool == "WebFetch":
