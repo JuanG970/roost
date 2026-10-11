@@ -68,6 +68,13 @@ Small, and probably worth the most.
   work instead. From dmux, workmux (`-A`), Orca and agent-deck.
 - **Review notes from file buffers**, for diff-hl users who review in the
   file rather than in Magit.
+- **Ghostel in place of Eat.** [Ghostel](https://github.com/dakra/ghostel)
+  runs Ghostty's terminal engine in Emacs as a native module, with the Kitty
+  keyboard and graphics protocols and synchronized output, and its author
+  measures it faster than vterm. tmux-control would draw panes with it
+  instead of Eat. First check that Ghostel can show output it doesn't read
+  from its own process. The module is a prebuilt download, one more thing to
+  install.
 
 ## Exploring
 
@@ -93,6 +100,18 @@ Larger, or undecided.
   an existing branch to continue, and work in place without a worktree,
   such as dotfiles. Today, fetch the ref and start a task from it with
   `C-c C-b` in the draft.
+- **Rex in place of tmux.** [Rex](https://www.superlogical.com/rex/docs),
+  from Superlogical, is a terminal and multiplexer built on Ghostty's
+  engine, in beta on macOS since 2026-10-05. Its server API covers what the
+  helper asks of tmux: start a terminal running a command in a folder, type
+  into it, close it, and push events for its exit code and its program
+  status (OSC 7501, which tmux blocks; see
+  [tmux#5713](https://github.com/tmux/tmux/issues/5713)). Its IDs are never
+  reused, so a stale ID can't reach another terminal. Missing: a documented
+  way for Emacs to attach to a terminal and stream it, as tmux-control does
+  with control mode, and Rex servers on Linux outside Superlogical. Ask for
+  the first in the beta. Look again once both exist, or once tmux turns
+  down OSC 7501 for good.
 
 ## Known gaps
 
@@ -126,6 +145,7 @@ in changelogs.
 | --- | --- | --- |
 | [Orca](https://www.onorca.dev/) ([changelog](https://www.onorca.dev/changelog)) | Desktop app: a worktree per task, SSH hosts, a phone app | Usage meters, automations, several attempts per prompt, native chat |
 | [herdr](https://herdr.dev) | Terminal workspace that keeps agents' terminals in a background server; SSH machines | [Agent CLI and socket API](https://herdr.dev/docs/agent-automation/), [session restore](https://herdr.dev/docs/session-state/) |
+| [Rex](https://www.superlogical.com/rex/docs) | Terminal and multiplexer from Superlogical, on Ghostty's engine; macOS beta | [Server API](https://www.superlogical.com/rex/docs/automate/server-api), [events](https://www.superlogical.com/rex/docs/reference/events), [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) |
 | [Conductor](https://www.conductor.build/docs/) | macOS app: a worktree per task | [Scripts and ports](https://www.conductor.build/docs/reference/scripts), [checkpoints](https://conductor.build/docs/reference/checkpoints), [todos](https://conductor.build/docs/reference/todos) |
 | [Superset](https://github.com/superset-sh/superset) | Desktop editor for many agents | Workspace scripts, ports per worktree, MCP server, automations |
 | [cmux](https://github.com/manaflow-ai/cmux) | Ghostty-based macOS terminal | Notifications from escape sequences and hooks, image upload over SSH, ports and pull requests in the sidebar |
@@ -137,6 +157,7 @@ in changelogs.
 | Claude Code | The agent itself | [Agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`), [Remote Control](https://code.claude.com/docs/en/remote-control), [worktrees](https://code.claude.com/docs/en/worktrees) |
 | [Codex app](https://developers.openai.com/codex/app) | OpenAI's desktop app | Automations and their review queue |
 | [agent-shell](https://github.com/xenodium/agent-shell), [claude-code.el](https://github.com/stevemolitor/claude-code.el), [M-x Machina](https://github.com/eliraz-refael/m-x-machina) | Agents inside Emacs | |
+| [Ghostel](https://github.com/dakra/ghostel) | Emacs terminal on Ghostty's engine | Kitty keyboard and graphics protocols, synchronized output |
 
 [awesome-agent-orchestrators](https://github.com/andyrewlee/awesome-agent-orchestrators)
 tracks about 250 more; its terminal section is closest to Roost.
