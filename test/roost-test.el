@@ -728,7 +728,11 @@
                                          '((number . 9) (title . "Docs") (body . "")
                                            (url . "https://github.com/o/r/issues/9") (labels . []))))))
                      ((symbol-function 'completing-read)
-                      (lambda (_prompt choices &rest _) (car (nth (if created 1 0) choices))))
+                      (lambda (_prompt table &rest _)
+                        ;; Newest first, as gh lists them, whatever the completion UI.
+                        (should (eq (alist-get 'display-sort-function (cdr (funcall table "" nil 'metadata)))
+                                    'identity))
+                        (nth (if created 1 0) (funcall table "" nil t))))
                      ((symbol-function 'roost--create-task)
                       (lambda (directory name base prompt agent _success _failure &optional extra)
                         (setq created (list directory name base prompt agent extra)))))
@@ -2338,6 +2342,26 @@
         (should-not (equal (funcall pixels-at motion 0.0) (funcall pixels-at motion 0.5))))
       (should (= roost-test--refreshed 6)))))
 
+(ert-deftest roost-status-lights-paint-the-background-that-shows ()
+  ;; A theme can leave the margin face of Emacs 31 and later without a
+  ;; background, or anything to inherit one from, as modus-themes does with
+  ;; an unspecified fringe: the margin shows the default background, where
+  ;; lights painted mid-gray squares.
+  (roost-test--isolated
+   (roost-test--with-canvases t
+     (let ((task (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission")))
+           (default (face-background 'default))
+           (inherit (and (facep 'margin) (face-attribute 'margin :inherit))))
+       (unwind-protect
+           (with-temp-buffer
+             (set-face-background 'default "#123456")
+             (when (facep 'margin) (set-face-attribute 'margin nil :inherit 'unspecified))
+             (roost--status-light task 'sidebar)
+             (should (= (plist-get (gethash (cons 'sidebar (roost--key task)) roost--lights) :background)
+                        (roost--light-pixel "#123456"))))
+         (set-face-background 'default default)
+         (when (facep 'margin) (set-face-attribute 'margin nil :inherit inherit)))))))
+
 (ert-deftest roost-status-lights-move-until-their-agents-rest ()
   (roost-test--isolated
    (let ((on t))
@@ -2502,6 +2526,31 @@
                                 '(panel . 1) t)
            (should (timerp roost--lights-timer))))))))
 
+(ert-deftest roost-status-lights-wake-emacs-only-when-they-move ()
+  ;; A timer twelve times a second cost a redisplay each time, even
+  ;; with Emacs in the background, where the lights don't move.
+  (roost-test--isolated
+   (roost-test--with-canvases t
+     (let ((task (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission")))
+           (focused t))
+       (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) focused)))
+         (cl-flet ((wait () (- (float-time (timer--time roost--lights-timer)) (float-time))))
+           (with-temp-buffer
+             (save-window-excursion
+               (set-window-buffer nil (current-buffer))
+               (roost--status-light task 'sidebar)
+               ;; A pulse moves sixteen steps in 1.6 seconds: the next is
+               ;; at most a tenth of a second away.
+               (roost--lights-tick)
+               (should (< (wait) 0.11))
+               ;; In the background, it looks again a second later.
+               (setq focused nil)
+               (roost--lights-tick)
+               (should (> (wait) 0.9))
+               (setq focused t)
+               (roost--lights-tick)
+               (should (< (wait) 0.11))))))))))
+
 (ert-deftest roost-status-lights-follow-the-option-at-once ()
   (roost-test--isolated
    (roost-test--with-canvases t
@@ -2617,6 +2666,23 @@
        (roost-refresh)                  ; a manual refresh always tries
        (should (= attempts 2))
        (should (= (car (gethash "dev" roost--failures)) 2))))))
+
+(ert-deftest roost-a-view-that-fails-to-draw-stops-no-polls ()
+  ;; Drawing a reply that failed, here in a broken search buffer, left the
+  ;; host marked as refreshing, so it was never polled again, and called
+  ;; the host offline with Roost's own error.
+  (roost-test--isolated
+   (let ((roost-hosts '("dev")) (attempts 0) (broken t))
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (_host _action _params success _failure)
+                  (cl-incf attempts) (funcall success nil)))
+               ((symbol-function 'roost--redraw)
+                (lambda () (when broken (error "Broken view")))))
+       (should-error (roost-refresh t))
+       (should-not (gethash "dev" roost--refreshing))
+       (setq broken nil)
+       (roost-refresh t)
+       (should (= attempts 2))))))
 
 (ert-deftest roost-dashboard-groups-by-project-and-summarizes-attention ()
   (roost-test--isolated
@@ -2781,6 +2847,30 @@
                  (should (string-match-p "Conversation abc-123" text))
                  (should-not display-line-numbers))
              (kill-buffer))))))))
+
+;; Global modes many configurations turn on.
+(defvar global-display-line-numbers-mode)
+(defvar global-visual-line-mode)
+
+(ert-deftest roost-lists-keep-out-global-line-numbers-and-wrapping ()
+  ;; Search results came later than the others, and showed line numbers
+  ;; and wrapped every message, so TAB had nothing more to show.
+  (let ((numbers (bound-and-true-p global-display-line-numbers-mode))
+        (wrapping (bound-and-true-p global-visual-line-mode)))
+    (unwind-protect
+        (progn
+          (global-display-line-numbers-mode 1)
+          (global-visual-line-mode 1)
+          (dolist (mode '(roost-dashboard-mode roost-search-mode roost-task-info-mode roost-doctor-mode))
+            (with-temp-buffer
+              (funcall mode)
+              (should-not display-line-numbers)
+              ;; Lists keep a line for each row.
+              (when (memq mode '(roost-dashboard-mode roost-search-mode))
+                (should-not visual-line-mode)
+                (should truncate-lines)))))
+      (global-display-line-numbers-mode (if numbers 1 -1))
+      (global-visual-line-mode (if wrapping 1 -1)))))
 
 (ert-deftest roost-merging-measures-the-other-tasks-again ()
   (roost-test--isolated
@@ -2957,10 +3047,12 @@
 (ert-deftest roost-send-draft-sends-multi-line-text-and-closes ()
   (roost-test--isolated
    (roost-test--with-send-buffers
-    (let ((task (roost--cache-task "dev" (roost-test--task))) sent buffer)
+    (let ((task (roost--cache-task "dev" (roost-test--task))) sent buffer said)
       (cl-letf (((symbol-function 'pop-to-buffer) #'set-buffer)
                 ((symbol-function 'roost--refresh-host) #'ignore)
                 ((symbol-function 'roost--redraw) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (format &rest args) (when format (setq said (apply #'format-message format args)))))
                 ((symbol-function 'roost--request)
                  (lambda (_host _action params success &rest _)
                    (setq sent params)
@@ -2971,6 +3063,8 @@
         (insert "first\nsecond\n")
         (roost-send-submit)
         (should (equal (alist-get 'text sent) "first\nsecond"))
+        ;; Said in a sentence, not as "Roost fix auth: send".
+        (should (equal said "Sent to fix auth"))
         (should-not (buffer-live-p buffer)))))))
 
 (ert-deftest roost-send-draft-survives-failure-and-declined-confirmation ()
@@ -3264,7 +3358,9 @@
                                          ((name . "GitHub CLI") (ok) (optional . t) (detail . "not found")
                                           (hint . "Optional: install gh"))
                                          ((name . "Mystery") (ok) (optional) (detail . "broken")
-                                          (hint . "Fix it"))))
+                                          (hint . "Fix it"))
+                                         ((name . "Push · qa-project") (ok) (optional . t)
+                                          (detail . "no origin remote"))))
                     (funcall failure "far: Permission denied (publickey)."))))
                ((symbol-function 'pop-to-buffer) #'ignore))
        (unwind-protect
@@ -3278,6 +3374,8 @@
                  (should (string-match-p "– Codex +codex-cli 0.150.1\n +For Codex tasks: Upgrade to Codex 0.160.0" text))
                  (should (string-match-p "– GitHub CLI +not found\n +Optional: install gh" text))
                  (should (string-match-p "✗ Mystery +broken" text))
+                 ;; A name longer than the column keeps a space before its detail.
+                 (should (string-match-p "– Push · qa-project no origin remote" text))
                  (should (string-match-p "✗ SSH and Python +far: Permission denied" text))
                  (should (string-match-p "ssh-copy-id far" text))
                  (should (string-match-p "· Workspaces" text)))))
@@ -3677,6 +3775,21 @@ ssh: connect to host dev port 22: Operation timed out"
                (should-not (member plain choices)))))
        (delete-directory repo t)
        (delete-directory plain t)))))
+
+(ert-deftest roost-pickers-keep-their-order ()
+  ;; Vertico sorts candidates by length unless told not to, which put
+  ;; "Other directory…" above the projects you used last.
+  (let (shown sort)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq shown (funcall table "" nil t)
+                       sort (alist-get 'display-sort-function (cdr (funcall table "" nil 'metadata))))
+                 (car shown))))
+      (should (equal (roost--choose-from "Project: " '(("dev · ~/work/ledger" . "/ssh:dev:/work/ledger/")
+                                                       ("Other directory…" . other)))
+                     "/ssh:dev:/work/ledger/"))
+      (should (equal shown '("dev · ~/work/ledger" "Other directory…")))
+      (should (eq sort 'identity)))))
 
 (ert-deftest roost-an-interrupted-turn-says-so ()
   (roost-test--isolated

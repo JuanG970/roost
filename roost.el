@@ -515,9 +515,15 @@ Call SUCCESS with the result or FAILURE with an error message."
          (errors (generate-new-buffer " *roost-rpc-errors*"))
          (default-directory temporary-file-directory)
          (command (roost--python-command host code))
-         input-file process finished timed-out)
+         input-file process stderr-pipe finished timed-out)
     (condition-case err
         (progn
+          ;; A pipe of our own for stderr: the one `make-process' makes for a
+          ;; buffer notes "Process roost-rpc stderr finished" in it, which
+          ;; Emacs 32 does before this sentinel reads it.
+          (setq stderr-pipe (make-pipe-process :name "roost-rpc stderr" :buffer errors
+                                               :noquery t :coding 'utf-8-unix
+                                               :sentinel #'ignore))
           (when (> (string-bytes input) roost--pipe-input-limit)
             (setq input-file (make-temp-file "roost-input-"))
             (let ((coding-system-for-write 'utf-8-unix))
@@ -525,7 +531,7 @@ Call SUCCESS with the result or FAILURE with an error message."
             (setq command (append (list "/bin/sh" "-c" "exec \"$@\" < \"$0\"" input-file) command)))
           (setq process
                 (make-process
-                 :name "roost-rpc" :buffer buffer :stderr errors :noquery t
+                 :name "roost-rpc" :buffer buffer :stderr stderr-pipe :noquery t
                  :coding 'utf-8-unix :connection-type 'pipe
                  :command command
                  :sentinel
@@ -536,24 +542,31 @@ Call SUCCESS with the result or FAILURE with an error message."
                      (when-let* ((timer (process-get proc 'roost-timer)))
                        (cancel-timer timer))
                      (when input-file (ignore-errors (delete-file input-file)))
+                     (while (accept-process-output stderr-pipe 0 nil t))
+                     (delete-process stderr-pipe)
                      (unwind-protect
-                         (let ((stdout (with-current-buffer buffer (buffer-string)))
-                               (stderr (with-current-buffer errors
-                                         (string-trim (buffer-string)))))
-                           (condition-case parse-error
-                               (if (= (process-exit-status proc) 0)
-                                   (let ((response (roost--decode-response stdout)))
-                                     (if (alist-get 'ok response)
-                                         (funcall success (alist-get 'result response))
-                                       (funcall failure (or (alist-get 'error response)
-                                                            "Host operation failed"))))
-                                 (funcall failure
-                                          (cond (timed-out
-                                                 (format "No reply after %ss; the operation may still finish on the host, so refresh before retrying"
-                                                         roost-request-timeout))
-                                                ((string-empty-p stderr) "Host operation failed")
-                                                (t stderr))))
-                             (error (funcall failure (error-message-string parse-error)))))
+                         (let* ((stdout (with-current-buffer buffer (buffer-string)))
+                                (stderr (with-current-buffer errors
+                                          (string-trim (buffer-string))))
+                                ;; What the host said, decided before either
+                                ;; callback runs: an error in one is Roost's,
+                                ;; not the host's.
+                                (outcome
+                                 (condition-case parse-error
+                                     (if (= (process-exit-status proc) 0)
+                                         (let ((response (roost--decode-response stdout)))
+                                           (if (alist-get 'ok response)
+                                               (list success (alist-get 'result response))
+                                             (list failure (or (alist-get 'error response)
+                                                               "Host operation failed"))))
+                                       (list failure
+                                             (cond (timed-out
+                                                    (format "No reply after %ss; the operation may still finish on the host, so refresh before retrying"
+                                                            roost-request-timeout))
+                                                   ((string-empty-p stderr) "Host operation failed")
+                                                   (t stderr))))
+                                   (error (list failure (error-message-string parse-error))))))
+                           (funcall (car outcome) (cadr outcome)))
                        (kill-buffer buffer)
                        (kill-buffer errors))))))
           (push process roost--requests)
@@ -569,6 +582,7 @@ Call SUCCESS with the result or FAILURE with an error message."
        (when-let* ((timer (and process (process-get process 'roost-timer))))
          (cancel-timer timer))
        (when (and process (process-live-p process)) (delete-process process))
+       (when stderr-pipe (delete-process stderr-pipe))
        (when (buffer-live-p buffer) (kill-buffer buffer))
        (when (buffer-live-p errors) (kill-buffer errors))
        (when input-file (ignore-errors (delete-file input-file)))
@@ -796,43 +810,49 @@ those tasks."
                       (roost--refresh-host host nil (unless (eq pending t) pending))))))
       (roost--request
        host "list" (list (cons 'full (cond (quiet :false) (ids (vconcat ids)) (t t))))
+       ;; Each ends the refresh even if drawing what it found fails, or
+       ;; the host would never be asked again.
        (lambda (tasks)
-         (remhash host roost--failures)
-         (remhash host roost--errors)
-         ;; A newer mutation must win over a stale list reply, and a host
-         ;; forgotten meanwhile stays forgotten.
-         (when (and (= revision (gethash host roost--revisions 0))
-                    (member host (roost--hosts)))
-           (let ((before (roost--task-states host)))
-             (roost--apply-snapshot host tasks request)
-             ;; Quiet polls leave out Git statistics.  An agent that reported
-             ;; something, such as finishing an edit, may have changed files,
-             ;; and a commit moves the task's Git stamp: measure those tasks
-             ;; once this poll is done.
-             (when-let* ((quiet)
-                         (changed (seq-keep (lambda (state)
-                                              (unless (equal state (assoc (car state) before))
-                                                (car state)))
-                                            (roost--task-states host))))
-               (roost--refresh-host host nil changed))))
-         (roost--redraw)
-         (funcall finish))
+         (unwind-protect
+             (progn
+               (remhash host roost--failures)
+               (remhash host roost--errors)
+               ;; A newer mutation must win over a stale list reply, and a host
+               ;; forgotten meanwhile stays forgotten.
+               (when (and (= revision (gethash host roost--revisions 0))
+                          (member host (roost--hosts)))
+                 (let ((before (roost--task-states host)))
+                   (roost--apply-snapshot host tasks request)
+                   ;; Quiet polls leave out Git statistics.  An agent that reported
+                   ;; something, such as finishing an edit, may have changed files,
+                   ;; and a commit moves the task's Git stamp: measure those tasks
+                   ;; once this poll is done.
+                   (when-let* ((quiet)
+                               (changed (seq-keep (lambda (state)
+                                                    (unless (equal state (assoc (car state) before))
+                                                      (car state)))
+                                                  (roost--task-states host))))
+                     (roost--refresh-host host nil changed))))
+               (roost--redraw))
+           (funcall finish)))
        (lambda (err)
-         ;; Once per outage: ssh words a sleeping host's failure differently
-         ;; from one poll to the next, and the sidebar shows it meanwhile.
-         ;; Its last line says what failed; ssh's earlier ones say less, such
-         ;; as that a shared connection broke.  The sidebar's tooltip has all.
-         (unless (gethash host roost--errors)
-           (message "Roost %s: %s (M-x roost-doctor checks this host)" (roost--host-label host)
-                    (car (last (split-string err "\n" t "[ \t\r]+")))))
-         (puthash host err roost--errors)
-         ;; Back off from unreachable hosts, up to a minute between attempts.
-         (let ((count (1+ (or (car (gethash host roost--failures)) 0))))
-           (puthash host (cons count (+ (float-time)
-                                        (min 60 (* roost-watch-interval (expt 2 (1- count))))))
-                    roost--failures))
-         (roost--redraw)
-         (funcall finish))))))
+         (unwind-protect
+             (progn
+               ;; Once per outage: ssh words a sleeping host's failure differently
+               ;; from one poll to the next, and the sidebar shows it meanwhile.
+               ;; Its last line says what failed; ssh's earlier ones say less, such
+               ;; as that a shared connection broke.  The sidebar's tooltip has all.
+               (unless (gethash host roost--errors)
+                 (message "Roost %s: %s (M-x roost-doctor checks this host)" (roost--host-label host)
+                          (car (last (split-string err "\n" t "[ \t\r]+")))))
+               (puthash host err roost--errors)
+               ;; Back off from unreachable hosts, up to a minute between attempts.
+               (let ((count (1+ (or (car (gethash host roost--failures)) 0))))
+                 (puthash host (cons count (+ (float-time)
+                                              (min 60 (* roost-watch-interval (expt 2 (1- count))))))
+                          roost--failures))
+               (roost--redraw))
+           (funcall finish)))))))
 
 ;;;###autoload
 (defun roost-forget-host (host)
@@ -1693,12 +1713,21 @@ A task started from a GitHub issue leads with the issue's number."
                                              (with-current-buffer buffer
                                                (roost--compose-render)))))))))
 
+(defun roost--in-order (choices)
+  "A completion table of CHOICES that completion UIs show in their order.
+Vertico, for one, sorts by length otherwise, which put \"Other
+directory…\" above the projects you used last."
+  (lambda (string predicate action)
+    (if (eq action 'metadata)
+        '(metadata (display-sort-function . identity) (cycle-sort-function . identity))
+      (complete-with-action action choices string predicate))))
+
 (defun roost--choose-from (prompt choices &optional default)
   "Choose from CHOICES, an alist of (LABEL . VALUE), with PROMPT.
 A mouse click shows a menu at the pointer; the keyboard uses the minibuffer."
   (if (and (mouse-event-p last-nonmenu-event) (display-popup-menus-p))
       (x-popup-menu last-nonmenu-event (list prompt (cons "" choices)))
-    (cdr (assoc (completing-read prompt choices nil t nil nil default) choices))))
+    (cdr (assoc (completing-read prompt (roost--in-order choices) nil t nil nil default) choices))))
 
 (defun roost-compose-set-project ()
   "Choose the draft's project from known checkouts, or any directory.
@@ -1791,7 +1820,7 @@ listed with gh on the project's host."
                                              'face 'roost-dim)))))))
     (unless issues
       (user-error "%s has no open issues" (roost--project-label directory)))
-    (let* ((issue (cdr (assoc (completing-read "Issue: " choices nil t) choices)))
+    (let* ((issue (cdr (assoc (completing-read "Issue: " (roost--in-order choices) nil t) choices)))
            (previous (plist-get roost--compose-fields :issue))
            (prompt (roost--compose-prompt)))
       (setq roost--compose-fields (plist-put roost--compose-fields :issue
@@ -1905,6 +1934,12 @@ empty one.  Opening the task reconnects the rest."
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buffer)))))
 
+(defconst roost--action-messages
+  '(("send" . "Sent to %s") ("stop" . "Stopped %s") ("resume" . "Resumed %s")
+    ("shell" . "Opened a shell in %s's worktree"))
+  "What `roost--act' says once each action is done, for a task's name.
+The other actions say more themselves when they finish.")
+
 (defun roost--act (task action &optional parameters callback failure)
   "Run ACTION on TASK with PARAMETERS, then CALLBACK with the updated task.
 FAILURE, if given, receives the error message instead of Roost reporting it."
@@ -1922,7 +1957,8 @@ FAILURE, if given, receives the error message instead of Roost reporting it."
                       (let ((pushed (assq 'pushed updated)))
                         (setq updated (roost--cache-task host updated))
                         (roost--redraw)
-                        (message "Roost %s: %s" (roost--field task 'name) action)
+                        (when-let* ((said (cdr (assoc action roost--action-messages))))
+                          (message said (roost--field task 'name)))
                         (when callback
                           (funcall callback (if pushed (cons pushed updated) updated)))))
                     (lambda (err)
@@ -3347,7 +3383,9 @@ for the mode line."
          (width (* 2 (frame-char-width frame)))
          (height (max 8 (if (eq frame (selected-frame)) (default-line-height) (frame-char-height frame))))
          (color (roost--light-pixel (face-foreground face frame t)))
-         (back (roost--light-pixel (face-background background frame t))))
+         ;; A face without a background shows the default one: a theme
+         ;; can leave `margin' so, as modus-themes does for no fringe.
+         (back (roost--light-pixel (face-background background frame 'default))))
     (unless (and light
                  (= width (plist-get (cdr (plist-get light :image)) :data-width))
                  (= height (plist-get (cdr (plist-get light :image)) :data-height)))
@@ -3395,7 +3433,7 @@ dot.  Otherwise this is the dot, in TASK's status face."
   "Paint the light ID over FACE's background where it shows, if it isn't already."
   (when-let* ((light (gethash id roost--lights))
               (window (roost--light-window (plist-get light :buffer)))
-              (back (roost--light-pixel (face-background face (window-frame window) t)))
+              (back (roost--light-pixel (face-background face (window-frame window) 'default)))
               ((not (eql back (plist-get light :background)))))
     (plist-put light :background back)
     (roost--light-draw light (or (plist-get light :phase) 0.0))))
@@ -3473,13 +3511,27 @@ showing it too; that one is left alone."
 (defun roost--lights-start ()
   "Start moving the status lights, if they aren't."
   (unless (timerp roost--lights-timer)
-    (setq roost--lights-timer (run-at-time 0 (/ 1.0 12) #'roost--lights-tick))))
+    (setq roost--lights-timer (run-at-time 0 nil #'roost--lights-tick))))
+
+(defun roost--light-wait (motion)
+  "Seconds until a light in MOTION reaches its next step."
+  (let ((step (/ (or (alist-get motion roost--light-periods) 1.0) roost--light-steps)))
+    ;; Just past the step, so that its phase has moved on.
+    (+ (- step (mod (float-time) step)) 0.002)))
 
 (defun roost--lights-tick ()
   "Move the status lights that show, while Emacs has focus.
-Stop once none that shows moves, or animations are off; drawing a buffer
-again when it shows starts them again."
-  (let ((moving nil)
+It runs again when the next of them is due to move, or while no frame
+has focus, after a second, to see whether one has.  It stops once none
+that shows moves, or animations are off; drawing a buffer again when it
+shows starts it again."
+  (when (timerp roost--lights-timer)
+    (cancel-timer roost--lights-timer))
+  (setq roost--lights-timer nil)
+  ;; Every wakeup costs a redisplay, which in a full configuration is
+  ;; most of what moving lights cost; one in the background costs that
+  ;; for nothing.
+  (let ((next nil)
         (focused (seq-some #'frame-focus-state (frame-list))))
     (when (roost--animations-p)
       (maphash (lambda (id light)
@@ -3488,16 +3540,15 @@ again when it shows starts them again."
                    (cond ((and buffer (not (buffer-live-p buffer)))
                           (remhash id roost--lights))
                          ((and motion (or (null buffer) (roost--light-window buffer)))
-                          (setq moving t)
+                          (setq next (min (or next 1.0) (if focused (roost--light-wait motion) 1.0)))
                           (let ((phase (roost--light-phase motion)))
                             ;; Only a light whose motion moved on is redrawn.
                             (when (and focused (not (eql phase (plist-get light :phase))))
                               (plist-put light :phase phase)
                               (roost--light-draw light phase)))))))
                roost--lights))
-    (unless moving
-      (cancel-timer roost--lights-timer)
-      (setq roost--lights-timer nil))))
+    (when next
+      (setq roost--lights-timer (run-at-time next nil #'roost--lights-tick)))))
 
 (defun roost--seconds-since (timestamp)
   "Whole seconds since TIMESTAMP, or nil if it is missing or unreadable."
@@ -3719,9 +3770,9 @@ keeps one process-wide registration per mode; a nil STATE removes it."
 (defun roost--quiet-display ()
   "Turn off line numbers and wrapping that global modes enable in Roost buffers."
   (when (derived-mode-p 'roost-dashboard-mode 'roost-task-info-mode 'roost-compose-mode
-                      'roost-send-mode 'roost-pr-mode)
+                      'roost-send-mode 'roost-pr-mode 'roost-search-mode 'roost-doctor-mode)
     (display-line-numbers-mode -1)
-    (when (derived-mode-p 'roost-dashboard-mode)
+    (when (derived-mode-p 'roost-dashboard-mode 'roost-search-mode)
       (visual-line-mode -1)
       (setq truncate-lines t))))
 
@@ -4731,7 +4782,9 @@ On a live task's message, task commands such as those in
   (setq-local truncate-lines t
               revert-buffer-function (lambda (&rest _) (roost-search-again)))
   (add-hook 'window-size-change-functions #'roost--search-resized nil t)
-  (roost--evil-state 'roost-search-mode roost-evil-state))
+  (add-hook 'after-change-major-mode-hook #'roost--quiet-display 90 t)
+  (roost--evil-state 'roost-search-mode roost-evil-state)
+  (roost--quiet-display))
 
 (defun roost--search-resized (window)
   "Wrap the messages shown in full again after WINDOW is resized."
@@ -5436,7 +5489,9 @@ RESULT is `pending', a list of checks, or (error . MESSAGE).")
   "What Roost needs locally and on each host, with fixes for problems.
 \\{roost-doctor-mode-map}"
   (setq-local truncate-lines nil word-wrap t)
-  (roost--evil-state 'roost-doctor-mode roost-evil-state))
+  (add-hook 'after-change-major-mode-hook #'roost--quiet-display 90 t)
+  (roost--evil-state 'roost-doctor-mode roost-evil-state)
+  (roost--quiet-display))
 
 (defconst roost--ssh-hints
   '(("Permission denied" . "Set up key-based SSH (ssh-copy-id HOST), or add your key to ssh-agent")
@@ -5518,7 +5573,8 @@ refresh of Magit's status does a dozen times or more."
             ('optional (propertize "–" 'face 'roost-dim))
             ('nil (propertize "✗" 'face 'roost-status-failed))
             (_ (propertize "✓" 'face 'roost-status-ready)))
-          " " (format "%-16s" name)
+          ;; A long name, such as a project's push check, keeps a space.
+          " " (string-pad name 15) " "
           (propertize (or (if (stringp detail) detail "") "") 'face 'roost-dim
                       'help-echo path)
           "\n")
