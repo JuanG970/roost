@@ -103,8 +103,10 @@ Magit is optional (review falls back to Dired).
   default `scp` method on a host on the same network, Magit took 3.6 s to open
   a task and 1.7 s to refresh or stage a file; with
   [tramp-rpc](https://github.com/ArthurHeymans/emacs-tramp-rpc), which runs
-  commands through a small server on the host, 0.4 s. `roost-doctor` names the
-  method each host uses.
+  commands through a small server on the host, 0.4 s. tramp-rpc needs Emacs
+  30.1, a newer TRAMP from GNU ELPA and msgpack, and puts its server on each
+  host, downloaded from its GitHub releases or built with Cargo. It first
+  appeared in 2026. `roost-doctor` names the method each host uses.
 
 ## A day with Roost
 

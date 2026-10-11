@@ -120,8 +120,10 @@ Larger, or undecided.
 - An approval of a tool other than Bash, and any Codex or Pi approval, shows
   `permission` until the agent moves on. Claude Code has no hook for an
   answered permission or an interrupt; both would be requests upstream.
-- Over TRAMP, Magit can't show a commit's diff in a remote task's worktree
-  ("Error showing commit diff"). The bug is Magit's.
+- While you write a commit message in a remote task, Magit can't show the
+  diff beside it ("Error showing commit diff"); the commit goes through.
+  The bug is Magit's, with any TRAMP method: from a linked worktree's Git
+  directory, `magit-toplevel` drops the TRAMP prefix.
 
 ## Not planned
 
