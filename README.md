@@ -121,6 +121,8 @@ These work in the dashboard, the sidebar and a task's panel, and on the menu.
 - [The manual](docs/manual.md): every command and option, a day of work in
   detail, and how Roost works.
 - [Changes](CHANGELOG.md), with what to do when upgrading.
+- [A possible roadmap](docs/roadmap.md): ideas being considered, and the
+  tools they come from.
 - [Validation](docs/validation.md): live runs with Claude Code and Codex, on
   local and remote hosts. [How the screenshots were made](docs/demo.md), and
   [the MELPA recipes](docs/melpa.md).

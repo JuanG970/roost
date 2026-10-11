@@ -1,13 +1,15 @@
-# Roadmap
+# A possible roadmap
 
-What's planned, what's being explored, and what Roost leaves to other tools.
-The order follows what matters day to day: knowing which agent needs you, and
-seeing a task through to its merge. Each item names the projects it comes
-from; [Prior art](#prior-art) lists them for the next look around.
+Ideas for where Roost could go, and what it leaves to other tools. None of
+them is promised: each is a candidate, to be tried before it's kept, and
+some will be dropped. They're ordered by what matters day to day: knowing
+which agent needs you, and seeing a task through to its merge. Each names
+the projects it comes from; [Prior art](#prior-art) lists them for the next
+look around.
 
-## Next
+## Most likely first
 
-Small, and worth the most.
+Small, and probably worth the most.
 
 - **Conflicts before merge time.** Roost finds a conflict only when `m`
   refuses. Running `git merge-tree` as tasks change, against the integration
@@ -28,7 +30,7 @@ Small, and worth the most.
   `roost-setup-command`.
 - **0.9, and MELPA.** tmux-control first; see [the recipes](melpa.md).
 
-## Soon
+## Worth trying
 
 - **Usage limits.** Claude Code gives its status line command the five-hour
   and weekly limits (`rate_limits`, with `used_percentage` and `resets_at`).
