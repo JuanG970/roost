@@ -232,6 +232,74 @@
        (should (string-match-p (make-string 1000 ?a) (buffer-string)))
        (should-not (string-match-p "Show the whole reply" (buffer-string)))))))
 
+(ert-deftest roost-prose-leaves-tables-and-code-in-their-font ()
+  (roost-test--isolated
+   (let ((prose (lambda (text line)
+                  (memq 'roost-prose (ensure-list (get-text-property (string-search line text) 'face text))))))
+     (let ((text (roost--prose "Done, see below.\n| a | b |\n```\nx = 1\n```\n    indented\nThe end.")))
+       (should (funcall prose text "Done, see below."))
+       (should (funcall prose text "The end."))
+       (should-not (funcall prose text "| a | b |"))
+       (should-not (funcall prose text "x = 1"))
+       (should-not (funcall prose text "    indented")))
+     ;; A fence closes only with as long a run of its own marker.
+     (let ((text (roost--prose "````\n```\nstill code\n~~~\n````\nProse again.")))
+       (should-not (funcall prose text "still code"))
+       (should (funcall prose text "Prose again.")))
+     ;; Indented four spaces, a fence is indented code and opens no block.
+     (should (funcall prose (roost--prose "Before.\n    ```\nAfter.") "After."))
+     ;; A table without outer pipes is found by its delimiter row.
+     (let ((text (roost--prose "Before.\nName | Does\n--- | :---:\nadd | adds a note\nAfter.")))
+       (should (funcall prose text "Before."))
+       (should-not (funcall prose text "Name | Does"))
+       (should-not (funcall prose text "--- | :---:"))
+       (should-not (funcall prose text "add | adds a note"))
+       (should (funcall prose text "After."))))
+   ;; In batch a pixel is a column, so text is cut and wrapped as by columns.
+   (should (= (roost--text-width "a界") 3))
+   (should (equal (roost--truncate-width "short" 10) "short"))
+   (should (equal (roost--truncate-width "one two three" 8) "one two…"))
+   (should (equal (roost--wrap-width "one two three\nfour" 7) '("one two" "three" "four")))
+   (should (equal (roost--wrap-width "one two three four" 3 1) '("one" "two")))
+   (should (equal (roost--wrap-width "a  b" 10) '("a  b")))
+   (should (equal (roost--wrap-width "one\n\ntwo" 10) '("one" "" "two")))
+   ;; Repeated spaces at a break leave no blank line, and a line's own
+   ;; indentation stays.
+   (should (equal (roost--wrap-width "1234567890  abcdefghij" 10) '("1234567890" "abcdefghij")))
+   (should (equal (roost--wrap-width "  - one two" 8) '("  - one" "two")))
+   ;; Spaces keep the face of the text around them.
+   (let ((line (car (roost--wrap-width (propertize "one two three" 'face 'roost-prose) 7))))
+     (should (equal line "one two"))
+     (should (eq (get-text-property 3 'face line) 'roost-prose)))))
+
+(ert-deftest roost-a-dashboard-summary-cut-short-says-so ()
+  (roost-test--isolated
+   ;; A narrow proportional font fits four letters in a column, so the
+   ;; first cut, at three times the room, is the one that shows.
+   (cl-letf (((symbol-function 'roost--text-width) (lambda (string) (/ (string-width string) 4.0))))
+     (let* ((task (append `((lastMessage . ,(mapconcat #'identity (make-list 200 "iiii") " ")))
+                          (roost-test--task)))
+            (row (roost--dashboard-row task (roost--dashboard-layout (list task) 120) 120)))
+       (should (string-suffix-p "…" row))))))
+
+(ert-deftest roost-status-words-are-coloured-only-when-you-are-needed ()
+  (roost-test--isolated
+   (should (eq (roost--status-word-face "permission") 'roost-status-permission))
+   (should (eq (roost--status-word-face "failed") 'roost-status-failed))
+   (should-not (roost--status-word-face "ready"))
+   (should (eq (roost--status-word-face "running") 'roost-dim))
+   (should (eq (roost--status-word-face "idle") 'roost-dim))
+   (let ((task (roost--cache-task "dev" (roost-test--task nil "running"))))
+     (should (eq (get-text-property 0 'face (roost--summary (list task))) 'roost-dim))
+     (with-temp-buffer
+       (roost-task-info-mode)
+       (setq roost--buffer-task-key (roost--key task))
+       (roost--render-task-info)
+       ;; Sections are apart by half a line.
+       (goto-char (point-min))
+       (search-forward "\nChanges\n")
+       (should (equal (get-text-property (match-beginning 0) 'face) '(:height 0.5)))))))
+
 (ert-deftest roost-quiet-refresh-retains-last-message ()
   (roost-test--isolated
    (roost--cache-task "dev" (append '((lastMessage . "All done")) (roost-test--task)))
