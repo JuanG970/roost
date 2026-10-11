@@ -2261,6 +2261,262 @@
    (let ((roost-watch-mode t))
      (should (equal (substring-no-properties (roost-mode-line-waiting)) " Roost:1 ")))))
 
+;; Canvases come with Emacs 32, so these tests stand in for them.
+(defmacro roost-test--with-canvases (on &rest body)
+  "Run BODY with Roost's status lights moving while ON, on stand-in canvases.
+`roost-test--refreshed' counts the canvases redrawn."
+  (declare (indent 1))
+  `(let ((roost--lights (make-hash-table :test 'equal))
+         (roost--lights-timer nil)
+         (roost-test--refreshed 0))
+     (cl-letf (((symbol-function 'roost--animations-p) (lambda () ,on))
+               ((symbol-function 'create-image)
+                (lambda (data _type _data-p &rest props)
+                  ;; Scaled, Emacs would draw only part of a canvas.
+                  (should (eql (plist-get props :scale) 1))
+                  `(image :type canvas :data ,data ,@props)))
+               ((symbol-function 'canvas-refresh) (lambda (&rest _) (cl-incf roost-test--refreshed)))
+               ((symbol-function 'frame-focus-state) (lambda (&rest _) t))
+               ((symbol-function 'mode-line-window-selected-p) (lambda () roost-test--selected))
+               ;; Batch Emacs has only a text frame; tests say what it stands for.
+               ((symbol-function 'roost--light-frame-p) (lambda (_frame) roost-test--graphic)))
+       (unwind-protect (progn ,@body)
+         (when (timerp roost--lights-timer) (cancel-timer roost--lights-timer))))))
+
+(defvar roost-test--refreshed 0)
+(defvar roost-test--selected t)
+(defvar roost-test--graphic t)
+
+(ert-deftest roost-status-lights-stay-dots-without-canvases ()
+  ;; Off, or with no frame that shows canvases, a task's light is its dot.
+  (roost-test--isolated
+   (let ((task (roost--cache-task "dev" (roost-test--task nil "running")))
+         (roost--lights (make-hash-table :test 'equal))
+         (roost--lights-timer nil))
+     (cl-letf (((symbol-function 'roost--light-frame-p) #'ignore))
+       (dolist (roost-animations '(nil t))
+         (with-temp-buffer
+           (let ((dot (roost--status-light task 'sidebar)))
+             (should (equal dot "●"))
+             (should (eq (get-text-property 0 'face dot) 'roost-status-running))
+             (should-not (get-text-property 0 'display dot)))
+           (roost--light-margins)
+           (should (= left-margin-width 0)))))
+     (should (zerop (hash-table-count roost--lights)))
+     (should-not roost--lights-timer))))
+
+(ert-deftest roost-status-lights-move-only-while-an-agent-waits ()
+  ;; Motion means an agent needs you, as it counts in the mode line: one
+  ;; at work rests, and so does one you have seen since it stopped.
+  (roost-test--isolated
+   (let ((motion (lambda (status &optional seen)
+                   (let ((task (roost--cache-task "dev" (roost-test--task nil status))))
+                     (when seen (puthash (roost--key task) (roost--field task 'updatedAt) roost--seen))
+                     (prog1 (roost--light-motion task)
+                       (remhash (roost--key task) roost--seen))))))
+     (should (eq (funcall motion "permission") 'pulse))
+     (dolist (status '("ready" "interrupted" "error" "failed" "crashed" "exited"))
+       (should (eq (funcall motion status) 'glow))
+       (should-not (funcall motion status t)))
+     (dolist (status '("running" "stopped"))
+       (should-not (funcall motion status)))))
+  (roost-test--with-canvases t
+    (let* ((width 6) (height 8)
+           (pixels-at (lambda (motion phase)
+                        (let ((light (list :image (create-image (make-vector (* width height) 0) 'canvas t
+                                                                :data-width width :data-height height
+                                                                :scale 1)
+                                           :motion motion :color #xFFAA66FF :background #xFF1E1E1E)))
+                          (roost--light-draw light phase)
+                          (plist-get (cdr (plist-get light :image)) :data)))))
+      ;; Canvases have no transparency, so a light paints its background.
+      (let ((still (funcall pixels-at nil 0.0)))
+        (should (= (aref still 0) #xFF1E1E1E))
+        (should (= (aref still (+ (/ width 2) (* (/ height 2) width))) #xFFAA66FF))
+        (should (equal still (funcall pixels-at nil 0.5))))
+      (dolist (motion '(pulse glow))
+        (should-not (equal (funcall pixels-at motion 0.0) (funcall pixels-at motion 0.5))))
+      (should (= roost-test--refreshed 6)))))
+
+(ert-deftest roost-status-lights-move-until-their-agents-rest ()
+  (roost-test--isolated
+   (let ((on t))
+     (roost-test--with-canvases on
+       (let ((asking (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission")))
+             (running (roost--cache-task "dev" (roost-test--task "2222222222222222" "running"))))
+         (with-temp-buffer
+           ;; At work, a light rests: nothing has to move.
+           (roost--status-light running 'sidebar)
+           (should-not roost--lights-timer)
+           ;; The light shows in the margin, taking no column of the text.
+           (let ((light (roost--status-light asking 'sidebar)))
+             (should (equal (substring-no-properties light) "●"))
+             (should (equal (car (get-text-property 0 'display light)) '(margin left-margin))))
+           ;; In the task panel, it takes the dot's place, painting the
+           ;; highlight behind it while it is on the highlighted line.
+           (should (eq (car (get-text-property 0 'display (roost--status-light asking '(panel . 1) t))) 'image))
+           (let ((light (gethash (cons '(panel . 1) (roost--key asking)) roost--lights)))
+             (cl-letf (((symbol-function 'face-background)
+                        (lambda (face &rest _) (if (eq face 'roost-selection) "#ffffff" "#000000"))))
+               (save-window-excursion
+                 (set-window-buffer nil (current-buffer))
+                 (insert "fix auth  " (roost--status-light asking '(panel . 1) t) " permission\nmore\n")
+                 (set-window-point nil (point-min))
+                 (roost--mark-selection)
+                 ;; Batch Emacs has a terminal's colors, so compare its own pixels.
+                 (should-not (= (roost--light-pixel "#ffffff") (roost--light-pixel "#000000")))
+                 (should (= (plist-get light :background) (roost--light-pixel "#ffffff")))
+                 (set-window-point nil (point-max))
+                 (roost--mark-selection)
+                 (should (= (plist-get light :background) (roost--light-pixel "#000000")))
+                 (erase-buffer))))
+           (should (= (hash-table-count roost--lights) 3))
+           (should (timerp roost--lights-timer))
+           ;; Asked for again unchanged, a light isn't redrawn.
+           (let ((before roost-test--refreshed))
+             (roost--status-light running 'sidebar)
+             (should (= roost-test--refreshed before)))
+           ;; The mode line has one too, for the agents waiting, in the
+           ;; selected window, whose background it paints.
+           (should (eq (car (get-text-property 0 'display (roost--mode-line-count))) 'image))
+           (let ((roost-test--selected nil))
+             (should-not (get-text-property 0 'display (roost--mode-line-count))))
+           ;; Comparing counts makes no light, and watching no more drops it.
+           (remhash '(mode-line . waiting) roost--lights)
+           (should-not (get-text-property 0 'display (roost--mode-line-count t)))
+           (should-not (gethash '(mode-line . waiting) roost--lights))
+           (roost--mode-line-count)
+           (let ((roost-watch-interval 3600))
+             (roost-watch-mode -1))
+           (should-not (gethash '(mode-line . waiting) roost--lights))
+           (roost--mode-line-count)
+           ;; Lights of tasks no longer listed are forgotten, only at their place.
+           (roost--lights-forget 'sidebar (list (roost--key asking)))
+           (should (= (hash-table-count roost--lights) 3))
+           (should-not (gethash (cons 'sidebar (roost--key running)) roost--lights))
+           (roost--status-light running '(panel . 2) t)
+           (roost--lights-forget '(panel . 2) nil)
+           (should (= (hash-table-count roost--lights) 3))
+           ;; The tick redraws a moving light that shows and whose motion moved on:
+           ;; the mode line's, not those of a buffer in no window.
+           (maphash (lambda (_id light) (plist-put light :phase -1.0)) roost--lights)
+           (let ((before roost-test--refreshed))
+             (roost--lights-tick)
+             (should (= roost-test--refreshed (1+ before))))
+           (save-window-excursion
+             (set-window-buffer nil (current-buffer))
+             ;; In a graphical window its lights move too; in a text frame's,
+             ;; which shows the dots, they don't, nor does its mode line get one.
+             (maphash (lambda (_id light) (plist-put light :phase -1.0)) roost--lights)
+             (let ((before roost-test--refreshed))
+               (roost--lights-tick)
+               (should (= roost-test--refreshed (+ before 3))))
+             (let ((roost-test--graphic nil))
+               (maphash (lambda (_id light) (plist-put light :phase -1.0)) roost--lights)
+               (let ((before roost-test--refreshed))
+                 (roost--lights-tick)
+                 (should (= roost-test--refreshed (1+ before))))
+               (should-not (get-text-property 0 'display (roost--mode-line-count)))
+               ;; The lights get a margin, which goes when they are turned
+               ;; off; a text frame's window keeps its own.
+               (roost--light-margins)
+               (should (= left-margin-width 2))
+               (should-not (car (window-margins)))
+               ;; A text frame's window that shows the buffer later, taking
+               ;; its 2 columns, gets its own back as it starts showing it.
+               (should (memq #'roost--light-margins-shown window-buffer-change-functions))
+               (set-window-margins nil 2)
+               (roost--light-margins-shown (selected-window))
+               (should-not (car (window-margins)))
+               ;; Run for a window that went on to show another buffer, it
+               ;; leaves that one alone.
+               (let ((lights (current-buffer)))
+                 (with-temp-buffer
+                   (set-window-buffer nil (current-buffer))
+                   (with-current-buffer lights (roost--light-margins-shown (selected-window)))
+                   (should-not (local-variable-p 'roost--light-margin))
+                   (should-not (memq #'roost--light-margins-shown window-buffer-change-functions)))
+                 (set-window-buffer nil lights))
+               (setq on nil)
+               (roost--light-margins)
+               (should (= left-margin-width 0))
+               (should-not (memq #'roost--light-margins-shown window-buffer-change-functions))
+               (setq on t)))
+           ;; A sidebar row whose light is in the margin has the dot's column
+           ;; for its name: 31 characters, one of them not shown.
+           (should (= (string-width (roost--sidebar-row asking 30 t)) 31))
+           (should (= (string-width (roost--sidebar-row asking 30)) 30)))
+         ;; A margin the buffer had is kept, and there again after.
+         (with-temp-buffer
+           (setq left-margin-width 3)
+           (roost--light-margins)
+           (should (= left-margin-width 3))
+           (setq on nil)
+           (roost--light-margins)
+           (should (= left-margin-width 3))
+           (setq left-margin-width 1)
+           (roost--light-margins)
+           (should (= left-margin-width 1))
+           ;; No margin at all, said with nil, comes back as nil.
+           (setq left-margin-width nil on t)
+           (roost--light-margins)
+           (should (= left-margin-width 2))
+           (setq on nil)
+           (roost--light-margins)
+           (should-not left-margin-width)
+           (setq on t))
+         ;; A mode line that shows the light asks for it whenever polls
+         ;; make mode lines redraw; one nobody asks for goes.
+         (roost--mode-line-count)
+         (roost--mode-line-light-check)
+         (should (gethash '(mode-line . waiting) roost--lights))
+         (plist-put (gethash '(mode-line . waiting) roost--lights) :asked (- (float-time) 3600))
+         (roost--mode-line-light-check)
+         (should-not (gethash '(mode-line . waiting) roost--lights))
+         ;; The lights of a buffer that is gone go whenever lights are
+         ;; forgotten, moving or not.
+         (let ((buffer (generate-new-buffer " lights")))
+           (with-current-buffer buffer (roost--status-light running 'sidebar))
+           (kill-buffer buffer)
+           (roost--lights-forget 'dashboard nil)
+           (should-not (gethash (cons 'sidebar (roost--key running)) roost--lights)))
+         ;; Once nobody waits, the mode line's light goes.
+         (roost--cache-task "dev" (roost-test--task "1111111111111111" "running"))
+         (should-not (roost--mode-line-count))
+         (should-not (gethash '(mode-line . waiting) roost--lights))
+         ;; The buffer is gone, and so are its lights at the next tick; once
+         ;; nothing moves, neither does the timer.
+         (roost--lights-tick)
+         (should (zerop (hash-table-count roost--lights)))
+         (should-not roost--lights-timer)
+         ;; A light moving in a buffer no window shows doesn't keep it going
+         ;; either; drawing that buffer again starts it.
+         (with-temp-buffer
+           (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission"))
+           (roost--status-light (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission"))
+                                '(panel . 1) t)
+           (should (timerp roost--lights-timer))
+           (roost--lights-tick)
+           (should-not roost--lights-timer)
+           (roost--status-light (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission"))
+                                '(panel . 1) t)
+           (should (timerp roost--lights-timer))))))))
+
+(ert-deftest roost-status-lights-follow-the-option-at-once ()
+  (roost-test--isolated
+   (roost-test--with-canvases t
+     (let ((roost-animations t) redrawn)
+       (cl-letf (((symbol-function 'roost--redraw) (lambda () (setq redrawn t))))
+         (with-temp-buffer
+           (roost--status-light (roost--cache-task "dev" (roost-test--task nil "permission")) 'sidebar))
+         (should (timerp roost--lights-timer))
+         ;; Turned off, the lights go and the buffers that show are drawn again.
+         (customize-set-variable 'roost-animations nil)
+         (should-not roost-animations)
+         (should redrawn)
+         (should (zerop (hash-table-count roost--lights)))
+         (should-not roost--lights-timer))))))
+
 (ert-deftest roost-a-seen-ready-agent-stops-counting-as-waiting ()
   (roost-test--isolated
    (let ((task (roost--cache-task "dev" (roost-test--task nil "ready")))
