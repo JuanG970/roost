@@ -15,7 +15,7 @@ day of work, every command and option, and how Roost works.
 
 Requirements: Emacs 29.1+ and [tmux-control](https://github.com/csheaff/tmux-control)
 0.7.0+ (which brings [Eat](https://codeberg.org/akib/emacs-eat)). Each task host needs
-Python 3.9+, Git, tmux 3.0+, and an installed, signed-in agent CLI (Codex 0.160.0
+Python 3.9+, Git, tmux 3.1+, and an installed, signed-in agent CLI (Codex 0.160.0
 or newer). Remote hosts need key- or agent-based SSH; use SSH config aliases for
 ports and jump hosts. Roost copies its helper to each host itself.
 
@@ -151,7 +151,12 @@ panel steps aside when the terminal would drop below 80 columns, and `q` in it
 turns it off. `i` shows the same panel in the main area whenever you want it.
 
 **Check the work yourself.** `t` opens a shell beside the agent, in the same
-worktree. Run the tests, start the app, poke at it.
+worktree, and returns to it after. Run the tests, start the app, poke at it.
+The agent and the shell are tmux panes, each in a window of its own: `C-x o`
+moves between them (so does `C-c C-o`, with tmux-control later than 0.7.2),
+`C-c C-t` shows one at a time, and tmux-control's other pane keys work too. `C-c |` splits off another pane,
+which starts in the worktree; it closes when its program exits, and every
+pane closes when the task stops.
 
 **Review in Magit.** `r` opens Magit on the task's worktree, through TRAMP for
 remote tasks. Stage, edit and commit as usual. The status names the task,
