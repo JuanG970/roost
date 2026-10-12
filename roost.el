@@ -4771,46 +4771,111 @@ Only ERR's first line fits there; the echo area and *Messages* have it all."
   (let ((prompt (roost--field task 'task)))
     (unless (or (null prompt) (equal prompt (roost--field task 'name))) prompt)))
 
-(defun roost--strip-markdown (text)
+(defconst roost--url-regexp
+  "\\([*_~]*\\)\\(https?://[^[:space:]<>\"'`\ue000\ue001]+\\)"
+  "A URL in what an agent wrote, with the Markdown emphasis that opens on it
+and anything that follows it up to a space.")
+
+(defun roost--trim-url (url emphasis)
+  "URL without what follows it in the prose.
+That is sentence punctuation, a closing bracket the URL did not open, as
+around \"(see https://a.example)\", and the delimiters that close
+EMPHASIS, the run that opened on the URL, as in \"**https://a.example**\"."
+  (let (done)
+    (while (and (not done) (> (length url) 0))
+      (let ((last (aref url (1- (length url)))))
+        (cond ((memq last '(?. ?, ?\; ?: ?! ??))
+               (setq url (substring url 0 -1)))
+              ((and (memq last '(?\) ?\] ?}))
+                    (< (seq-count (apply-partially #'eq (pcase last (?\) ?\() (?\] ?\[) (_ ?{)))
+                                  url)
+                       (seq-count (apply-partially #'eq last) url)))
+               (setq url (substring url 0 -1)))
+              ((and (> (length emphasis) 0) (string-suffix-p emphasis url))
+               (setq url (substring url 0 (- (length emphasis)))
+                     emphasis ""))
+              (t (setq done t))))))
+  url)
+
+(defun roost--link (label url)
+  "LABEL as a button that opens URL in the browser."
+  (make-text-button label nil 'face 'roost-field 'follow-link t 'help-echo url
+                    'button-data url 'action #'browse-url))
+
+(defun roost--link-urls (text &optional wrap)
+  "TEXT with each URL in it a button that opens it.
+What follows a URL in the prose is left out of it, see `roost--trim-url'.
+WRAP, when given, is called on each button and returns what replaces it."
+  (replace-regexp-in-string
+   roost--url-regexp
+   (lambda (match)
+     (let* ((emphasis (match-string 1 match))
+            (whole (match-string 2 match))
+            (url (roost--trim-url whole emphasis)))
+       (concat emphasis
+               (funcall (or wrap #'identity) (roost--link url url))
+               (substring whole (length url)))))
+   text t t))
+
+(defun roost--strip-markdown (text &optional links)
   "TEXT without Markdown emphasis delimiters and the backticks of inline code.
 Delimiters are removed only where they wrap text, so identifiers such as
 snake_case_name and expressions such as a * b are kept, and so is
-everything inside inline code."
-  (let ((code nil)
+everything inside inline code.  A Markdown link shows only its text.
+With LINKS, that text and each URL are buttons that open the URL."
+  (let ((kept nil)
         (text (or text "")))
-    (setq text (replace-regexp-in-string
-                "\\(`+\\)\\([^`\n]\\|[^`\n][^\n]*?[^`\n]\\)\\1"
-                (lambda (match)
-                  ;; A run of backticks closes at a run of the same length;
-                  ;; one space inside each end is padding, as in `` `a` ``.
-                  (let ((inner (match-string 2 match)))
-                    (save-match-data
-                      (when (string-match "\\` \\(.*\\) \\'" inner)
-                        (setq inner (match-string 1 inner))))
-                    (push inner code))
-                  (format "\ue000%d\ue001" (1- (length code))))
-                text t t))
-    (let ((previous nil))
-      (while (not (equal previous text))
-        (setq previous text
-              text (replace-regexp-in-string
-                    (concat "\\(^\\|[^[:alnum:]*_]\\)"
-                            "\\(\\*\\{1,3\\}\\|_\\{1,2\\}\\)"
-                            "\\([^[:space:]]\\(?:[^\n]*?[^[:space:]]\\)??\\)"
-                            "\\2\\($\\|[^[:alnum:]*_.]\\|\\.\\($\\|[[:space:]]\\)\\)")
-                    "\\1\\3\\4" text))))
-    (setq code (nreverse code))
-    (replace-regexp-in-string
-     "\ue000\\([0-9]+\\)\ue001"
-     (lambda (match)
-       (nth (string-to-number (substring match 1 -1)) code))
-     text t t)))
+    (cl-flet ((keep (string)
+                ;; Set STRING aside from the emphasis below.
+                (push string kept)
+                (format "\ue000%d\ue001" (1- (length kept))))
+              (restore (string)
+                (replace-regexp-in-string
+                 "\ue000\\([0-9]+\\)\ue001"
+                 (lambda (match)
+                   (nth (- (length kept) 1 (string-to-number (substring match 1 -1))) kept))
+                 string t t)))
+      (setq text (replace-regexp-in-string
+                  "\\(`+\\)\\([^`\n]\\|[^`\n][^\n]*?[^`\n]\\)\\1"
+                  (lambda (match)
+                    ;; A run of backticks closes at a run of the same length;
+                    ;; one space inside each end is padding, as in `` `a` ``.
+                    (let ((inner (match-string 2 match)))
+                      (save-match-data
+                        (when (string-match "\\` \\(.*\\) \\'" inner)
+                          (setq inner (match-string 1 inner))))
+                      (keep (if links (roost--link-urls inner) inner))))
+                  text t t))
+      (setq text (replace-regexp-in-string
+                  ;; The URL may hold balanced parentheses, as Markdown
+                  ;; allows, nested two deep.
+                  (concat "\\[\\([^]\n]+\\)\\]"
+                          "(\\(https?://\\(?:[^()[:space:]]\\|"
+                          "(\\(?:[^()[:space:]]\\|([^()[:space:]]*)\\)*)\\)+\\))")
+                  (lambda (match)
+                    (let ((label (roost--strip-markdown (restore (match-string 1 match))))
+                          (url (match-string 2 match)))
+                      (keep (if links (roost--link label url) label))))
+                  text t t))
+      (when links
+        (setq text (roost--link-urls text #'keep)))
+      (let ((previous nil))
+        (while (not (equal previous text))
+          (setq previous text
+                text (replace-regexp-in-string
+                      (concat "\\(^\\|[^[:alnum:]*_]\\)"
+                              "\\(\\*\\{1,3\\}\\|_\\{1,2\\}\\)"
+                              "\\([^[:space:]]\\(?:[^\n]*?[^[:space:]]\\)??\\)"
+                              "\\2\\($\\|[^[:alnum:]*_.]\\|\\.\\($\\|[[:space:]]\\)\\)")
+                      "\\1\\3\\4" text))))
+      (restore text))))
 
 (defun roost--last-message (task)
-  "TASK's latest agent reply with Markdown markers removed, or nil."
+  "TASK's latest agent reply with Markdown markers removed, or nil.
+Its links and URLs are buttons that open them."
   (let ((message (roost--field task 'lastMessage)))
     (when (stringp message)
-      (let ((text (string-trim (roost--strip-markdown message))))
+      (let ((text (string-trim (roost--strip-markdown message t))))
         (unless (string-empty-p text) text)))))
 
 (defun roost--permission-request (task)
