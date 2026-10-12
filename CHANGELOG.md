@@ -6,6 +6,10 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.8.1:
 
+- A task's agent starts at the size of the window it opens in, not tmux's
+  80 by 24, so its first output is no longer wrapped narrow and torn by the
+  redraw when Emacs attaches. Tasks started earlier keep their history;
+  nothing to do when upgrading.
 - A pane you split off in a task's window closes when its program exits;
   only the agent's pane stays to show how it ended. Tasks started earlier
   change when resumed.
