@@ -4992,3 +4992,24 @@ With INITIAL, the box must start out holding it."
         (roost-test--goto-line-text (format "line %d" number))))))
 
 (provide 'roost-test)
+
+(ert-deftest roost-terminal-size-is-the-window-the-task-opens-in ()
+  (roost-test--isolated
+   (save-window-excursion
+     (delete-other-windows)
+     (let* ((small (selected-window))
+            (large (split-window small 20 'right)))
+       (cl-letf (((symbol-function 'roost--workspace-backend) (lambda () nil)))
+         ;; Without workspaces a task opens in the selected window, even when
+         ;; another is larger.
+         (select-window small)
+         (should (= (alist-get 'width (roost--terminal-size))
+                    (window-max-chars-per-line small)))
+         (select-window large)
+         (should (= (alist-get 'width (roost--terminal-size))
+                    (window-max-chars-per-line large))))
+       ;; In a workspace of its own it fills the main area.
+       (cl-letf (((symbol-function 'roost--workspace-backend) (lambda () 'tab-bar)))
+         (select-window small)
+         (should (> (alist-get 'width (roost--terminal-size))
+                    (window-max-chars-per-line large))))))))

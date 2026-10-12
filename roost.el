@@ -624,12 +624,30 @@ seconds (default 60)."
     (if failure (user-error "%s" failure) result)))
 
 ;; The agent starts before Emacs attaches, and tmux would give it 80 by 24.
-(defun roost--terminal-size ()
-  "The columns and rows of the window a task opens in, for starting its agent.
-Nil when no window can be measured."
-  (when-let* ((window (get-largest-window)))
-    `((width . ,(max 10 (window-max-chars-per-line window)))
-      (height . ,(max 10 (floor (with-selected-window window (window-screen-lines))))))))
+(defun roost--area-size (area like)
+  "The columns and rows AREA, a window or a split of them, can show.
+LIKE is a live window in it, which says how much a column and a row of
+its text take."
+  (let ((width (+ (window-max-chars-per-line like)
+                  (floor (- (window-pixel-width area) (window-pixel-width like))
+                         (frame-char-width))))
+        (height (+ (floor (with-selected-window like (window-screen-lines)))
+                   (floor (- (window-pixel-height area) (window-pixel-height like))
+                          (frame-char-height)))))
+    `((width . ,(max 10 width)) (height . ,(max 10 height)))))
+
+(defun roost--terminal-size (&optional task)
+  "The columns and rows of the window TASK's terminal will fill, or nil.
+That is the window already showing it; otherwise, in a workspace of its
+own, the main area; otherwise the selected main window.  TASK is nil for
+one not yet created."
+  (when-let* ((like (or (roost--task-terminal-window task)
+                        (roost--selected-main-window))))
+    (roost--area-size (if (and (not (roost--task-terminal-window task))
+                               (roost--workspace-backend))
+                          (window-main-window)
+                        like)
+                      like)))
 
 (defun roost--request (host action parameters success &optional failure)
   "Run ACTION with PARAMETERS on HOST, installing the versioned helper as needed.
@@ -1275,6 +1293,19 @@ panel, rather than inside the workspace of the task you were in."
       (roost-open-task (car tasks))
       t)))
 
+(defun roost--task-terminal-window (task)
+  "The window of the selected frame showing TASK's terminal, or nil."
+  (when (and task (fboundp 'tmux-control-window-id))
+    (seq-find (lambda (window)
+                (with-current-buffer (window-buffer window)
+                  (and (tmux-control-window-id)
+                       (not (tmux-control-tiled-p))
+                       (equal (tmux-control-buffer-host) (roost--field task 'host))
+                       (equal (tmux-control-buffer-socket-name) (roost--field task 'socket))
+                       (equal (tmux-control-buffer-session) (roost--field task 'session))
+                       (equal (tmux-control-window-id) (roost--field task 'windowId)))))
+              (window-list))))
+
 (defun roost--display-task (task &optional target-pane)
   "Display TASK after ownership validation, selecting TARGET-PANE if supplied."
   (require 'tmux-control)
@@ -1286,16 +1317,7 @@ panel, rather than inside the workspace of the task you were in."
   ;; code or Magit window when that happened to be selected on departure.
   ;; A tiled pane's window is left alone: the session buffer would replace
   ;; that pane in the grid.
-  (when-let* ((window
-               (seq-find (lambda (window)
-                           (with-current-buffer (window-buffer window)
-                             (and (tmux-control-window-id)
-                                  (not (tmux-control-tiled-p))
-                                  (equal (tmux-control-buffer-host) (roost--field task 'host))
-                                  (equal (tmux-control-buffer-socket-name) (roost--field task 'socket))
-                                  (equal (tmux-control-buffer-session) (roost--field task 'session))
-                                  (equal (tmux-control-window-id) (roost--field task 'windowId)))))
-                         (window-list))))
+  (when-let* ((window (roost--task-terminal-window task)))
     (select-window window))
   (tmux-control-connect-or-switch (roost--field task 'host) (roost--field task 'socket)
                                   (roost--field task 'session))
@@ -2009,7 +2031,7 @@ FAILURE, if given, receives the error message instead of Roost reporting it."
   (interactive)
   (roost--act (roost--choose task) "resume"
               `((programStatus . ,(if roost-program-status t :false))
-                (size . ,(roost--terminal-size)))
+                (size . ,(roost--terminal-size task)))
               #'roost-open-task))
 
 ;;;###autoload
@@ -6393,12 +6415,22 @@ Called when Roost first shows a side window, rather than when it loads;
 `roost-unload-function' stops it."
   (add-hook 'window-configuration-change-hook #'roost--layout-changed))
 
+(defun roost--mru-main-window ()
+  "The most recently used main window, or nil."
+  (car (sort (roost--main-windows)
+             (lambda (a b) (> (window-use-time a) (window-use-time b))))))
+
+(defun roost--selected-main-window ()
+  "The selected window, or the most recently used main window if a side one."
+  (if (window-parameter nil 'window-side)
+      (roost--mru-main-window)
+    (selected-window)))
+
 (defun roost--leave-side-window ()
   "Select the most recently used main window if a side window is selected.
 Tasks open in the main area, never in the sidebar or the task panel."
   (when (window-parameter nil 'window-side)
-    (when-let* ((window (car (sort (roost--main-windows)
-                                   (lambda (a b) (> (window-use-time a) (window-use-time b)))))))
+    (when-let* ((window (roost--mru-main-window)))
       (select-window window))))
 
 ;;;###autoload
