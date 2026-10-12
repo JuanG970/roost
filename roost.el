@@ -623,6 +623,14 @@ seconds (default 60)."
       (while (not done) (accept-process-output nil 0.05)))
     (if failure (user-error "%s" failure) result)))
 
+;; The agent starts before Emacs attaches, and tmux would give it 80 by 24.
+(defun roost--terminal-size ()
+  "The columns and rows of the window a task opens in, for starting its agent.
+Nil when no window can be measured."
+  (when-let* ((window (get-largest-window)))
+    `((width . ,(max 10 (window-max-chars-per-line window)))
+      (height . ,(max 10 (floor (with-selected-window window (window-screen-lines))))))))
+
 (defun roost--request (host action parameters success &optional failure)
   "Run ACTION with PARAMETERS on HOST, installing the versioned helper as needed.
 Call SUCCESS with the result, or FAILURE with an error message."
@@ -1464,6 +1472,7 @@ EXTRA is an alist of further request fields, such as the GitHub issue."
            ,(cons 'setup setup)
            ,(cons 'branchPrefix roost-branch-prefix)
            ,(cons 'programStatus (if roost-program-status t :false))
+           ,(cons 'size (roost--terminal-size))
            ,(cons 'socket (or roost-socket-name
                               (bound-and-true-p tmux-control-default-socket-name)
                               "main"))
@@ -1999,7 +2008,8 @@ FAILURE, if given, receives the error message instead of Roost reporting it."
   "Restart TASK, resuming its recorded agent conversation."
   (interactive)
   (roost--act (roost--choose task) "resume"
-              `((programStatus . ,(if roost-program-status t :false)))
+              `((programStatus . ,(if roost-program-status t :false))
+                (size . ,(roost--terminal-size)))
               #'roost-open-task))
 
 ;;;###autoload

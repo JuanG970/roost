@@ -741,7 +741,17 @@ def agent_for(task):
     return AGENTS[name]
 
 
-def spawn(store, task, resume=False):
+def size_options(request):
+    """The tmux arguments for the pane size Emacs asked for, or none."""
+    size = request.get("size")
+    if isinstance(size, dict):
+        width, height = size.get("width"), size.get("height")
+        if all(isinstance(n, int) and not isinstance(n, bool) and 10 <= n <= 1000 for n in (width, height)):
+            return ["-x", str(width), "-y", str(height)]
+    return []
+
+
+def spawn(store, task, resume=False, size=()):
     socket = task["socket"]
     session = task["session"]
     script = str(Path(__file__).resolve())
@@ -757,7 +767,9 @@ def spawn(store, task, resume=False):
     if tmux(socket, "has-session", "-t", "=" + session, check=False).returncode:
         # The task's own session holds only its agent's window, so stopping
         # or retiring the task, which closes that window, ends the session.
-        result = tmux(socket, "new-session", "-d", "-s", session, *window_options)
+        # At the size Emacs will show it, so the agent draws its first output
+        # for that width rather than tmux's 80 by 24.
+        result = tmux(socket, "new-session", "-d", "-s", session, *size, *window_options)
     else:
         # Its session is there already, as when a terminal reconnecting
         # after it ended started it again.
@@ -881,7 +893,7 @@ def create(store, request):
     with store.locked():
         try:
             store.save(task)
-            spawn(store, task)
+            spawn(store, task, size=size_options(request))
         except Exception:
             if task.get("windowId"):
                 tmux(socket, "kill-window", "-t", task["windowId"], check=False)
@@ -1157,7 +1169,7 @@ def stop(store, task, inventory=None):
     return task
 
 
-def resume(store, task, program_status=None):
+def resume(store, task, program_status=None, size=()):
     inventory = inventory_for(task)
     pane = owned_pane(task, inventory)
     if pane and not pane["dead"]:
@@ -1174,7 +1186,7 @@ def resume(store, task, program_status=None):
     # Whether its runner relays the agent's terminal, as Emacs says now.
     if isinstance(program_status, bool):
         task["programStatus"] = program_status
-    spawn(store, task, resume=True)
+    spawn(store, task, resume=True, size=size)
     return task
 
 
@@ -2722,7 +2734,8 @@ def outgoing(result):
 
 
 TASK_ACTIONS = {
-    "resume": lambda store, task, request: resume(store, task, request.get("programStatus")),
+    "resume": lambda store, task, request: resume(store, task, request.get("programStatus"),
+                                                        size_options(request)),
     "stop": lambda store, task, request: stop(store, task),
     "send": lambda store, task, request: send(task, request["text"], request.get("force") is True),
     "shell": lambda store, task, request: shell(store, task),

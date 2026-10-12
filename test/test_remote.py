@@ -1239,6 +1239,18 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.git("branch", "--list", "roost/*"), "")
         self.assertEqual(roost.pane_inventory(self.socket), {})
 
+    def test_a_task_starts_at_the_size_emacs_asks_for(self):
+        size = lambda task: roost.tmux(self.socket, "display-message", "-p", "-t", task["paneId"],
+                                       "#{pane_width}x#{pane_height}").stdout.strip()
+        task = self.create(name="sized", size=dict(width=137, height=41))
+        self.assertEqual(size(task), "137x41")
+        self.assertTrue(self.request("stop", id=task["id"])["ok"])
+        self.assertTrue(self.request("resume", id=task["id"], size=dict(width=120, height=33))["ok"])
+        self.assertEqual(size(self.wait(task, "ready")), "120x33")
+        # Nonsense is ignored, as when an older Emacs sends none.
+        odd = self.create(name="odd", size=dict(width=True, height="tall"))
+        self.assertEqual(size(odd), "80x24")
+
     def test_a_task_session_ends_with_the_task(self):
         # A session per task held a spare shell window, so each retired task
         # left its session behind.
