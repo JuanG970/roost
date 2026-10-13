@@ -20,6 +20,8 @@
 (declare-function tmux-control--pause-log-took "tmux-control" (start what))
 (defvar tmux-control--pause-log)
 (defvar tmux-control-pause-log-threshold)
+(defvar tmux-control--process)
+(defvar tmux-control--controller)
 (declare-function tmux-control-buffer-host "tmux-control" ())
 (declare-function tmux-control-buffer-socket-name "tmux-control" ())
 (declare-function tmux-control-buffer-session "tmux-control" ())
@@ -85,6 +87,51 @@ advised for this: natively compiled, they call each other directly."
         (setq qa--pauses-seen (car tmux-control--pause-log)))
       (seq-remove (lambda (note) (string-match-p "qa\\.py's own request took" note))
                   (reverse new)))))
+
+(defvar qa--commands-run (make-hash-table :test 'eq)
+  "The commands journeys ran, through the command loop.")
+
+(defun qa--note-command (command &rest _)
+  "Note COMMAND, run from a key or a menu, for `qa-commands-not-run'."
+  (when (and command (symbolp command))
+    (puthash command t qa--commands-run)))
+
+;; Keys and menus alike, transient's suffixes among them, run their
+;; commands through `command-execute'.
+(advice-add 'command-execute :before #'qa--note-command)
+
+(defun qa-commands-run ()
+  "The commands journeys ran, by name, for qa.py to keep across a restart."
+  (let (names)
+    (maphash (lambda (command _) (push (symbol-name command) names)) qa--commands-run)
+    names))
+
+(defun qa-commands-not-run ()
+  "Roost's and tmux-control's commands no journey ran, by name.
+The sweep runs commands too, but with what they reach outside their
+view stubbed out, so it doesn't count here."
+  (let (missing)
+    (mapatoms (lambda (symbol)
+                (let ((name (symbol-name symbol)))
+                  (when (and (commandp symbol)
+                             (string-match-p "\\`\\(?:roost\\|tmux-control\\)-" name)
+                             (not (string-match-p "--" name))
+                             ;; A major mode comes with the command that
+                             ;; shows its buffer.
+                             (not (and (string-suffix-p "-mode" name)
+                                       (not (memq symbol minor-mode-list))))
+                             (not (gethash symbol qa--commands-run)))
+                    (push name missing)))))
+    (sort missing #'string<)))
+
+(defun qa-terminal-pid ()
+  "The process id of the connection behind the selected terminal."
+  (with-current-buffer (window-buffer (selected-window))
+    (process-id (buffer-local-value 'tmux-control--process
+                                    (or (and (boundp 'tmux-control--controller)
+                                             (buffer-live-p tmux-control--controller)
+                                             tmux-control--controller)
+                                        (current-buffer))))))
 
 (defun qa-take-errors ()
   "Every error since the last call, oldest first, and forget them."

@@ -157,7 +157,7 @@ for you, permission requests first. Answer it in the terminal, then `n` again.
 A link the agent shows there, such as the pull request it opened, opens with
 `C-c C-u`, which offers each link on the screen, and with a click when the
 agent marks it as a link, as Claude Code does with tmux 3.4 or later (both
-need tmux-control later than 0.7.2).
+need tmux-control 0.8.0 or later).
 A finished agent you have looked at stops counting, and turns grey, until it
 replies again; one that failed or stopped by itself stops counting once you've
 seen it. What you've seen is kept on the task's host, for your other machines
@@ -180,7 +180,7 @@ when the terminal would drop below 80 columns, and `q` in it turns it off.
 **Check the work yourself.** `t` opens a shell beside the agent, in the same
 worktree, and returns to it after. Run the tests, start the app, poke at it.
 The agent and the shell are tmux panes, each in a window of its own: `C-x o`
-moves between them (so does `C-c C-o`, with tmux-control later than 0.7.2),
+moves between them (so does `C-c C-o`, with tmux-control 0.8.0 or later),
 `C-c C-t` shows one at a time, and tmux-control's other pane keys work too. `C-c |` splits off another pane,
 which starts in the worktree; it closes when its program exits, and every
 pane closes when the task stops.
@@ -479,8 +479,10 @@ resume an agent, retire a task or discard its work, send a prompt, bring a
 task up to date, restart Emacs with agents at work, search the
 conversations, work in a second frame, start a task from an Org heading,
 keep a tab per task, two of the same name among them, forget a task, fork
-one's commits, resume an agent that exited, see a host it can't reach, and
-read back through a long reply in tmux-control's scrollback. They press keys
+one's commits, resume an agent that exited, see a host it can't reach,
+read back through a long reply in tmux-control's scrollback, move between
+agents that all print at once, and reconnect a terminal whose connection
+dropped. They press keys
 and click through Emacs's command loop. After each step it checks for Lisp errors, in
 commands, timers and process filters alike, for a backtrace, for lines of
 Roost's views cut off at the window's edge, for another task's terminal
@@ -488,9 +490,11 @@ beside the current task's, and for a terminal that shows other than what
 tmux has in its pane, or history nobody scrolled it to. With tmux-control's
 `tmux-control-pause-log-mode`, it also fails a step in which Emacs stopped
 responding for a second or more, and says what Emacs was doing. It runs the
-sweep where text is measured in pixels, too. It takes about two minutes, writes `report.html` with each step's
-windows, the echo area and, on macOS, a screenshot, and fails if anything was
-wrong. A problem known to come from elsewhere, such as a bug in tmux-control
+sweep where text is measured in pixels, too. It takes about five minutes,
+writes `report.html` with each step's windows, the echo area and, on macOS, a
+screenshot, and fails if anything was wrong. The report ends with the commands
+of Roost and tmux-control that no journey ran: where the next journeys should
+go. A problem known to come from elsewhere, such as a bug in tmux-control
 awaiting its release, is marked `Known` in its journey: it is reported,
 without failing the run, until it stops happening. Look at the
 screenshots too: the checks don't see what merely looks wrong. Emacs needs
@@ -501,6 +505,20 @@ tmux-control and its dependencies:
 Package directories are read, never written. `--load FILE` in `QA_FLAGS` loads
 Emacs Lisp after Roost, such as a change to try, and `--keep` leaves the Emacs
 and its tmux server running. A new flow gets a journey in `test/qa/qa.py`.
+
+Two options take the same journeys elsewhere. `--remote` puts the tasks on
+`qa-remote`, a host reached over SSH as yours are: `test/qa/fake_ssh.py` stands
+in for `ssh` and runs each command here, with its own home, delaying what goes
+each way by `--latency` seconds (0.15 by default). Roost's requests,
+tmux-control's connections and TRAMP all go through it, so replies arrive as
+late as a remote host's do, which is where races between them show. Magit's
+review is left out there: over TRAMP's `ssh` method it takes most of a minute.
+`--tuned` gives Emacs settings many configurations have: pixel scrolling, a
+1 GB garbage collection threshold, tmux-control's idle collection, and pane
+directories, which make a remote terminal's directory a TRAMP one. Pass them
+in `QA_FLAGS`, as make takes long options for itself:
+
+    make qa QA_FLAGS="--remote --tuned -L ../tmux-control --package-dir ~/.emacs.d/elpa"
 
 Claude Code updates itself often, and Roost relies on what it reports and
 does. `make contract` scans the installed Claude Code for the hook events,

@@ -1748,6 +1748,41 @@
            (push-button (1- (point))))
          (should (string-suffix-p ":dev:/srv/ledger/" started)))))))
 
+(ert-deftest roost-a-draft-on-a-host-not-connected-to-takes-a-known-project ()
+  ;; Composing in a remote directory looked for its checkout there, which
+  ;; held Emacs while TRAMP connected, for a project Roost already knew.
+  (roost-test--isolated
+   (let ((roost--remembered-projects '("/ssh:dev:/srv/ledger/" "/ssh:dev:/srv/ledger/tools/"
+                                       "/ssh:alice@dev:/srv/ledger/"))
+         (roost--projects-loaded t)
+         looked)
+     (cl-letf (((symbol-function 'locate-dominating-file) (lambda (&rest _) (setq looked t) nil))
+               ((symbol-function 'vc-root-dir) (lambda (&rest _) (setq looked t) nil)))
+       (with-temp-buffer
+         (setq default-directory "/ssh:dev:/srv/ledger/src/")
+         (should (equal (roost--compose-default-directory nil nil) "/ssh:dev:/srv/ledger/"))
+         ;; The deepest project it is in.
+         (setq default-directory "/ssh:dev:/srv/ledger/tools/bin/")
+         (should (equal (roost--compose-default-directory nil nil) "/ssh:dev:/srv/ledger/tools/"))
+         ;; Whatever TRAMP method names it.
+         (setq default-directory "/scp:dev:/srv/ledger/tools/bin/")
+         (should (equal (roost--compose-default-directory nil nil) "/ssh:dev:/srv/ledger/tools/"))
+         ;; Not the same path on another host, or as another user.
+         (setq default-directory "/ssh:other:/srv/ledger/src/")
+         (should-not (roost--known-project-of default-directory))
+         (setq default-directory "/ssh:bob@dev:/srv/ledger/src/")
+         (should-not (roost--known-project-of default-directory))
+         (setq default-directory "/scp:alice@dev:/srv/ledger/src/")
+         (should (equal (roost--known-project-of default-directory) "/ssh:alice@dev:/srv/ledger/"))
+         ;; Outside them, on a host not connected to, the latest project.
+         (setq default-directory "/ssh:dev:/tmp/")
+         (should (equal (roost--compose-default-directory nil nil) "/ssh:dev:/srv/ledger/"))
+         (should-not looked)
+         ;; A local directory is looked in.
+         (setq default-directory temporary-file-directory)
+         (roost--compose-default-directory nil nil)
+         (should looked))))))
+
 (ert-deftest roost-sidebar-mode-pins-a-left-window ()
   (roost-test--isolated
    (save-window-excursion

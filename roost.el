@@ -1709,11 +1709,44 @@ worktree; explicit HEAD uses DIRECTORY.  Nil AGENT uses
 On a project's heading in the dashboard or sidebar, that project."
   (cond (task (if fork (roost--remote-directory task) (roost--project-directory task)))
         ((get-text-property (point) 'roost-directory))
-        ((ignore-errors (vc-root-dir)))
+        ;; On a host TRAMP has not connected to yet, looking there would
+        ;; connect, while you wait: then a project Roost knows the directory
+        ;; is in, by name.
+        ((and (roost--may-look-in-p default-directory) (ignore-errors (vc-root-dir))))
+        ((roost--known-project-of default-directory))
         ;; Buffers VC does not track, such as Dired or a shell, in a checkout.
-        ((when-let* ((root (ignore-errors (locate-dominating-file default-directory ".git"))))
+        ((when-let* (((roost--may-look-in-p default-directory))
+                     (root (ignore-errors (locate-dominating-file default-directory ".git"))))
            (file-name-as-directory (expand-file-name root))))
         ((car (roost--known-projects)))))
+
+(defun roost--may-look-in-p (directory)
+  "Whether looking in DIRECTORY opens no connection: it is local, or on a
+host TRAMP is connected to."
+  (or (not (file-remote-p directory)) (file-remote-p directory nil t)))
+
+(defun roost--known-project-of (directory)
+  "The project Roost knows that DIRECTORY is in, the deepest, or nil.
+By SSH destination and path alone, whatever TRAMP method names them, so
+a remote DIRECTORY opens no connection."
+  (when-let* ((place (roost--host-and-path directory)))
+    (cdr (car (sort (seq-filter (lambda (project)
+                                  (and (equal (car (car project)) (car place))
+                                       (string-prefix-p (cdr (car project)) (cdr place))))
+                                (seq-keep (lambda (project)
+                                            (when-let* ((at (roost--host-and-path project)))
+                                              (cons at project)))
+                                          (roost--known-projects)))
+                    (lambda (a b) (> (length (cdr (car a))) (length (cdr (car b))))))))))
+
+(defun roost--host-and-path (directory)
+  "DIRECTORY's SSH destination, nil if local, and its path there.
+As (HOST . PATH), HOST with its user, as `roost--directory-host' gives
+it.  By name, without connecting; nil for a name TRAMP can't read, such
+as one with a method not loaded."
+  (ignore-errors
+    (cons (roost--directory-host directory)
+          (file-name-as-directory (file-local-name (expand-file-name directory))))))
 
 (defun roost--compose-seed ()
   "Prompt text from the current buffer, or nil.
