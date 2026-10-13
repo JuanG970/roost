@@ -58,8 +58,12 @@ class Emacs:
         self.server = server
 
     def eval(self, expression, timeout=60):
-        reply = subprocess.run(["emacsclient", "--socket-name", self.server, "--eval", expression],
-                               capture_output=True, text=True, timeout=timeout)
+        try:
+            reply = subprocess.run(["emacsclient", "--socket-name", self.server, "--eval", expression],
+                                   capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Its command loop is busy, or waits for something.
+            raise Stuck("Emacs didn't answer in %ds" % timeout) from None
         if reply.returncode:
             raise RuntimeError("emacsclient: %s" % (reply.stderr.strip() or reply.stdout.strip()))
         return reply.stdout.strip()
@@ -80,6 +84,9 @@ class Run:
         # The run's project, state and Emacs, new each time, beside the report.
         self.work = self.out / self.name
         self.work.mkdir()
+        # Git as it comes, without your configuration's hooks or signing.
+        (self.work / "gitconfig").write_text("")
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(self.work / "gitconfig"), GIT_CONFIG_NOSYSTEM="1")
         self.emacs = Emacs(self.name)
         self.process = None
         self.steps = []
@@ -92,7 +99,7 @@ class Run:
 
     def git(self, cwd, *args):
         return subprocess.run(["git", "-C", str(cwd)] + list(args), check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, env=self.env).stdout.strip()
 
     def project(self):
         """A small project to work in, with one commit."""
@@ -165,7 +172,8 @@ class Run:
         log = open(self.work / "emacs.log", "w")
         # No site-start.el either: nothing of this machine's own setup.
         self.process = subprocess.Popen([self.args.emacs, "--no-site-file", "--init-directory", str(init)],
-                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                        env=self.env)
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -173,7 +181,7 @@ class Run:
             try:
                 if self.emacs.eval("(featurep 'qa)") == "t":
                     break
-            except (RuntimeError, subprocess.TimeoutExpired):
+            except (RuntimeError, Stuck):
                 pass
             time.sleep(0.5)
         else:
@@ -227,7 +235,9 @@ class Run:
     def settle(self, quiet=0.4):
         """Wait until Emacs has taken the input, and a moment for what it started."""
         deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and self.emacs.eval("(qa-idle-p)") != "t":
+        while self.emacs.eval("(qa-idle-p)", timeout=max(1, deadline - time.monotonic())) != "t":
+            if time.monotonic() > deadline:
+                raise Stuck("Emacs didn't take the input in 20s")
             time.sleep(0.1)
         time.sleep(quiet)
 
@@ -433,12 +443,14 @@ def fold(qa, repo):
     qa.step("Shown whole", expect=[
         ("the whole prompt, with a way to fold it",
          lambda s: "Collapse prompt" in qa.window(s, "roost-task-info-mode")["text"]
-         and "keep the existing ones passing" in qa.window(s, "roost-task-info-mode")["text"])])
+         and "keep the existing ones passing" in qa.window(s, "roost-task-info-mode")["text"]),
+        ("point on the way back", lambda s: s["at"] == "Collapse prompt")])
     qa.click("Collapse prompt")
     qa.step("Folded again", expect=[
         ("the panel as it was",
          lambda s: unclocked(qa.window(s, "roost-task-info-mode")["text"])
-         == unclocked(qa.window(folded, "roost-task-info-mode")["text"]))])
+         == unclocked(qa.window(folded, "roost-task-info-mode")["text"])),
+        ("point on the way back", lambda s: s["at"] == "Show the whole prompt")])
 
 
 def panel_fits(qa, screen):
@@ -578,8 +590,12 @@ def main():
             try:
                 chosen_journey(qa, repo)
             except Stuck as stuck:
+                try:
+                    screen = qa.screen()
+                except Stuck:
+                    screen = dict(windows=[])
                 qa.steps.append(dict(journey=qa.journey, title="Stopped", problems=[str(stuck)],
-                                     shot=None, screen=qa.screen()))
+                                     shot=None, screen=screen))
                 print("  ✗ Stopped: %s" % stuck)
     finally:
         try:
