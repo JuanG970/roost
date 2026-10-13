@@ -725,15 +725,24 @@ class Lifecycle(unittest.TestCase):
     def test_a_full_listing_names_the_changed_files(self):
         task = self.create()
         wt = Path(task["worktree"])
+        (wt / "done").write_text("committed\n")
+        self.git("add", "done", cwd=wt)
+        self.git("commit", "-q", "-m", "Add done", cwd=wt)
         (wt / "hello").write_text("one\ntwo\n")
         self.git("mv", "hello", "greeting", cwd=wt)
         (wt / "new file").write_text("x\n")
         (wt / "image").write_bytes(b"\0\1")
         self.git("add", "image", cwd=wt)
         files = self.request("list", full=True)["result"][0]["files"]
-        self.assertIn(dict(path="image"), files)
+        # Files with changes not yet committed, staged or not, are marked.
+        self.assertIn(dict(path="done", added=1, deleted=0), files)
+        self.assertIn(dict(path="image", uncommitted=True), files)
         self.assertIn(dict(path="new file", untracked=True), files)
-        self.assertIn(dict(path="greeting", added=2, deleted=0), files)
+        self.assertIn(dict(path="greeting", added=2, deleted=0, uncommitted=True), files)
+        # A list cut short keeps the files not yet committed.
+        self.assertEqual([file["path"] for file in roost.changed_files(wt, "main", {"image"}, limit=2)],
+                         ["image", "new file"])
+        self.assertEqual(roost.status_paths("R  new\0old\0 M a b\0?? c\0"), {"new", "a b", "c"})
         # Like the other statistics, the list is never saved in the record.
         store = roost.Store(str(self.state))
         store.save(dict(store.read(task["id"]), files=files))
