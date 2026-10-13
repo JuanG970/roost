@@ -1330,6 +1330,34 @@ buffer list of one task would offer the terminals of the others."
                        (equal (tmux-control-window-id) (roost--field task 'windowId)))))
               (window-list))))
 
+(defun roost--terminal-task (buffer)
+  "The task whose terminal BUFFER is, or nil.
+A session shared by tasks from before each had its own is no one's, and
+a view of a terminal, such as its scrollback, is no terminal."
+  (with-current-buffer buffer
+    (when (and (derived-mode-p 'tmux-control-mode)
+               (fboundp 'tmux-control-buffer-session) (tmux-control-buffer-session))
+      (let ((tasks (seq-filter (lambda (task)
+                                 (and (equal (roost--field task 'host) (tmux-control-buffer-host))
+                                      (equal (roost--field task 'socket) (tmux-control-buffer-socket-name))
+                                      (equal (roost--field task 'session) (tmux-control-buffer-session))))
+                               (roost-tasks))))
+        (and tasks (null (cdr tasks)) (car tasks))))))
+
+(defun roost--terminal-window-for (task)
+  "The window to show TASK's terminal in, or nil for the selected one.
+That is the window showing it already, or else one showing another
+task's terminal, the one used last: TASK takes its place, rather than
+that of a code or Magit window selected beside it, which would leave
+the other task's terminal on screen.  TASK's own panes, when tiled, are
+not another task's: they keep their grid."
+  (or (roost--task-terminal-window task)
+      (seq-find (lambda (window)
+                  (when-let* ((shown (roost--terminal-task (window-buffer window))))
+                    (not (equal (roost--key shown) (roost--key task)))))
+                (sort (roost--main-windows)
+                      (lambda (a b) (> (window-use-time a) (window-use-time b)))))))
+
 (defun roost--display-task (task &optional target-pane)
   "Display TASK after ownership validation, selecting TARGET-PANE if supplied."
   (require 'tmux-control)
@@ -1338,11 +1366,7 @@ buffer list of one task would offer the terminals of the others."
   (roost--leave-side-window)
   (roost--activate-workspace task)
   (roost--leave-side-window)
-  ;; Reuse the saved terminal window instead of replacing its neighboring
-  ;; code or Magit window when that happened to be selected on departure.
-  ;; A tiled pane's window is left alone: the session buffer would replace
-  ;; that pane in the grid.
-  (when-let* ((window (roost--task-terminal-window task)))
+  (when-let* ((window (roost--terminal-window-for task)))
     (select-window window))
   (tmux-control-connect-or-switch (roost--field task 'host) (roost--field task 'socket)
                                   (roost--field task 'session))
@@ -1359,6 +1383,11 @@ buffer list of one task would offer the terminals of the others."
   (roost--mark-seen (or (gethash (roost--key task) roost--tasks) task))
   (roost--watch-layout)
   (roost--sync-side-windows)
+  ;; The sidebar marks the task now, rather than once its host replies.
+  (when-let* ((sidebar (get-buffer roost--sidebar-buffer)))
+    (with-current-buffer sidebar
+      (when (derived-mode-p 'roost-sidebar-list-mode)
+        (roost--render-visible #'roost--render-sidebar))))
   (when (roost--task-panel-window)
     (roost--refresh-host (roost--field task 'host) nil)))
 
@@ -5843,6 +5872,10 @@ The mark stays where it was."
 (defun roost--redraw ()
   "Refresh an existing dashboard and task panels without changing focus."
   (roost--note-watched-agent)
+  ;; Before the sidebar is drawn, so that it marks a task taken up.
+  (dolist (frame (frame-list))
+    (unless (frame-parent frame)
+      (with-selected-frame frame (roost--adopt-shown-task))))
   ;; Mode lines are redrawn with their windows, so a terminal you are not
   ;; typing in would keep showing an old count.
   (let ((count (roost--mode-line-count t)))
@@ -6430,12 +6463,32 @@ Ediff's control frame, are left alone."
 (defun roost--frame-task ()
   "Return the task for the selected frame's task panel.
 With workspaces, that is the task whose workspace is current; without,
-the task last used in the frame."
+the task last used in the frame, or taken up since; see
+`roost--adopt-shown-task'."
   (if (roost--workspace-backend)
       (when-let* ((current (roost--current-workspace)))
         (seq-find (lambda (task) (equal (roost--workspace-name task) current))
                   (roost-tasks)))
     (gethash (frame-parameter nil 'roost-task) roost--tasks)))
+
+(defun roost--adopt-shown-task ()
+  "Take up the task whose terminal the selected frame shows, if its own is gone.
+Once the task last used in the frame is gone, as when merged, Emacs shows
+another buffer in its place, perhaps another task's terminal: the frame
+takes that task up as if opened there, for its panel and the sidebar's
+marker, and keeps it when a draft later covers the terminal.  Without
+workspaces only, where the frame records its task."
+  (unless (or (roost--workspace-backend)
+              (gethash (frame-parameter nil 'roost-task) roost--tasks))
+    ;; The terminal used last, though Magit or a file was used since.
+    (when-let* ((task (seq-some (lambda (window) (roost--terminal-task (window-buffer window)))
+                                (sort (roost--main-windows)
+                                      (lambda (a b) (> (window-use-time a) (window-use-time b)))))))
+      (set-frame-parameter nil 'roost-task (roost--key task))
+      ;; The task last opened is likely the one gone: the sidebar, one for
+      ;; every frame, marks the task opened last, now this one.
+      (unless (gethash roost--current-task roost--tasks)
+        (setq roost--current-task (roost--key task))))))
 
 (defun roost--task-panel-window ()
   "The task panel docked in the selected frame, if any."
@@ -6460,6 +6513,7 @@ See `roost-sidebar-mode' and `roost-task-panel-mode'.  This only adds and
 removes windows; their contents follow task updates, so a panel you have
 scrolled stays where you left it."
   (when (roost--side-frame-p)
+    (roost--adopt-shown-task)
     (let ((sidebar (get-buffer-window roost--sidebar-buffer)))
       (cond ((and roost-sidebar-mode (not sidebar)
                   (>= (frame-width) (+ roost-sidebar-width 80)))

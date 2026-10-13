@@ -46,6 +46,16 @@ class Stuck(Exception):
     """A journey can't go on: what it waited for never came."""
 
 
+class Known(tuple):
+    """An expectation that fails for a known reason, reported but not a problem:
+    Known((DESCRIPTION, CHECK)).  The report says when it starts to hold."""
+
+
+def qa_sidebar(screen):
+    """Whether SCREEN shows the sidebar."""
+    return any(w["mode"] == "roost-sidebar-list-mode" for w in screen["windows"])
+
+
 def lisp(value):
     """VALUE as an Emacs Lisp string literal."""
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -244,6 +254,11 @@ class Run:
     def screen(self):
         return self.emacs.json("(qa-screen)")
 
+    def tmux(self, *args):
+        """What tmux on this run's socket says to ARGS, as lines."""
+        return subprocess.run(["tmux", "-L", self.name] + list(args), capture_output=True,
+                              text=True).stdout.split("\n")[:-1]
+
     def wait(self, what, check, timeout=40):
         """Wait until CHECK, given the screen, holds."""
         deadline = time.monotonic() + timeout
@@ -309,26 +324,52 @@ class Run:
         for name in screen["buffers"]:
             if name == "*Backtrace*":
                 problems.append("A backtrace is showing")
+        task = screen.get("task")
+        # By key: tasks can share a name.  The sidebar, one for every frame,
+        # marks the task opened last; QA's Emacs has one frame, its task.
+        if task and qa_sidebar(screen) and screen.get("marked") != task["key"]:
+            problems.append("The sidebar marks %s, not %s, the frame's task (%s)"
+                            % (screen.get("marked"), task["key"], task["name"]))
         for window in screen["windows"]:
+            if window.get("terminal") and not window.get("child"):
+                if not task:
+                    problems.append("%s, a terminal, is on screen with no task for the frame" % window["buffer"])
+                elif window["terminal"] != task["terminal"]:
+                    problems.append("%s, another task's terminal, is beside %s's" % (window["buffer"], task["name"]))
+            if window["mode"] == "roost-sidebar-list-mode" and window["total"] != screen["sidebar-width"]:
+                problems.append("The sidebar is %d columns wide, not %d" % (window["total"], screen["sidebar-width"]))
             if window.get("overflow"):
                 over = window["overflow"]
                 problems.append("%s: %d lines cut off at the window's edge (%d px), the first %d px: %r" % (
                     window["buffer"], len(over["lines"]), over["width"], over["lines"][0][1],
                     over["lines"][0][0].strip()[:60]))
-        for description, check in expect:
+        known = []
+        for expectation in expect:
+            description, check = expectation[:2]
+            raised = False
             try:
                 ok = check(screen)
             except Exception as error:
-                ok = False
+                ok, raised = False, True
                 description += " (%s)" % error
-            if not ok:
+            # A check that broke is a problem, known or not: only its plain
+            # failure is the known behavior.
+            if isinstance(expectation, Known) and not raised:
+                if ok:
+                    self.notes.add("A known problem no longer happens, so it can be an expectation: "
+                                   + description)
+                else:
+                    known.append(description)
+            elif not ok:
                 problems.append("Expected: " + description)
-        self.steps.append(dict(journey=self.journey, title=title, problems=problems,
+        self.steps.append(dict(journey=self.journey, title=title, problems=problems, known=known,
                                shot=self.shot(), screen=screen))
         mark = "✗" if problems else "✓"
         print("  %s %s" % (mark, title))
         for problem in problems:
             print("      " + problem)
+        for description in known:
+            print("      known: " + description)
         return screen
 
     # Reporting
@@ -341,10 +382,13 @@ class Run:
             if step["journey"] != journey:
                 journey = step["journey"]
                 rows.append("<h2>%s</h2>" % html.escape(journey))
-            problems = "".join("<li>%s</li>" % html.escape(p) for p in step["problems"])
+            problems = "".join("<li>%s</li>" % html.escape(p) for p in step["problems"]) + "".join(
+                '<li class="known">Known: %s</li>' % html.escape(k) for k in step.get("known", []))
             windows = "".join(
-                "<details><summary>%s (%s, %d×%d)</summary><pre>%s</pre></details>" % (
+                "<details><summary>%s (%s, %d×%d)%s</summary><pre>%s</pre></details>" % (
                     html.escape(w["buffer"]), html.escape(w["mode"]), w["columns"], w["lines"],
+                    "".join(" · %s %s" % (label, html.escape(w[key]))
+                            for key, label in (("terminal", "session"), ("tabs", "tabs")) if w.get(key)),
                     html.escape(w["text"]))
                 for w in step["screen"]["windows"])
             shot = ('<img src="%s" alt="The frame after: %s">' % (step["shot"], html.escape(step["title"]))
@@ -366,6 +410,7 @@ section.bad { border-color: #c33; }
 img { max-width: 100%%; border-radius: 6px; }
 pre { overflow-x: auto; font-size: 12px; }
 li { color: #c33; }
+li.known { color: #888; }
 </style>
 <h1>Roost QA</h1>
 <p>%s · %d steps, %d with problems · Roost at %s</p>
@@ -503,7 +548,9 @@ def merge(qa, repo):
         ("its panel is beside the terminal", lambda s: qa.window(s, "roost-task-info-mode")["text"].startswith(name))])
     qa.type("yes\r")
     qa.status(name, "ready", "idle")
-    qa.wait("its commit", lambda s: "TODO.md" in (qa.window(s, "roost-task-info-mode") or {}).get("text", ""))
+    # Listed under Committed: before, it can show between the agent's add and commit.
+    qa.wait("its commit", lambda s: re.search(r"Committed\n\s*TODO\.md",
+                                              (qa.window(s, "roost-task-info-mode") or {}).get("text", "")))
     qa.step("Committed", expect=[
         ("the panel lists the commit's file", lambda s: "Committed" in qa.window(s, "roost-task-info-mode")["text"]),
         ("and says m merges it", lambda s: "m merges it" in qa.window(s, "roost-task-info-mode")["text"])])
@@ -541,7 +588,8 @@ def review(qa, repo):
     qa.keys("RET ;")
     qa.wait("the note box", lambda s: (qa.window(s, "roost-note-box-mode") or {}).get("selected"))
     qa.step("A box under the line", expect=[
-        ("it is a frame of its own", lambda s: qa.window(s, "roost-note-box-mode")["child"])])
+        ("it is a frame of its own", lambda s: qa.window(s, "roost-note-box-mode")["child"]),
+        ("the task is still the frame's, for the checks", lambda s: (s.get("task") or {}).get("name") == name)])
     qa.type("Call it DUE_TODAY.")
     qa.keys("C-c C-c")
     qa.wait("the note under its line", lambda s: "Call it DUE_TODAY." in
@@ -558,7 +606,96 @@ def review(qa, repo):
     qa.step("The agent has the note")
 
 
-JOURNEYS = [sweep, answer, fold, resize, merge, review]
+def panel_text(qa, screen):
+    """The docked panel's text, or else that of the first task panel on screen."""
+    docked = next((w for w in screen["windows"]
+                   if w["mode"] == "roost-task-info-mode" and w.get("side") == "right"), None)
+    return (docked or qa.window(screen, "roost-task-info-mode") or {}).get("text", "")
+
+
+def terminals(screen, terminal=None):
+    """The terminal windows on SCREEN, or those of TERMINAL's session."""
+    return [w for w in screen["windows"]
+            if w.get("terminal") and (terminal is None or w["terminal"] == terminal)]
+
+
+def selected_terminal(screen):
+    return next((w for w in screen["windows"] if w.get("terminal") and w["selected"]), None)
+
+
+def start_task(qa, prompt, prefix):
+    """Start a task with PROMPT and wait until it is ready; return its name."""
+    qa.keys("C-c r c")
+    qa.type(prompt)
+    qa.keys("C-c C-c")
+    screen = qa.wait("the task " + prefix, lambda s: any(t["name"].startswith(prefix) for t in s["tasks"]))
+    name = next(t["name"] for t in screen["tasks"] if t["name"].startswith(prefix))
+    qa.status(name, "ready", "idle")
+    return name
+
+
+def open_task(qa, name):
+    qa.keys("C-c r l")
+    qa.type(name + "\r")
+    return qa.wait(name + "'s terminal", lambda s: (s.get("task") or {}).get("name") == name
+                   and selected_terminal(s))
+
+
+@journey("Panes and windows across tasks")
+def panes(qa, repo):
+    """Each task keeps its own panes and windows, in its own terminal."""
+    first = start_task(qa, "Count to three", "count-three")
+    second = start_task(qa, "Count to five", "count-five")
+    screen = open_task(qa, first)
+    own = screen["task"]["terminal"]
+    qa.keys("C-c |")
+    qa.step("Split in two", expect=[
+        ("two panes of its own", lambda s: len(terminals(s, own)) == 2)])
+    qa.keys("M-x")
+    qa.type("tmux-control-new-window\r")
+    qa.wait("the name prompt", lambda s: s["prompt"])
+    qa.keys("RET")
+    session = own.split("/")[-1]
+    qa.wait("a second window", lambda s: len(qa.tmux("list-windows", "-t", session)) == 2)
+    # As tmux numbers them: your configuration may start at 1.
+    window_a, window_b = qa.tmux("list-windows", "-t", session, "-F", "#{window_index}")
+    # tmux-control shows no tabs while a session is split into panes.
+    qa.step("A second tmux window", expect=[
+        Known(("its tab is the highlighted one",
+               lambda s: "[%s:" % window_b in (selected_terminal(s).get("tabs") or "")))])
+    qa.keys("C-c C-p")
+    qa.step("Back to the first window", expect=[
+        Known(("its tab is the highlighted one",
+               lambda s: "[%s:" % window_a in (selected_terminal(s).get("tabs") or ""))),
+        ("with both its panes", lambda s: len(terminals(s, own)) == 2)])
+    qa.keys("C-c C-w")
+    qa.wait("the window chooser", lambda s: any("chooser" in w["buffer"] for w in s["windows"]))
+    qa.step("Choosing a window", expect=[
+        ("it offers the task's two windows and no others",
+         lambda s: [l.split(":")[0] for l in next(w for w in s["windows"] if "chooser" in w["buffer"])["text"]
+                    .split("\n") if re.match(r"\s*\d+:", l)] == [window_a, window_b])])
+    qa.keys("q")
+    screen = open_task(qa, second)
+    qa.step("The other task", expect=[
+        ("only its own terminal", lambda s: terminals(s)
+         and all(w["terminal"] == s["task"]["terminal"] for w in terminals(s))),
+        ("its panel beside it", lambda s: (qa.window(s, "roost-task-info-mode") or {}).get("text", "").startswith(second))])
+    qa.keys("C-c C-s")
+    qa.wait("the session prompt", lambda s: s["prompt"])
+    qa.step("Choosing a session")
+    qa.type(session + "\r")
+    qa.wait(first + " again", lambda s: (s.get("task") or {}).get("name") == first)
+    qa.step("Back to the first task", expect=[
+        ("its two panes, as it left them", lambda s: len(terminals(s, own)) == 2),
+        ("and nothing of the other task's", lambda s: all(w["terminal"] == own for w in terminals(s)))])
+    qa.keys("C-c C-o")
+    qa.type("exit\r")
+    qa.wait("the shell to go", lambda s: len(terminals(s, own)) == 1)
+    qa.step("One pane again", expect=[
+        ("its panel back beside it", lambda s: panel_text(qa, s).startswith(first))])
+
+
+JOURNEYS = [sweep, answer, fold, resize, merge, review, panes]
 
 
 def main():

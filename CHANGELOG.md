@@ -6,6 +6,17 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.8.1:
 
+- When `m` merges the task whose terminal is on screen, the panel and the
+  sidebar's marker follow the task whose terminal Emacs shows in its place;
+  before, no panel came back until you opened a task. Opening a task marks
+  it in the sidebar at once, rather than when its host replies. Nothing to do
+  when upgrading.
+- Opening a task shows its terminal in place of another task's, rather than
+  in a code or Magit window selected beside it, which left the other task's
+  terminal on screen. With tmux-control later than 0.7.2, switching away from
+  a task whose terminal is split into panes no longer leaves those panes
+  beside the next task's, and they come back when you return. To upgrade,
+  update tmux-control too.
 - In the task panel, a task's status goes below its name when they don't
   fit on one line, rather than breaking after "for". Showing or folding the
   prompt or the latest reply leaves point on the button that takes it back,
