@@ -94,9 +94,21 @@ class Run:
         # The run's project, state and Emacs, new each time, beside the report.
         self.work = self.out / self.name
         self.work.mkdir()
-        # Git as it comes, without your configuration's hooks or signing.
+        # Git as it comes, without your configuration's hooks or signing,
+        # and a home of the run's own: no ~/.tmux.conf or shell setup of
+        # yours, and the fake agent's transcripts not among your Claude's.
         (self.work / "gitconfig").write_text("")
-        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(self.work / "gitconfig"), GIT_CONFIG_NOSYSTEM="1")
+        home = self.work / "home"
+        home.mkdir()
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(self.work / "gitconfig"), GIT_CONFIG_NOSYSTEM="1",
+                        HOME=str(home), FAKE_CLAUDE_TRANSCRIPTS="1",
+                        # Where tmux and others look besides the home.
+                        XDG_CONFIG_HOME=str(home / ".config"), XDG_DATA_HOME=str(home / ".local/share"),
+                        XDG_STATE_HOME=str(home / ".local/state"), XDG_CACHE_HOME=str(home / ".cache"))
+        # Shell startup files named outside the home, and the tmux you may
+        # be running this in.
+        for name in ("ZDOTDIR", "BASH_ENV", "ENV", "TMUX", "TMUX_PANE"):
+            self.env.pop(name, None)
         self.emacs = Emacs(self.name)
         self.process = None
         self.steps = []
@@ -850,6 +862,28 @@ def restart(qa, repo):
         ("its panel beside it", lambda s: panel_text(qa, s).startswith(name))])
 
 
+@journey("Search the conversations")
+def search(qa, repo):
+    name = start_task(qa, "Find the needle in the notes", None)
+    qa.keys("C-c r /")
+    qa.wait("the search prompt", lambda s: s["prompt"])
+    qa.type("needle\r")
+    qa.wait("the results", lambda s: name in (qa.window(s, "roost-search-mode") or {}).get("text", ""))
+    qa.step("Messages with the word", expect=[
+        ("yours", lambda s: "You" in qa.window(s, "roost-search-mode")["text"]),
+        ("and the agent's", lambda s: "PROMPT Find the needle" in qa.window(s, "roost-search-mode")["text"])])
+    results = qa.window(qa.screen(), "roost-search-mode")["text"]
+    qa.keys("TAB")
+    qa.step("A message shown whole", expect=[
+        ("more than before", lambda s: qa.window(s, "roost-search-mode")["text"] != results)])
+    qa.keys("TAB")
+    qa.step("Folded again", expect=[
+        ("as it was", lambda s: qa.window(s, "roost-search-mode")["text"] == results)])
+    qa.keys("RET")
+    qa.wait("its terminal", lambda s: (s.get("task") or {}).get("name") == name and selected_terminal(s))
+    qa.step("RET opens its task", expect=[("its panel beside it", lambda s: panel_text(qa, s).startswith(name))])
+
+
 @journey("A second frame")
 def frames(qa, repo):
     """Each frame keeps its own task: what one shows, the other leaves alone."""
@@ -897,7 +931,7 @@ def org(qa, repo):
 
 
 JOURNEYS = [sweep, answer, fold, resize, merge, review, panes,
-            dashboard, stop_resume, retire, send, update, restart, frames, org]
+            dashboard, stop_resume, retire, send, update, restart, search, frames, org]
 
 
 def main():
