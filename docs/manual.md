@@ -444,15 +444,17 @@ its transcripts there, as Claude Code would in yours, for search. Its journeys s
 it in its terminal, fold and unfold a long prompt with the mouse, resize the
 frame, merge a commit, review a change in Magit and send a note, work in the
 terminal with tmux-control's own keys (split a pane, open and move between
-tmux windows, switch to another task and back), use the dashboard, stop and
+tmux windows, switch to another task and back), open a shell beside the
+agent, use the dashboard, stop and
 resume an agent, retire a task or discard its work, send a prompt, bring a
 task up to date, restart Emacs with agents at work, search the
 conversations, work in a second frame, start a task from an Org heading,
 and keep a tab per task, two of the same name among them. They press keys
 and click through Emacs's command loop. After each step it checks for Lisp errors, in
 commands, timers and process filters alike, for a backtrace, for lines of
-Roost's views cut off at the window's edge, and for another task's terminal
-beside the current task's; it also runs the sweep where text is measured in
+Roost's views cut off at the window's edge, for another task's terminal
+beside the current task's, and for a terminal that shows other than what
+tmux has in its pane, or history nobody scrolled it to; it also runs the sweep where text is measured in
 pixels. It takes about two minutes, writes `report.html` with each step's
 windows, the echo area and, on macOS, a screenshot, and fails if anything was
 wrong. A problem known to come from elsewhere, such as tmux-control showing no

@@ -368,6 +368,13 @@ class Run:
                     problems.append("%s, another task's terminal, is beside %s's" % (window["buffer"], own["name"]))
             if window["mode"] == "roost-sidebar-list-mode" and window["total"] != screen["sidebar-width"]:
                 problems.append("The sidebar is %d columns wide, not %d" % (window["total"], screen["sidebar-width"]))
+            if window.get("history"):
+                # Nothing here scrolls a terminal back: it showed history by itself.
+                problems.append("%s shows %d lines of history above its screen" % (window["buffer"], window["history"]))
+            if window.get("terminal") and window.get("pane"):
+                drift = self.drift(window)
+                if drift:
+                    problems.append(drift)
             if window.get("overflow"):
                 over = window["overflow"]
                 problems.append("%s: %d lines cut off at the window's edge (%d px), the first %d px: %r" % (
@@ -401,6 +408,25 @@ class Run:
         for description in known:
             print("      known: " + description)
         return screen
+
+    def drift(self, window, timeout=3):
+        """How WINDOW's terminal differs from what tmux has in its pane, or None.
+        Output on its way may take a moment to show."""
+        deadline = time.monotonic() + timeout
+        while True:
+            ours = self.emacs.json("(json-encode (qa-terminal-screen %s))" % lisp(window["buffer"])) or []
+            theirs = [line.rstrip() for line in self.tmux("capture-pane", "-p", "-t", window["pane"])]
+            while theirs and not theirs[-1]:
+                theirs.pop()
+            if ours == theirs or time.monotonic() > deadline:
+                break
+            time.sleep(0.25)
+        if ours == theirs:
+            return None
+        row = next((i for i, (a, b) in enumerate(zip(ours, theirs)) if a != b), min(len(ours), len(theirs)))
+        return "%s shows other than tmux's pane %s, from row %d: %r, where tmux has %r" % (
+            window["buffer"], window["pane"], row + 1, (ours[row:row + 1] or [""])[0][:50],
+            (theirs[row:row + 1] or [""])[0][:50])
 
     # Reporting
 
@@ -511,8 +537,9 @@ def fold(qa, repo):
     qa.status(name, "ready", "idle")
     qa.keys("C-c r l")
     qa.type(name + "\r")
-    qa.wait("its panel", lambda s: "Show the whole prompt" in panel_text(qa, s))
-    # Once settled: its changes may still be refreshing when it first shows.
+    # Once its changes are in: they may still be refreshing when it first shows.
+    qa.wait("its panel", lambda s: "Show the whole prompt" in panel_text(qa, s)
+            and "Refreshing" not in panel_text(qa, s))
     folded = qa.step("Its panel folds the prompt")
     qa.click("Show the whole prompt")
     qa.step("Shown whole", expect=[
@@ -723,11 +750,21 @@ def panes(qa, repo):
     qa.step("Back to the first task", expect=[
         ("its two panes, as it left them", lambda s: len(terminals(s, own)) == 2),
         ("and nothing of the other task's", lambda s: all(w["terminal"] == own for w in terminals(s)))])
-    qa.keys("C-c C-o")
+    to_shell(qa)
     qa.type("exit\r")
     qa.wait("the shell to go", lambda s: len(terminals(s, own)) == 1)
     qa.step("One pane again", expect=[
-        ("its panel back beside it", lambda s: panel_text(qa, s).startswith(first))])
+        ("its panel back beside it", lambda s: panel_text(qa, s).startswith(first)),
+        ("its tabs back, its window highlighted",
+         lambda s: "[%s:" % window_a in (selected_terminal(s).get("tabs") or ""))])
+
+
+def to_shell(qa):
+    """Move to the shell pane beside the agent, wherever the view has put you:
+    what is typed next must not reach the agent."""
+    screen = qa.screen()
+    if (selected_terminal(screen) or {}).get("pane") == (screen.get("task") or {}).get("pane"):
+        qa.keys("C-c C-o")
 
 
 def answer_yes(qa, name):
@@ -799,6 +836,9 @@ def retire(qa, repo):
         ("the echo area says so", lambda s: "Retired" in (s["echo"] or ""))])
     dirty = new_task(qa, "ask touch scratch.txt")
     answer_yes(qa, dirty)
+    # Once Roost knows of the file: before, it asks as for a task with no work,
+    # and offers to discard only once the host refuses.
+    qa.wait("the file among its changes", lambda s: re.search(r"Uncommitted\n\s*scratch\.txt", panel_text(qa, s)))
     qa.keys("C-c r x")
     qa.wait("the question", lambda s: s["prompt"])
     qa.step("Work not merged: it asks", expect=[
@@ -971,7 +1011,39 @@ def tabs(qa, repo):
         qa.settle()
 
 
-JOURNEYS = [sweep, answer, fold, resize, merge, review, panes,
+@journey("A shell beside the agent")
+def shell(qa, repo):
+    """t opens a shell in the task's worktree beside its agent, and the view
+    is the agent's alone again once the shell exits."""
+    name = start_task(qa, "Leave room for a shell")
+    screen = open_task(qa, name)
+    own = screen["task"]["terminal"]
+    qa.keys("C-c r t")
+    qa.wait("the shell", lambda s: len(terminals(s, own)) == 2)
+    # At once, as you would: the shell has to be where your typing goes.
+    qa.type("echo SHELL_IN_$(basename $PWD)\r")
+    qa.wait("its output", lambda s: any("SHELL_IN_%s-" % name in w["text"] or "PROMPT echo" in w["text"]
+                                        for w in terminals(s, own)))
+    qa.step("The shell beside the agent", expect=[
+        ("in the task's worktree", lambda s: any("SHELL_IN_%s-" % name in w["text"] for w in terminals(s, own))),
+        ("nothing typed for it reached the agent",
+         lambda s: not any("PROMPT echo" in w["text"] for w in terminals(s, own))),
+        ("the agent still in view", lambda s: any("PROMPT Leave room" in w["text"] for w in terminals(s, own)))])
+    other = start_task(qa, "Step away from the shell")
+    open_task(qa, name)
+    qa.wait("both panes again", lambda s: len(terminals(s, own)) == 2)
+    qa.step("Back to it, the shell still open", expect=[
+        ("the agent's pane as tmux has it, from its first row",
+         lambda s: any(w["text"].startswith("FAKE_CLAUDE_READY") for w in terminals(s, own)))])
+    to_shell(qa)
+    qa.type("exit\r")
+    qa.wait("the shell to go", lambda s: len(terminals(s, own)) == 1 and not s["prompt"])
+    qa.step("The agent alone again", expect=[
+        ("its tabs back", lambda s: (selected_terminal(s) or {}).get("tabs")),
+        ("its panel beside it", lambda s: panel_text(qa, s).startswith(name))])
+
+
+JOURNEYS = [sweep, answer, fold, resize, merge, review, panes, shell,
             dashboard, stop_resume, retire, send, update, restart, search, frames, org, tabs]
 
 
@@ -1002,6 +1074,13 @@ def main():
             qa.journey = chosen_journey.title
             print(chosen_journey.title)
             try:
+                # A question or menu the last journey left open goes first.
+                for _ in range(3):
+                    if not qa.screen()["prompt"] and qa.emacs.eval("(and transient--prefix t)") != "t":
+                        break
+                    qa.keys("C-g")
+                qa.emacs.eval("(qa-fresh-start)")
+                qa.settle()
                 chosen_journey(qa, repo)
             except Stuck as stuck:
                 try:

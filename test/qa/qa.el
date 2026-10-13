@@ -93,7 +93,9 @@ Child frames, such as the box a review note is written in, count."
   "Click with the mouse on button LABEL, or its OCCURRENCE, counting from 0.
 The button must be on screen.  Return nil when it isn't."
   (when-let* ((place (qa--find-button label (or occurrence 0)))
-              (posn (posn-at-point (1+ (cdr place)) (car place))))
+              ;; Its middle: a step in from its start is past a button of one
+              ;; character, such as the sidebar's +.
+              (posn (posn-at-point (+ (cdr place) (/ (length label) 2)) (car place))))
     (setq unread-command-events
           (append unread-command-events
                   (list (list 'down-mouse-1 posn) (list 'mouse-1 posn))))
@@ -115,6 +117,24 @@ Return nil when it isn't on screen."
       (setq unread-command-events
             (append unread-command-events (list (list 'down-mouse-1 posn) (list 'mouse-1 posn))))
       t)))
+
+(defun qa-fresh-start ()
+  "Leave one frame, its window on *scratch* beside Roost's side windows.
+Each journey starts here, rather than amid the windows the last one left,
+so that one going wrong doesn't take the rest with it.  A question left
+open is dismissed first, with keys."
+  (dolist (frame (frame-list))
+    (when (frame-parent frame) (delete-frame frame)))
+  (dolist (frame (frame-list))
+    (unless (or (eq frame (selected-frame)) (not (frame-visible-p frame)))
+      (delete-frame frame)))
+  (let ((main (seq-find (lambda (window) (not (window-parameter window 'window-side)))
+                        (window-list nil 'nomini))))
+    (select-window main)
+    (delete-other-windows main)
+    (switch-to-buffer "*scratch*"))
+  (roost--redraw)
+  t)
 
 (defun qa-idle-p ()
   "Whether the input given so far has been taken."
@@ -195,6 +215,41 @@ doesn't."
       (format "%s/%s/%s" (or (tmux-control-buffer-host) "local")
               (tmux-control-buffer-socket-name) (tmux-control-buffer-session)))))
 
+(defun qa-terminal-screen (buffer)
+  "The live screen of terminal BUFFER, a buffer or its name, as lines.
+Right-trimmed, without the trailing blank ones, as `capture-pane' gives
+them; nil when BUFFER isn't a terminal."
+  (when-let* ((buffer (get-buffer buffer)))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'tmux-control-mode) (bound-and-true-p tmux-control--terminal)
+                 (eat-term-live-p tmux-control--terminal))
+        ;; From the start of the line it begins on, which the window shows
+        ;; too: a screen starting partway into a line of history must not
+        ;; read as tmux's.
+        (let ((start (save-excursion (goto-char (eat-term-display-beginning tmux-control--terminal))
+                                     (line-beginning-position)))
+              (end (eat-term-end tmux-control--terminal))
+              lines)
+          ;; Without the invisible cell Eat puts after a wide character.
+          (dolist (line (split-string (apply #'string
+                                             (mapcar #'char-after
+                                                     (seq-remove (lambda (i) (get-text-property i 'invisible))
+                                                                 (number-sequence start (1- end)))))
+                                      "\n"))
+            (push (string-trim-right line) lines))
+          (while (and lines (string-empty-p (car lines))) (pop lines))
+          (vconcat (nreverse lines)))))))
+
+(defun qa--history-shown (window)
+  "How many lines of history terminal WINDOW shows above its live screen."
+  (with-current-buffer (window-buffer window)
+    (if (and (derived-mode-p 'tmux-control-mode) (bound-and-true-p tmux-control--terminal)
+             (eat-term-live-p tmux-control--terminal))
+        (let ((screen (save-excursion (goto-char (eat-term-display-beginning tmux-control--terminal))
+                                      (line-beginning-position))))
+          (if (< (window-start window) screen) (count-lines (window-start window) screen) 0))
+      0)))
+
 (defun qa--tabs (window)
   "WINDOW's header line as shown, the highlighted tab in [brackets], or nil."
   (with-current-buffer (window-buffer window)
@@ -220,7 +275,9 @@ doesn't."
     `((name . ,(roost--field task 'name))
       (key . ,(format "%s/%s" (or (roost--field task 'host) "local") (roost--field task 'id)))
       (terminal . ,(format "%s/%s/%s" (or (roost--field task 'host) "local")
-                           (roost--field task 'socket) (roost--field task 'session))))))
+                           (roost--field task 'socket) (roost--field task 'session)))
+      ;; The agent's own pane.
+      (pane . ,(roost--field task 'paneId)))))
 
 (defun qa-screen ()
   "What is on screen now, as JSON."
@@ -247,6 +304,10 @@ doesn't."
                           (selected . ,(if (eq window (selected-window)) t :json-false))
                           (side . ,(window-parameter window 'window-side))
                           (terminal . ,(qa--terminal buffer))
+                          (history . ,(qa--history-shown window))
+                          (pane . ,(with-current-buffer buffer
+                                     (and (derived-mode-p 'tmux-control-mode) (fboundp 'tmux-control-active-pane)
+                                          (tmux-control-active-pane))))
                           (tabs . ,(qa--tabs window))
                           (child . ,(if (frame-parent (window-frame window)) t :json-false))
                           (frame . ,(qa--frame-id (window-frame window)))
@@ -300,7 +361,10 @@ text is measured in pixels.  Return how many ran and the problems, as JSON."
         (with-selected-frame frame
           (let ((inhibit-message t))
             (setq stats (ert-run-tests-batch "^roost-sweep-"))))
-      (delete-frame frame))
+      (delete-frame frame)
+      ;; The sweep draws its sample tasks in Roost's own buffers, the
+      ;; sidebar's among them: draw yours again.
+      (roost--redraw))
     (json-encode
      `((ran . ,(length (ert--stats-tests stats)))
        (problems
