@@ -6,6 +6,10 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.8.1:
 
+- Opening a task leaves the window alone when you show something else in
+  it before the task's host replies, such as tmux-control's scrollback
+  with `C-c C-e`: the reply put the task's terminal back in its place.
+  Nothing to do when upgrading.
 - Two tasks of one name in a project no longer look the same in the
   sidebar and the dashboard: each shows the start of its ID after its
   name, as the task picker and tab names already did. Nothing to do when
