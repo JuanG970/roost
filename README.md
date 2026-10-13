@@ -10,11 +10,11 @@ worktree, a branch and a terminal, here or on any SSH host. It tells you which
 agents need you, and you review and merge their work with Magit. If you've
 used Orca or Conductor, it's that idea, inside the Emacs you already use.
 
-![Emacs with three columns: Roost's sidebar listing six agents on two machines, one asking permission; that agent's Claude Code terminal on the SSH host claylien, asking to run its tests; and the task's panel with what it asks, its latest reply, what it changed and what to do next](docs/images/roost-hero.png)
+![Emacs with three columns: Roost's sidebar listing six agents on two machines, one asking permission; that agent's Claude Code terminal on the SSH host claylien, asking to run its tests; and the task's panel, which says to answer it in its terminal and shows the prompt it was given and the files it has changed](docs/images/roost-hero.png)
 
-*Five Claude Code agents on two machines. The one on `claylien` wants to run
+*Six Claude Code agents on two machines. The one on `claylien` wants to run
 its tests: its own terminal in the middle, every task at the left, and at the
-right what it changed and what to do next.*
+right what to do next, what you asked it and what it changed.*
 
 Other Emacs packages run coding agents too, among them
 [agent-shell](https://github.com/xenodium/agent-shell),
