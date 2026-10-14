@@ -6,6 +6,11 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.8.1:
 
+- Opening a task on this machine, and Roost's other requests here, no
+  longer take seconds, or a minute, when the temporary directory is
+  crowded. Python searched that directory for the modules the helper
+  imports; the helper now runs isolated, so a module left there can't
+  run either. Nothing to do when upgrading.
 - tmux-control 0.8.1 keeps a terminal's top row in sight after `C-c C-r`
   reconnects it, which a dropped connection, such as a laptop's sleep,
   calls for. To upgrade, update tmux-control too.
