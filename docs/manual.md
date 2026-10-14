@@ -368,9 +368,11 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   `(:eval (and (fboundp 'roost-mode-line-waiting) (roost-mode-line-waiting)))`
   where you want the count.
 - `roost-animations` (nil): on Emacs 32, which draws canvas images, the
-  status light of an agent asking you something pulses and one that
-  finished, failed or exited since you saw it glows; the rest stay still, and the motion pauses while Emacs
-  isn't in front. Elsewhere the lights stay dots.
+  status light of an agent waiting for you fades out and back in: deeply
+  and quickly when it asks you something, less and slowly when it
+  finished, failed or exited since you saw it. The rest stay still, and
+  the motion pauses while Emacs isn't in front. Elsewhere the lights stay
+  dots.
 - Faces: `roost-prose` sets what you and the agents wrote (prompts, replies,
   requests) in `variable-pitch`, keeping tables and code in the fixed-pitch
   font; make it inherit `default` for one font throughout. `roost-field` is

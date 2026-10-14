@@ -3416,9 +3416,19 @@ Read from the layout transient keeps, whose form varies by version."
         (should (= (aref still 0) #xFF1E1E1E))
         (should (= (aref still (+ (/ width 2) (* (/ height 2) width))) #xFFAA66FF))
         (should (equal still (funcall pixels-at nil 0.5))))
-      (dolist (motion '(pulse glow))
-        (should-not (equal (funcall pixels-at motion 0.0) (funcall pixels-at motion 0.5))))
-      (should (= roost-test--refreshed 6)))))
+      ;; A moving light fades from whole and back, deeper when an agent
+      ;; asks, with nothing drawn around it.
+      (let ((still (funcall pixels-at nil 0.0))
+            (middle (+ (/ width 2) (* (/ height 2) width)))
+            (red (lambda (pixel) (logand (ash pixel -16) 255))))
+        (dolist (motion '(pulse glow))
+          (should (equal (funcall pixels-at motion 0.0) still))
+          (let ((faded (funcall pixels-at motion 0.5)))
+            (should (= (aref faded 0) #xFF1E1E1E))
+            (should (< #x1E (funcall red (aref faded middle)) #xAA))))
+        (should (< (funcall red (aref (funcall pixels-at 'pulse 0.5) middle))
+                   (funcall red (aref (funcall pixels-at 'glow 0.5) middle)))))
+      (should (= roost-test--refreshed 9)))))
 
 (ert-deftest roost-status-lights-paint-the-background-that-shows ()
   ;; A theme can leave the margin face of Emacs 31 and later without a
