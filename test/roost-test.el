@@ -7,8 +7,18 @@
 (defvar evil-want-keybinding)
 
 (defmacro roost-test--isolated (&rest body)
+  (let ((scratch (make-symbol "scratch")))
+    ;; Removed afterwards: the sweep runs thousands of tests, and Roost's
+    ;; local helper runs in the temporary directory they would fill.
+    `(let ((,scratch (list (make-temp-file "roost-projects" t) (make-temp-file "roost-notes" t))))
+       (unwind-protect
+           (roost-test--isolated-in ,scratch ,@body)
+         (dolist (directory ,scratch) (delete-directory directory t))))))
+
+(defmacro roost-test--isolated-in (scratch &rest body)
+  "Run BODY with Roost's state isolated, its files in the directories SCRATCH."
   `(let ((roost--tasks (make-hash-table :test 'equal))
-         (roost-projects-file (expand-file-name "projects.json" (make-temp-file "roost-projects" t)))
+         (roost-projects-file (expand-file-name "projects.json" (nth 0 ,scratch)))
          (roost--projects-loaded t) (roost--remembered-projects nil)
          (user-login-name "user")
          (roost--statuses (make-hash-table :test 'equal))
@@ -23,7 +33,7 @@
          (roost--full-refresh-pending (make-hash-table :test 'equal))
          (roost--failures (make-hash-table :test 'equal))
          (roost--hosts-loaded t) (roost--remembered-hosts nil)
-         (roost-notes-file (expand-file-name "notes.json" (make-temp-file "roost-notes" t)))
+         (roost-notes-file (expand-file-name "notes.json" (nth 1 ,scratch)))
          (roost--notes nil) (roost--notes-loaded t)
          (roost--requests nil) (roost-notify nil) (roost--current-task nil))
      (set-frame-parameter nil 'roost-task nil)
@@ -940,8 +950,8 @@
    (let* ((code "print('literal $() `ticks`')") (argv (roost--python-command "dev" code)))
     (should (equal (car argv) "ssh"))
     (should (member "ProxyJump=jump" argv))
-    (should (equal (car (last argv)) (concat tmux-control-remote-tmux-socket-setup " && exec python3 -c " (shell-quote-argument code))))
-    (should (equal (roost--python-command nil code) (list "python3" "-c" code))))))
+    (should (equal (car (last argv)) (concat tmux-control-remote-tmux-socket-setup " && exec python3 -I -c " (shell-quote-argument code))))
+    (should (equal (roost--python-command nil code) (list "python3" "-I" "-c" code))))))
 
 (ert-deftest roost-ssh-requests-share-a-connection-unless-disabled ()
   (let* ((root (make-temp-file "rs" t))

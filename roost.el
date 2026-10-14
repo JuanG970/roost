@@ -492,7 +492,11 @@ See `roost-ssh-share-connections'."
               "-o" "ControlPersist=60")))))
 
 (defun roost--python-command (host code)
-  "Local argv executing Python CODE on HOST, without interpolating input."
+  "Local argv executing Python CODE on HOST, without interpolating input.
+Python runs isolated (-I), importing nothing from the directory it runs
+in, such as the temporary directory here: searching it for each module
+took seconds once it held a million files, and a module someone left
+there would run as you."
   (if host
       (progn
         (require 'tmux-control nil t)
@@ -503,8 +507,8 @@ See `roost-ssh-share-connections'."
                 (list "--" host
                       (concat (when (bound-and-true-p tmux-control-remote-tmux-socket-setup)
                                 (concat tmux-control-remote-tmux-socket-setup " && "))
-                              "exec python3 -c " (shell-quote-argument code)))))
-    (list "python3" "-c" code)))
+                              "exec python3 -I -c " (shell-quote-argument code)))))
+    (list "python3" "-I" "-c" code)))
 
 (defun roost--decode-response (output)
   "Parse the last nonempty line of OUTPUT as the protocol response."
