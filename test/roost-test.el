@@ -1731,9 +1731,16 @@
          (roost--render-sidebar)
          ;; Each project's heading ends with a + that starts a task in it.
          (should (member (concat "dev · ledger" (make-string 17 ?\s) "+") lines))
-         ;; The current task is marked; statuses are right-aligned.
-         (should (member "▸● budget-alerts    permission" lines))
-         (should (= (string-width "▸● budget-alerts    permission") roost-sidebar-width))
+         ;; The current task is marked to the window's edge; statuses are
+         ;; right-aligned.
+         (should (member " ● budget-alerts    permission" lines))
+         (should (= (string-width " ● budget-alerts    permission") roost-sidebar-width))
+         (goto-char (roost--task-row '("dev" "1111111111111111")))
+         (should (memq 'roost-current (ensure-list (get-text-property (point) 'face))))
+         (should (memq 'roost-current (ensure-list (get-text-property (line-end-position) 'face))))
+         (should (eq (face-attribute 'roost-current :extend) t))
+         (forward-line)
+         (should-not (memq 'roost-current (ensure-list (get-text-property (point) 'face))))
          ;; Long names are cut to fit, keeping the status when it fits.
          (should (seq-some (lambda (line) (and (string-prefix-p " ● a-task" line)
                                                 (string-match-p "…" line)
@@ -2513,8 +2520,8 @@ Read from the layout transient keeps, whose form varies by version."
           (roost--current-task (roost--key a)) (roost-workspace 'perspective)
           (persp-mode t))
      (cl-letf (((symbol-function 'persp-current-name) (lambda () (roost--perspective-name b))))
-       (should (string-prefix-p " " (roost--sidebar-row a 30)))
-       (should (string-prefix-p "▸" (roost--sidebar-row b 30)))))))
+       (should-not (memq 'roost-current (ensure-list (get-text-property 0 'face (roost--sidebar-row a 30)))))
+       (should (memq 'roost-current (ensure-list (get-text-property 0 'face (roost--sidebar-row b 30)))))))))
 
 (ert-deftest roost-tasks-of-one-name-show-their-ids ()
   (roost-test--isolated
@@ -3206,6 +3213,7 @@ Read from the layout transient keeps, whose form varies by version."
    (roost-test--with-canvases t
      (let ((task (roost--cache-task "dev" (roost-test--task "1111111111111111" "permission")))
            (default (face-background 'default))
+           (foreground (face-foreground 'default))
            (inherit (and (facep 'margin) (face-attribute 'margin :inherit))))
        (unwind-protect
            (with-temp-buffer
@@ -3213,7 +3221,14 @@ Read from the layout transient keeps, whose form varies by version."
              (when (facep 'margin) (set-face-attribute 'margin nil :inherit 'unspecified))
              (roost--status-light task 'sidebar)
              (should (= (plist-get (gethash (cons 'sidebar (roost--key task)) roost--lights) :background)
-                        (roost--light-pixel "#123456"))))
+                        (roost--light-pixel "#123456")))
+             ;; A running agent's light is in the text's colour, not mid-gray.
+             (set-face-foreground 'default "#ABCDEF")
+             (let ((running (roost--cache-task "dev" (roost-test--task "2222222222222222" "running"))))
+               (roost--status-light running 'sidebar)
+               (should (= (plist-get (gethash (cons 'sidebar (roost--key running)) roost--lights) :color)
+                          (roost--light-pixel "#ABCDEF")))))
+         (set-face-foreground 'default foreground)
          (set-face-background 'default default)
          (when (facep 'margin) (set-face-attribute 'margin nil :inherit inherit)))))))
 
