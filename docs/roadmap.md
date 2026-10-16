@@ -22,55 +22,73 @@ Magit.
 
 Small, and probably worth the most.
 
-- **A pull request waiting on you counts as waiting.** Roost asks GitHub
-  about pushed tasks every two minutes and shows `#12` with its checks and
-  review, but `n` and the status lights follow only the agent. When the
-  agent watches its own pull request and fixes what CI and the reviewer
-  find, a finished turn often isn't your turn. Yours comes when the checks
-  pass, the review threads are resolved and the pull request waits for your
-  approval or merge, or when it's stuck on something only you can decide.
-  Make that a status `n` visits. Unresolved threads take a GraphQL query,
-  since `gh pr list` doesn't report them. The agent still does the fixing;
-  Roost says when it's your turn. From the Claude Code team's review, in
-  which people step in only where the checks can't settle a change.
-- **Since you last reviewed.** Record the commit a task was at when you
-  reviewed it, and show "3 commits since you reviewed" on its row and
-  panel. `r` opens the diff from there, and `m` and `P` say so when commits
-  landed after your review. Agents that go on fixing after you look, in
-  reply to CI or a reviewer, make this matter. Which moment counts as
-  reviewed (sending notes, leaving Magit, or a key of its own) is still
-  open. Later, a snapshot of the worktree in a private ref at each prompt
-  would cover uncommitted work too, for a diff of one turn. From the Claude
-  Code team's approvals, which hold for one commit and lapse when unreviewed
-  ones land, and Conductor's checkpoints. Rewinding stays the agent's
-  (`/rewind`).
-- **Conflicts before merge time.** Roost finds a conflict only when `m`
-  refuses. Running `git merge-tree` as tasks change, against the integration
-  branch and the project's other tasks, lets the panel say "conflicts with
-  main in foo.py" or "task X also changes foo.py" while `u` is still cheap.
-  This covers committed work; for uncommitted work, compare changed files.
-  From Calyx's Mission Map, which marks agents that edited the same file
-  within five minutes.
-- **Your phone, through Claude Code's Remote Control.** Start each Claude
-  task with `--remote-control`, named after the task, so it shows in the
-  Claude app and at claude.ai/code. Both send a push notification when an
-  agent needs a decision. Point `CLAUDE_CLIENT_PRESENCE_FILE` on each host
-  at a file Roost keeps while Emacs has focus, so pushes come only when
-  you're away. Herdr, Orca, Superset, cmux and agent-deck each built a
-  phone app for this.
+- **0.9, and MELPA.** Release what has landed since 0.8.1 as 0.9, with a
+  short list of what to do when upgrading, then send tmux-control to MELPA,
+  and Roost after it; see [the recipes](melpa.md). This comes before the
+  features below: a release on MELPA is how other people's feedback
+  arrives.
+- **[When a merge is your turn](#when-a-merge-is-your-turn)**, its first
+  three parts: a pull request waiting on you counts as waiting, conflicts
+  before merge time, and what changed since you last looked.
 - **`.worktreeinclude`.** Copy the ignored files it lists, such as `.env`,
   into new worktrees, as Claude Code and Conductor do. Today that takes
   `roost-setup-command`.
-- **0.9, and MELPA.** tmux-control first; see [the recipes](melpa.md).
+- **Your phone, through Claude Code's Remote Control.** An option to start
+  each Claude task with `--remote-control`, named after the task, so it
+  shows in the Claude app and at claude.ai/code. Both send a push
+  notification when an agent needs a decision; until Roost keeps a presence
+  file ([Worth trying](#worth-trying)), they also do it while you're at
+  Emacs. Passing `--name` too would show the task's name in Claude's
+  `/resume` picker; Roost names only the tmux window today. Herdr, Orca,
+  Superset, cmux and agent-deck each built a phone app for this.
 
-## Worth trying
+## When a merge is your turn
 
-- **Usage limits.** Claude Code gives its status line command the five-hour
-  and weekly limits (`rate_limits`, with `used_percentage` and `resets_at`).
-  A shim that records them and then runs your own status line, as
-  agent-deck's does, would show them in the sidebar and mode line, and for a
-  task stopped by a limit, when it resets. Pro and Max plans only, and each
-  session reports what it saw last. Orca shows usage in its status bar.
+These ideas answer one question about each task: is a merge your turn, and
+what would it rest on? They share the places where Roost already says what
+a task needs: the next step at the top of the task panel and the menu (for
+an open pull request, today it only says that `P` pushes new commits), the
+status word in the sidebar, and `n`. Each adds a line or a status there
+rather than a view of its own. The first three are among the most likely;
+the last two are worth trying once those show what the panel has room for.
+
+- **A pull request waiting on you counts as waiting.** Roost asks GitHub
+  about pushed tasks every two minutes and shows `#12` with its checks and
+  review, but `n` and the status lights follow only the agent, and a pull
+  request that's ready for you gives the agent nothing to say. It's your
+  turn to merge when the pull request is open at the branch's tip, every
+  check passed, no requested review is still pending (Copilot's included),
+  no thread is unresolved, and the agent neither works nor asks. It's your
+  turn to nudge when a check failed or a thread is open and, a minute or
+  two later, the agent still hasn't started a turn: an agent that watches
+  its own pull request starts one and never gets here, and one that
+  doesn't, does, so Roost needn't know which kind it runs. Most of this
+  comes with the `gh pr list` Roost already runs, asking also for
+  `mergeable`, `mergeStateStatus` and `reviewRequests`; unresolved threads
+  take a GraphQL query. Copilot only comments, so `reviewDecision` doesn't
+  move for it; its threads and a pending re-review do. The agent still
+  does the fixing; Roost says when it's your turn. From the Claude Code
+  team's review, in which people step in only where the checks can't
+  settle a change.
+- **Conflicts before merge time.** Roost finds a conflict only when `m`
+  refuses. GitHub already says when a pushed task's pull request conflicts
+  (`mergeable`, in the query above). For the rest, running `git merge-tree`
+  against the integration branch whenever either tip moves lets the panel
+  say "conflicts with main in foo.py" while `u` is still cheap. That covers
+  committed work; the changed files Roost already lists for each task,
+  committed or not, can say "task X also changes foo.py". From Calyx's
+  Mission Map, which marks agents that edited the same file within five
+  minutes.
+- **Since you last looked.** Record the commit a task was at when you last
+  opened `r` or sent its agent notes, and show "3 commits since you last
+  looked" on its row and panel. `r` shows those commits in a section of
+  their own, beside "Unmerged into main", and `m` and `P` say so when
+  commits landed since. "Looked" rather than "reviewed", since Roost can't
+  tell when a review ends; a key of its own is the other way. Agents that
+  go on fixing after you look, in reply to CI or a reviewer, make this
+  matter. From the Claude Code team's approvals, which hold for one commit
+  and lapse when unreviewed ones land. Rewinding stays the agent's
+  (`/rewind`).
 - **Evidence beside the files in the task panel.** Show what a decision can
   rest on without opening the diff: the pull request's checks, the
   reviewer's findings still open, the size of the change, and any paths
@@ -87,6 +105,22 @@ Small, and probably worth the most.
   finds that most pull requests over 1,000 lines have findings. Roost only
   marks; it approves and merges nothing on its own. From the same post's
   risk tiers, which come from the change, not its author.
+
+## Worth trying
+
+- **Pushes only when you're away.** Point `CLAUDE_CLIENT_PRESENCE_FILE` on
+  each host at a file Roost keeps while Emacs has focus, so Remote Control
+  stops pushing while you're at Emacs. Claude counts you present whenever
+  the file exists, however old it is, so a closed lid or a dropped SSH
+  connection would leave it behind and silence the phone just when you're
+  away. Something on the host has to remove it once Emacs stops refreshing
+  it; each task's runner could.
+- **Usage limits.** Claude Code gives its status line command the five-hour
+  and weekly limits (`rate_limits`, with `used_percentage` and `resets_at`).
+  A shim that records them and then runs your own status line, as
+  agent-deck's does, would show them in the sidebar and mode line, and for a
+  task stopped by a limit, when it resets. Pro and Max plans only, and each
+  session reports what it saw last. Orca shows usage in its status bar.
 - **Scripts beyond setup.** A teardown command before a worktree is removed,
   a check command that must pass before `m` (the local stand-in for the CI
   a pull request runs, which `m` skips), and a block of ports per task
@@ -149,6 +183,13 @@ Larger, or undecided.
   an existing branch to continue, and work in place without a worktree,
   such as dotfiles. Today, fetch the ref and start a task from it with
   `C-c C-b` in the draft.
+- **A snapshot at each prompt.** A commit of the worktree under a private
+  ref as each prompt is sent, uncommitted work included, would give a diff
+  of one turn, and "since you last looked" could start from one. It takes
+  a hook at each prompt for every agent, and it writes commits into the
+  user's repository, if only under a private ref, which sits uneasily with
+  never committing their work. Claude Code's `/rewind` and Conductor's
+  checkpoints keep such snapshots themselves.
 - **Rex in place of tmux.** [Rex](https://www.superlogical.com/rex/docs),
   from Superlogical, is a terminal and multiplexer built on Ghostty's
   engine, in beta on macOS since 2026-10-05. Its server API covers what the
@@ -161,6 +202,17 @@ Larger, or undecided.
   with control mode, and Rex servers on Linux outside Superlogical. Ask for
   the first in the beta. Look again once both exist, or once tmux turns
   down OSC 7501 for good.
+- **Claude Code's own background sessions.** Claude Code now runs sessions
+  in the background itself (seen in 2.1.302): `claude --bg` starts one,
+  `claude agents` lists them, and `attach`, `logs` and `respawn` act on
+  them. `claude agents --json` lists running sessions, interactive ones
+  included, each busy or idle. For someone who runs only Claude on one
+  machine, that covers part of what Roost does: seeing which sessions are
+  busy, and coming back to one. Roost's part is what spans agents and
+  hosts: Codex and Pi beside Claude, remote hosts, worktrees through to
+  their merge, and review in Magit. As a backend it would serve Claude
+  tasks only, so tmux would stay for the rest, and as a source of status
+  it says less than the hooks.
 
 ## Known gaps
 
@@ -169,6 +221,10 @@ Larger, or undecided.
 - An approval of a tool other than Bash, and any Codex or Pi approval, shows
   `permission` until the agent moves on. Claude Code has no hook for an
   answered permission or an interrupt; both would be requests upstream.
+  With `roost-program-status` on (experimental), Claude Code 2.1.295 and
+  later report approvals, declines and `Esc` through the terminal instead,
+  which closes this for Claude. It could become the default once it has
+  had some weeks of daily use and its protocol, still changing, settles.
 - While you write a commit message in a remote task, Magit can't show the
   diff beside it ("Error showing commit diff"); the commit goes through.
   The bug is Magit's, with any TRAMP method: from a linked worktree's Git
@@ -182,10 +238,13 @@ Larger, or undecided.
 - **Watching a pull request for the agent:** review comments and failed
   checks turned into prompts, or fixed on their own. The agents do this:
   Claude Code can subscribe a session to its pull request's reviews and CI,
-  and autofix it. Roost keeps `P`, the `#12` line with checks and review,
-  and `x` once it merges; when the agent's watcher sets it to work, the
-  status lights show it like any other turn. Saying when a pull request
-  waits on you is Roost's (see above); fixing what it finds is the agent's.
+  and autofix it, though in 2.1.302 that comes from a tool
+  (`subscribe_pr_activity`) a plain CLI session may not have. Roost keeps
+  `P`, the `#12` line with checks and review, and `x` once it merges; when
+  the agent's watcher sets it to work, the status lights show it like any
+  other turn. Saying when a pull request waits on you is Roost's
+  ([above](#when-a-merge-is-your-turn)), whether or not the agent watches;
+  fixing what it finds is the agent's.
 - **A docked review column.** Magit, opened with `r`, stages and takes
   notes; see [the Orca comparison](orca-comparison.md#review-notes-and-staging-in-magit).
 - **Built-in browsers and design modes** (Orca, cmux, Superset), **a kanban
@@ -212,7 +271,7 @@ in changelogs.
 | [workmux](https://github.com/raine/workmux) | Worktrees and tmux windows | Lifecycle hooks, copied files, `resurrect`, `/coordinator`, batch prompts |
 | [dmux](https://github.com/standardagents/dmux) | tmux agent multiplexer | Several agents per prompt, generated names, lifecycle hooks |
 | [Claude Squad](https://github.com/smtg-ai/claude-squad) | tmux TUI, among the first | Pausing a task and checking it out |
-| Claude Code | The agent itself | [Agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`), [Remote Control](https://code.claude.com/docs/en/remote-control), [worktrees](https://code.claude.com/docs/en/worktrees) |
+| Claude Code | The agent itself | [Agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`) and background sessions (`--bg`, `attach`), [Remote Control](https://code.claude.com/docs/en/remote-control), [worktrees](https://code.claude.com/docs/en/worktrees) |
 | [Codex app](https://developers.openai.com/codex/app) | OpenAI's desktop app | Automations and their review queue |
 | [agent-shell](https://github.com/xenodium/agent-shell), [claude-code.el](https://github.com/stevemolitor/claude-code.el), [M-x Machina](https://github.com/eliraz-refael/m-x-machina) | Agents inside Emacs | |
 | [Ghostel](https://github.com/dakra/ghostel) | Emacs terminal on Ghostty's engine | Kitty keyboard and graphics protocols, synchronized output |
