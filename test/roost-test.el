@@ -5199,23 +5199,25 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
          (kill-buffer "*roost doctor*"))))))
 
 (ert-deftest roost-doctor-requires-tmux-control-public-api ()
-  (dolist (case '((nil nil "Install tmux-control") ("0.6.0" nil "0.8.1 or newer")
-                  ("installed" nil "0.8.1 or newer") ("0.8.0" nil "0.8.1 or newer")
-                  ("0.8.1" t nil) ("0.10.1" t nil)))
-    (cl-letf (((symbol-function 'roost--library-version)
-               (lambda (library) (and (equal library "tmux-control") (car case)))))
-      (let ((check (assoc "tmux-control" (roost--doctor-local-checks))))
-        (should (eq (and (nth 1 check) t) (nth 1 case)))
-        (should (equal (nth 2 check) (car case)))
-        (when (nth 2 case) (should (string-match-p (nth 2 case) (nth 3 check))))))))
+  (roost-test--isolated
+   (dolist (case '((nil nil "Install tmux-control") ("0.6.0" nil "0.8.1 or newer")
+                   ("installed" nil "0.8.1 or newer") ("0.8.0" nil "0.8.1 or newer")
+                   ("0.8.1" t nil) ("0.10.1" t nil)))
+     (cl-letf (((symbol-function 'roost--library-version)
+                (lambda (library) (and (equal library "tmux-control") (car case)))))
+       (let ((check (assoc "tmux-control" (roost--doctor-local-checks))))
+         (should (eq (and (nth 1 check) t) (nth 1 case)))
+         (should (equal (nth 2 check) (car case)))
+         (when (nth 2 case) (should (string-match-p (nth 2 case) (nth 3 check)))))))))
 
 (ert-deftest roost-doctor-wants-the-tmux-control-package-requires-names ()
   ;; Package managers install what Package-Requires names; the doctor
   ;; flags anything older.
-  (with-temp-buffer
-    (insert-file-contents (expand-file-name "roost.el" roost--package-directory))
-    (should (equal (cadr (assq 'tmux-control (read (lm-header "Package-Requires"))))
-                   roost--tmux-control-version))))
+  (roost-test--isolated
+   (with-temp-buffer
+     (insert-file-contents (expand-file-name "roost.el" roost--package-directory))
+     (should (equal (cadr (assq 'tmux-control (read (lm-header "Package-Requires"))))
+                    roost--tmux-control-version)))))
 
 (ert-deftest roost-evil-users-get-working-keys ()
   (let (states)
