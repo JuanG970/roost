@@ -1028,7 +1028,7 @@ def retire(qa, repo):
     qa.keys("C-c r x")
     qa.wait("the question", lambda s: s["prompt"])
     qa.step("Retiring asks first", expect=[
-        ("it says nothing would be lost", lambda s: "Nothing in them would be lost" in (s["prompt"] or ""))])
+        ("it says nothing would be lost", lambda s: "nothing in them would be lost" in (s["prompt"] or ""))])
     qa.type("y")
     qa.wait("the task to go", lambda s: qa.task(s, clean) is None, timeout=30)
     qa.step("A task with no work retires", expect=[
@@ -1557,7 +1557,7 @@ def merged(qa, repo):
     qa.keys("C-c r x")
     qa.wait("the question", lambda s: s["prompt"])
     qa.step("Retiring asks only whether to", expect=[
-        ("it says nothing would be lost", lambda s: "Nothing in them would be lost" in (s["prompt"] or ""))])
+        ("it says nothing would be lost", lambda s: "nothing in them would be lost" in (s["prompt"] or ""))])
     qa.type("y")
     qa.wait("the task to go", lambda s: qa.task(s, name) is None, timeout=30)
     qa.step("Retired", expect=[

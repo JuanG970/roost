@@ -2254,7 +2254,7 @@
              question)
          (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt &rest _) (setq question prompt) t)))
            (roost-retire merged))
-         (should (string-match-p "Nothing in them would be lost" question)))
+         (should (string-match-p "nothing in them would be lost" question)))
        (should (equal (caar acted) "retire"))
        ;; Not while its agent works.
        (should-error (roost-retire (roost--cache-task "dev" (roost-test--task nil "running"))) :type 'user-error)))))
