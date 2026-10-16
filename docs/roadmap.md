@@ -4,13 +4,46 @@ Ideas for where Roost could go, and what it leaves to other tools. None of
 them is promised: each is a candidate, to be tried before it's kept, and
 some will be dropped. They're ordered by what matters day to day: knowing
 which agent needs you, and seeing a task through to its merge. Each names
-the projects it comes from; [Prior art](#prior-art) lists them for the next
+where it comes from; [Prior art](#prior-art) lists the projects for the next
 look around.
+
+The Claude Code team's account of
+[how it reviews code](https://claude.dev/blog/solving-code-review-at-anthropic/)
+(2026-10-15) shapes several of them. There, agents check their own work and
+an AI reviewer reads every pull request, so people read fewer diffs and
+make more decisions: whether to build something, which changes are risky,
+and whether the evidence holds up. Some people will want to work that way,
+and some will go on reading every diff. Roost should serve both: these
+ideas add what you need when you don't read every line, such as when a
+decision is yours and what it rests on, and take nothing from review in
+Magit.
 
 ## Most likely first
 
 Small, and probably worth the most.
 
+- **A pull request waiting on you counts as waiting.** Roost asks GitHub
+  about pushed tasks every two minutes and shows `#12` with its checks and
+  review, but `n` and the status lights follow only the agent. When the
+  agent watches its own pull request and fixes what CI and the reviewer
+  find, a finished turn often isn't your turn. Yours comes when the checks
+  pass, the review threads are resolved and the pull request waits for your
+  approval or merge, or when it's stuck on something only you can decide.
+  Make that a status `n` visits. Unresolved threads take a GraphQL query,
+  since `gh pr list` doesn't report them. The agent still does the fixing;
+  Roost says when it's your turn. From the Claude Code team's review, in
+  which people step in only where the checks can't settle a change.
+- **Since you last reviewed.** Record the commit a task was at when you
+  reviewed it, and show "3 commits since you reviewed" on its row and
+  panel. `r` opens the diff from there, and `m` and `P` say so when commits
+  landed after your review. Agents that go on fixing after you look, in
+  reply to CI or a reviewer, make this matter. Which moment counts as
+  reviewed (sending notes, leaving Magit, or a key of its own) is still
+  open. Later, a snapshot of the worktree in a private ref at each prompt
+  would cover uncommitted work too, for a diff of one turn. From the Claude
+  Code team's approvals, which hold for one commit and lapse when unreviewed
+  ones land, and Conductor's checkpoints. Rewinding stays the agent's
+  (`/rewind`).
 - **Conflicts before merge time.** Roost finds a conflict only when `m`
   refuses. Running `git merge-tree` as tasks change, against the integration
   branch and the project's other tasks, lets the panel say "conflicts with
@@ -38,8 +71,25 @@ Small, and probably worth the most.
   agent-deck's does, would show them in the sidebar and mode line, and for a
   task stopped by a limit, when it resets. Pro and Max plans only, and each
   session reports what it saw last. Orca shows usage in its status bar.
+- **Evidence beside the files in the task panel.** Show what a decision can
+  rest on without opening the diff: the pull request's checks, the
+  reviewer's findings still open, the size of the change, and any paths
+  marked as risky (below). That's enough to finish a small change that
+  passed everything, or to pick the one worth reading closely; the file list
+  and Magit stay as they are. Before a pull request, the agent's own test
+  output stays in its terminal. From the Claude Code team's review, where
+  people judge a change by its evidence more than by its lines.
+- **Marks for risky changes.** A list of paths per project, in
+  `.dir-locals.el` or the repository's CODEOWNERS, marks tasks whose changes
+  touch them, such as CI workflows, authentication or releases, in the
+  sidebar and dashboard. That says which diffs to read closely, whether or
+  not you read the rest. Large changes get a mark too: the Claude Code team
+  finds that most pull requests over 1,000 lines have findings. Roost only
+  marks; it approves and merges nothing on its own. From the same post's
+  risk tiers, which come from the change, not its author.
 - **Scripts beyond setup.** A teardown command before a worktree is removed,
-  a check command that must pass before `m`, and a block of ports per task
+  a check command that must pass before `m` (the local stand-in for the CI
+  a pull request runs, which `m` skips), and a block of ports per task
   (`$ROOST_PORT`) so two tasks' servers don't collide. A remote task's port
   can be forwarded over the SSH connection Roost already shares. From
   Conductor (setup, run and archive scripts, ten ports per workspace),
@@ -89,10 +139,6 @@ Larger, or undecided.
   herdr's `agent start`, `prompt`, `wait` and `read`, workmux's
   `/coordinator` skill, Superset's MCP server, agent-deck's conductor. It
   pulls toward an orchestration Roost may not want.
-- **What changed since you last looked.** A snapshot of the worktree in a
-  private ref at each prompt, for a Magit diff of one turn, or of everything
-  since your last review, the agent's commits included. From Conductor's
-  checkpoints. Rewinding stays the agent's (`/rewind`).
 - **A map of the agent's work** beside its terminal: the files it reads and
   edits over time, drawn with Emacs 32's canvas images. Prototype on branch
   `work-map`.
@@ -138,7 +184,8 @@ Larger, or undecided.
   Claude Code can subscribe a session to its pull request's reviews and CI,
   and autofix it. Roost keeps `P`, the `#12` line with checks and review,
   and `x` once it merges; when the agent's watcher sets it to work, the
-  status lights show it like any other turn.
+  status lights show it like any other turn. Saying when a pull request
+  waits on you is Roost's (see above); fixing what it finds is the agent's.
 - **A docked review column.** Magit, opened with `r`, stages and takes
   notes; see [the Orca comparison](orca-comparison.md#review-notes-and-staging-in-magit).
 - **Built-in browsers and design modes** (Orca, cmux, Superset), **a kanban
