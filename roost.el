@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026  Clay Sheaff
 
 ;; Author: Clay Sheaff
-;; Version: 0.8.1
-;; Package-Requires: ((emacs "29.1") (tmux-control "0.7.0") (transient "0.4.1"))
+;; Version: 0.9.0
+;; Package-Requires: ((emacs "29.1") (tmux-control "0.8.1") (transient "0.4.1"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/csheaff/roost
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -7487,15 +7487,21 @@ RESULT is `pending', a list of checks, or (error . MESSAGE).")
             (lm-header "Version")))
         "installed")))
 
+(defconst roost--tmux-control-version "0.8.1"
+  "The oldest tmux-control Roost works with, as its Package-Requires says.")
+
 (defun roost--doctor-local-checks ()
   "List the local checks, each (NAME OK DETAIL HINT PATH)."
   (let ((helper (expand-file-name "scripts/roost_remote.py" roost--package-directory)))
     (list (list "Emacs" (version<= "29.1" emacs-version) emacs-version
                 "Roost needs Emacs 29.1 or newer")
           (let ((version (roost--library-version "tmux-control")))
-            (list "tmux-control" (and version (ignore-errors (version<= "0.7.0" version))) version
+            (list "tmux-control"
+                  (and version (ignore-errors (version<= roost--tmux-control-version version)))
+                  version
                   (if version
-                      "Roost needs tmux-control 0.7.0 or newer: https://github.com/csheaff/tmux-control"
+                      (format "Roost needs tmux-control %s or newer: https://github.com/csheaff/tmux-control"
+                              roost--tmux-control-version)
                     "Install tmux-control: https://github.com/csheaff/tmux-control")
                   (locate-library "tmux-control")))
           (list "Eat" (locate-library "eat") (roost--library-version "eat")

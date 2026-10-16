@@ -2,9 +2,39 @@
 
 What each release changes, and what to do when upgrading. Newest first.
 
-## Unreleased
+## 0.9.0
 
-Since 0.8.1:
+To upgrade from 0.8:
+
+- Update tmux-control to 0.8.1 first, which Roost now needs: with
+  straight.el or a Git checkout, pull it before Roost; with `package-vc`,
+  run `package-vc-upgrade` on tmux-control, then on Roost. Then restart
+  Emacs. `M-x roost-doctor` flags an older tmux-control.
+- In your configuration, replace `roost-claude-command` with the `"claude"`
+  entry of `roost-agent-commands`, and `roost-use-perspectives` with
+  `roost-workspace`; both still work for now. Remove `roost-session-name`,
+  which is ignored now that each task has a tmux session of its own.
+  `roost-list` and `roost-kill` are obsolete: use `roost-switch-task` and
+  `roost-stop`.
+- `m` squashes a task into one commit. Set `roost-merge-style` to `merge` to
+  keep merge commits.
+- `?` opens the menu, as `h` does; a task's details stay on `i`. `c` starts a
+  task, and `d` no longer does.
+- An agent running when you upgrade keeps the hooks and the tmux session it
+  started with. Stop it with `K` and resume it with `s` when convenient, and
+  it reports the worktrees it makes and moves to a session of its own.
+- To be told from the start of each session when an agent needs you, add
+  `(roost-watch-mode 1)` to your configuration, as the install snippets now
+  do; `(roost-sidebar-mode 1)` and `(roost-task-panel-mode 1)` keep the new
+  sidebar and task panel on.
+- To keep the old look, make `roost-prose` inherit `default`, `roost-field`
+  inherit `link`, and `roost-status-running` inherit
+  `font-lock-keyword-face`.
+- Hosts need tmux 3.1 or later; the README said 3.0, which never worked.
+  With tmux 3.4, a click opens a link Claude Code shows, and with Git 2.38,
+  `m` merges while your checkout is on another branch.
+
+Changes since 0.8.1:
 
 - A task whose pull request waits on you counts as waiting, so `n`, the
   status lights, the mode line and notifications find it once its agent is
