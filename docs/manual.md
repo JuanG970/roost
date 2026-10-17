@@ -14,7 +14,7 @@ day of work, every command and option, and how Roost works.
 ## Install
 
 Requirements: Emacs 29.1+ and [tmux-control](https://github.com/csheaff/tmux-control)
-0.7.0+ (which brings [Eat](https://codeberg.org/akib/emacs-eat)). Each task host needs
+0.8.1+ (which brings [Eat](https://codeberg.org/akib/emacs-eat)). Each task host needs
 Python 3.9+, Git, tmux 3.1+, and an installed, signed-in agent CLI (Codex 0.160.0
 or newer). Remote hosts need key- or agent-based SSH; use SSH config aliases for
 ports and jump hosts. Roost copies its helper to each host itself.
@@ -156,8 +156,7 @@ shows the same for every agent, and the mode line counts the agents waiting
 for you, permission requests first. Answer it in the terminal, then `n` again.
 A link the agent shows there, such as the pull request it opened, opens with
 `C-c C-u`, which offers each link on the screen, and with a click when the
-agent marks it as a link, as Claude Code does with tmux 3.4 or later (both
-need tmux-control 0.8.0 or later).
+agent marks it as a link, as Claude Code does with tmux 3.4 or later.
 A finished agent you have looked at stops counting, and turns grey, until it
 replies again; one that failed or stopped by itself stops counting once you've
 seen it. What you've seen is kept on the task's host, for your other machines
@@ -185,7 +184,7 @@ when the terminal would drop below 80 columns, and `q` in it turns it off.
 **Check the work yourself.** `t` opens a shell beside the agent, in the same
 worktree, and returns to it after. Run the tests, start the app, poke at it.
 The agent and the shell are tmux panes, each in a window of its own: `C-x o`
-moves between them (so does `C-c C-o`, with tmux-control 0.8.0 or later),
+moves between them (so does `C-c C-o`),
 `C-c C-t` shows one at a time, and tmux-control's other pane keys work too. `C-c |` splits off another pane,
 which starts in the worktree; it closes when its program exits, and every
 pane closes when the task stops.
@@ -369,9 +368,12 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   `(:eval (and (fboundp 'roost-mode-line-waiting) (roost-mode-line-waiting)))`
   where you want the count.
 - `roost-animations` (nil): on Emacs 32, which draws canvas images, the
-  status light of an agent asking you something pulses and one that
-  finished, failed or exited since you saw it glows; the rest stay still, and the motion pauses while Emacs
-  isn't in front. Elsewhere the lights stay dots.
+  status light of an agent waiting for you fades out and back in: deeply
+  and quickly when it asks you something, less and slowly when it
+  finished, failed or exited since you saw it, or its pull request waits
+  on you. The rest stay still, and
+  the motion pauses while Emacs isn't in front. Elsewhere the lights stay
+  dots.
 - Faces: `roost-prose` sets what you and the agents wrote (prompts, replies,
   requests) in `variable-pitch`, keeping tables and code in the fixed-pitch
   font; make it inherit `default` for one font throughout. `roost-field` is

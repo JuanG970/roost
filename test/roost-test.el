@@ -2254,7 +2254,7 @@
              question)
          (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt &rest _) (setq question prompt) t)))
            (roost-retire merged))
-         (should (string-match-p "Nothing in them would be lost" question)))
+         (should (string-match-p "nothing in them would be lost" question)))
        (should (equal (caar acted) "retire"))
        ;; Not while its agent works.
        (should-error (roost-retire (roost--cache-task "dev" (roost-test--task nil "running"))) :type 'user-error)))))
@@ -3416,9 +3416,19 @@ Read from the layout transient keeps, whose form varies by version."
         (should (= (aref still 0) #xFF1E1E1E))
         (should (= (aref still (+ (/ width 2) (* (/ height 2) width))) #xFFAA66FF))
         (should (equal still (funcall pixels-at nil 0.5))))
-      (dolist (motion '(pulse glow))
-        (should-not (equal (funcall pixels-at motion 0.0) (funcall pixels-at motion 0.5))))
-      (should (= roost-test--refreshed 6)))))
+      ;; A moving light fades from whole and back, deeper when an agent
+      ;; asks, with nothing drawn around it.
+      (let ((still (funcall pixels-at nil 0.0))
+            (middle (+ (/ width 2) (* (/ height 2) width)))
+            (red (lambda (pixel) (logand (ash pixel -16) 255))))
+        (dolist (motion '(pulse glow))
+          (should (equal (funcall pixels-at motion 0.0) still))
+          (let ((faded (funcall pixels-at motion 0.5)))
+            (should (= (aref faded 0) #xFF1E1E1E))
+            (should (< #x1E (funcall red (aref faded middle)) #xAA))))
+        (should (< (funcall red (aref (funcall pixels-at 'pulse 0.5) middle))
+                   (funcall red (aref (funcall pixels-at 'glow 0.5) middle)))))
+      (should (= roost-test--refreshed 9)))))
 
 (ert-deftest roost-status-lights-paint-the-background-that-shows ()
   ;; A theme can leave the margin face of Emacs 31 and later without a
@@ -5199,14 +5209,25 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
          (kill-buffer "*roost doctor*"))))))
 
 (ert-deftest roost-doctor-requires-tmux-control-public-api ()
-  (dolist (case '((nil nil "Install tmux-control") ("0.6.0" nil "0.7.0 or newer")
-                  ("installed" nil "0.7.0 or newer") ("0.7.0" t nil) ("0.10.1" t nil)))
-    (cl-letf (((symbol-function 'roost--library-version)
-               (lambda (library) (and (equal library "tmux-control") (car case)))))
-      (let ((check (assoc "tmux-control" (roost--doctor-local-checks))))
-        (should (eq (and (nth 1 check) t) (nth 1 case)))
-        (should (equal (nth 2 check) (car case)))
-        (when (nth 2 case) (should (string-match-p (nth 2 case) (nth 3 check))))))))
+  (roost-test--isolated
+   (dolist (case '((nil nil "Install tmux-control") ("0.6.0" nil "0.8.1 or newer")
+                   ("installed" nil "0.8.1 or newer") ("0.8.0" nil "0.8.1 or newer")
+                   ("0.8.1" t nil) ("0.10.1" t nil)))
+     (cl-letf (((symbol-function 'roost--library-version)
+                (lambda (library) (and (equal library "tmux-control") (car case)))))
+       (let ((check (assoc "tmux-control" (roost--doctor-local-checks))))
+         (should (eq (and (nth 1 check) t) (nth 1 case)))
+         (should (equal (nth 2 check) (car case)))
+         (when (nth 2 case) (should (string-match-p (nth 2 case) (nth 3 check)))))))))
+
+(ert-deftest roost-doctor-wants-the-tmux-control-package-requires-names ()
+  ;; Package managers install what Package-Requires names; the doctor
+  ;; flags anything older.
+  (roost-test--isolated
+   (with-temp-buffer
+     (insert-file-contents (expand-file-name "roost.el" roost--package-directory))
+     (should (equal (cadr (assq 'tmux-control (read (lm-header "Package-Requires"))))
+                    roost--tmux-control-version)))))
 
 (ert-deftest roost-evil-users-get-working-keys ()
   (let (states)

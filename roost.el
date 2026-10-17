@@ -1,10 +1,26 @@
 ;;; roost.el --- Run coding agents in Git worktrees and tmux -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026  Clay Sheaff
+
 ;; Author: Clay Sheaff
-;; Version: 0.8.1
-;; Package-Requires: ((emacs "29.1") (tmux-control "0.7.0") (transient "0.4.1"))
+;; Version: 0.9.0
+;; Package-Requires: ((emacs "29.1") (tmux-control "0.8.1") (transient "0.4.1"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/csheaff/roost
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -345,9 +361,9 @@ covers it on the line you are on.")
   "Seconds between background polls that ask GitHub about pull requests.
 A merge there leaves no trace on the host for a poll to notice.")
 (defvar roost--snapshots (make-hash-table :test 'equal)
-  "For each host, the request, counted in `roost--list-requests', whose
-task list Roost holds, or the newest of them; so a view can tell that a
-list asked for after some moment has arrived.")
+  "For each host, the newest request whose task list Roost holds.
+Requests are numbered as `roost--list-requests' counts them, so a view
+can tell that a list asked for after some moment has arrived.")
 (defvar roost--errors (make-hash-table :test 'equal)
   "Last refresh error for each unreachable host.")
 (defvar roost--statuses (make-hash-table :test 'equal)
@@ -1321,7 +1337,9 @@ made now."
 
 (defun roost--compact-perspective-mode-line (original)
   "Collapse task perspectives in ORIGINAL without changing their identity."
-  (if (not (and original roost-compact-mode-line (with-no-warnings roost-use-perspectives)
+  (if (not (and original roost-compact-mode-line
+                (with-suppressed-warnings ((obsolete roost-use-perspectives))
+                  roost-use-perspectives)
                 (bound-and-true-p persp-mode)))
       original
     (let* ((current (persp-current-name))
@@ -1349,7 +1367,9 @@ made now."
 
 (defun roost--workspace-backend ()
   "The workspace mechanism in use: `perspective', `tab-bar' or nil."
-  (let ((perspective (and (with-no-warnings roost-use-perspectives) (bound-and-true-p persp-mode)
+  (let ((perspective (and (with-suppressed-warnings ((obsolete roost-use-perspectives))
+                            roost-use-perspectives)
+                          (bound-and-true-p persp-mode)
                           (fboundp 'persp-current-name))))
     (pcase roost-workspace
       ('auto (cond (perspective 'perspective)
@@ -1604,7 +1624,6 @@ not another task's: they keep their grid."
   "How many things Roost holds back until the minibuffer is done.
 Such as a task to show, by `roost--when-out-of-minibuffer'.")
 
-;;;###autoload
 (defun roost--when-out-of-minibuffer (function)
   "Call FUNCTION now, or once the minibuffer you are in is done.
 A task is shown when its host replies, which can be while you answer a
@@ -1652,6 +1671,7 @@ quitting would end that command too."
                              (funcall then))))
       (minibuffer-quit-recursive-edit count))))
 
+;;;###autoload
 (defun roost-open-task (&optional task quit-questions)
   "Validate TASK's tmux ownership, then restore its perspective and terminal.
 With QUIT-QUESTIONS, as when you give a command, first quit the
@@ -1813,7 +1833,7 @@ a word, within 40 characters."
 
 (defun roost--agent-command (agent)
   "Executable and arguments for AGENT."
-  (or (with-no-warnings
+  (or (with-suppressed-warnings ((obsolete roost-claude-command))
         ;; Set before `roost-agent-commands' had Claude's.
         (and (equal agent "claude") (not (equal roost-claude-command '("claude")))
              roost-claude-command))
@@ -1935,8 +1955,8 @@ On a project's heading in the dashboard or sidebar, that project."
         ((car (roost--known-projects)))))
 
 (defun roost--may-look-in-p (directory)
-  "Whether looking in DIRECTORY opens no connection: it is local, or on a
-host TRAMP is connected to."
+  "Whether looking in DIRECTORY opens no connection.
+It does not when DIRECTORY is local, or on a host TRAMP is connected to."
   (or (not (file-remote-p directory)) (file-remote-p directory nil t)))
 
 (defun roost--known-project-of (directory)
@@ -2081,8 +2101,8 @@ taken back at the next change of layout, and the selection with it."
 
 (defun roost--display-beside-tiles (buffer alist)
   "Display BUFFER in a window of the frame's that no terminal is in, or a new one.
-A `display-buffer' action, for when the selected window is a tiled
-terminal's pane, which BUFFER would not keep."
+A `display-buffer' action, with its action ALIST, for when the selected
+window is a tiled terminal's pane, which BUFFER would not keep."
   (if-let* ((window (seq-find (lambda (window)
                                 ;; Nor one kept for its buffer, as a note's on
                                 ;; a text terminal.
@@ -4564,7 +4584,7 @@ Magit to commit it."
       (user-error "%s's agent is at work; stop it (K) first, or wait" name))
      ((roost--unmerged-work-p task)
       (funcall offer))
-     ((y-or-n-p (format "Retire %s, removing its worktree and branch?  Nothing in them would be lost. " name))
+     ((y-or-n-p (format "Retire %s, removing its worktree and branch (nothing in them would be lost)? " name))
       (funcall retire)))))
 
 ;;;###autoload
@@ -4655,7 +4675,7 @@ finished work is merged or retired instead."
                                               label (string-join losses " and ")
                                               (if (roost--agent-running-p task) ", and stops its agent" ""))))
                         name)
-               (y-or-n-p (format "Discard %s, %sdeleting its worktree and branch?  Nothing in them would be lost. "
+               (y-or-n-p (format "Discard %s, %sdeleting its worktree and branch (nothing in them would be lost)? "
                                  label (if (roost--agent-running-p task) "stopping its agent and " "")))))
         (message "%s was not discarded" name)
       (roost--act task "discard" (list (cons 'expect (alist-get 'commit told)))
@@ -4938,9 +4958,10 @@ more than MOST lines.  Return the lines."
 
 (defcustom roost-animations nil
   "Whether the status lights of agents waiting for you move.
-One asking you something pulses, and one that finished, failed, crashed
-or exited since you saw it glows slowly; the rest stay still, so motion
-always means an agent needs you.
+They fade out and back in: one asking you something deeply and quickly,
+and one that finished, failed, crashed or exited since you saw it, or
+whose pull request waits on you, less and slowly.  The rest stay still,
+so motion always means an agent needs you.
 This needs Emacs 32's canvas images; without them the lights stay the
 dots they are.  The motion pauses while no Emacs frame has focus.
 Changed with `setopt' or Customize, it shows at once."
@@ -4962,8 +4983,11 @@ it shows, or nil for the mode line; :phase, the step last drawn; and
 (defvar roost--lights-timer nil
   "Timer moving the status lights.")
 
-(defconst roost--light-periods '((pulse . 1.6) (glow . 3.4))
+(defconst roost--light-periods '((pulse . 2.0) (glow . 3.0))
   "Seconds each motion of a status light takes.")
+
+(defconst roost--light-depths '((pulse . 0.75) (glow . 0.5))
+  "How far towards its background each motion fades a status light.")
 
 (defun roost--light-frame-p (frame)
   "Whether FRAME shows status lights: it is graphical.
@@ -4987,7 +5011,8 @@ Only there do its lights show; a text frame shows their dots."
 (defun roost--light-motion (task)
   "How TASK's light moves, or nil if it rests.
 Only an agent waiting for you moves, as `roost--waiting-p' has it: one
-that can't go on without you pulses, and the others glow."
+that can't go on without you pulses, fading deeply, and the others glow,
+fading less."
   (cond ((roost--blocked-p task) 'pulse)
         ((roost--waiting-p task) 'glow)))
 
@@ -5014,9 +5039,10 @@ that can't go on without you pulses, and the others glow."
 
 (defun roost--light-draw (light phase)
   "Draw LIGHT at PHASE, from 0 to 1, of its motion.
-A disc, smoothed at its edge, and while moving a halo that swells and
-fades.  Canvases have no transparency, so it paints its background too.
-Plain arithmetic, cheap even when Roost runs uncompiled."
+A disc, smoothed at its edge, that while moving fades towards its
+background and back, whole at the start of each cycle.  Canvases have
+no transparency, so it paints its background too.  Plain arithmetic,
+cheap even when Roost runs uncompiled."
   (let* ((image (plist-get light :image))
          (pixels (plist-get (cdr image) :data))
          (width (plist-get (cdr image) :data-width))
@@ -5025,30 +5051,26 @@ Plain arithmetic, cheap even when Roost runs uncompiled."
          (color (plist-get light :color))
          (background (plist-get light :background))
          (motion (plist-get light :motion))
+         ;; From 0 at the start of a cycle to 1 halfway, and back.
          (wave (- 0.5 (* 0.5 (cos (* 2 float-pi phase)))))
+         (level (- 1 (* (alist-get motion roost--light-depths 0) wave)))
          (radius (min 3.5 (- (/ (min width height) 2.0) 1)))
-         (halo (pcase motion ('pulse (* 0.5 wave)) ('glow (* 0.25 wave)) (_ 0)))
-         (reach (+ radius (if (eq motion 'pulse) (+ 1.5 (* 2.5 wave)) 2.5)))
          (edge (+ radius 0.5))
          (br (logand (ash background -16) 255)) (bg (logand (ash background -8) 255)) (bb (logand background 255))
-         (dr (- (logand (ash color -16) 255) br)) (dg (- (logand (ash color -8) 255) bg)) (db (- (logand color 255) bb))
-         (kr (logand (ash color -16) 255)) (kg (logand (ash color -8) 255)) (kb (logand color 255))
-         (span (- reach radius)))
+         (dr (- (logand (ash color -16) 255) br)) (dg (- (logand (ash color -8) 255) bg)) (db (- (logand color 255) bb)))
     (fillarray pixels background)
     (dotimes (i (length pixels))
       (let ((d (aref shape i)))
-        (when (< d (max reach edge))
-          (let* ((glow (if (and (> halo 0) (< d reach)) (* halo (expt (/ (- reach d) span) 2)) 0))
-                 (cover (max 0.0 (min 1.0 (- edge d))))
-                 (r (+ br (* glow dr))) (g (+ bg (* glow dg))) (b (+ bb (* glow db))))
+        (when (< d edge)
+          (let ((cover (* level (min 1.0 (- edge d)))))
             (aset pixels i (logior #xFF000000
-                                   (ash (round (+ r (* cover (- kr r)))) 16)
-                                   (ash (round (+ g (* cover (- kg g)))) 8)
-                                   (round (+ b (* cover (- kb b))))))))))
+                                   (ash (round (+ br (* cover dr))) 16)
+                                   (ash (round (+ bg (* cover dg))) 8)
+                                   (round (+ bb (* cover db)))))))))
     (when (fboundp 'canvas-refresh)
       (canvas-refresh image 'reload-data))))
 
-(defconst roost--light-steps 16
+(defconst roost--light-steps 20
   "Steps a light's motion takes per cycle.
 A light is redrawn only when its step changes, and each redraw makes
 Emacs redisplay its window, so fewer steps cost less.")
@@ -5408,8 +5430,9 @@ Only ERR's first line fits there; the echo area and *Messages* have it all."
 
 (defconst roost--url-regexp
   "\\([*_~]*\\)\\(https?://[^[:space:]<>\"'`\ue000\ue001]+\\)"
-  "A URL in what an agent wrote, with the Markdown emphasis that opens on it
-and anything that follows it up to a space.")
+  "A URL in what an agent wrote, and the Markdown emphasis that opens on it.
+The URL's group takes in anything that follows it up to a space;
+`roost--trim-url' takes off what belongs to the prose.")
 
 (defun roost--trim-url (url emphasis)
   "URL without what follows it in the prose.
@@ -7466,15 +7489,21 @@ RESULT is `pending', a list of checks, or (error . MESSAGE).")
             (lm-header "Version")))
         "installed")))
 
+(defconst roost--tmux-control-version "0.8.1"
+  "The oldest tmux-control Roost works with, as its Package-Requires says.")
+
 (defun roost--doctor-local-checks ()
   "List the local checks, each (NAME OK DETAIL HINT PATH)."
   (let ((helper (expand-file-name "scripts/roost_remote.py" roost--package-directory)))
     (list (list "Emacs" (version<= "29.1" emacs-version) emacs-version
                 "Roost needs Emacs 29.1 or newer")
           (let ((version (roost--library-version "tmux-control")))
-            (list "tmux-control" (and version (ignore-errors (version<= "0.7.0" version))) version
+            (list "tmux-control"
+                  (and version (ignore-errors (version<= roost--tmux-control-version version)))
+                  version
                   (if version
-                      "Roost needs tmux-control 0.7.0 or newer: https://github.com/csheaff/tmux-control"
+                      (format "Roost needs tmux-control %s or newer: https://github.com/csheaff/tmux-control"
+                              roost--tmux-control-version)
                     "Install tmux-control: https://github.com/csheaff/tmux-control")
                   (locate-library "tmux-control")))
           (list "Eat" (locate-library "eat") (roost--library-version "eat")

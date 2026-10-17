@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026  Clay Sheaff
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Roost's host-side task manager. Standard library only; JSON over stdin/stdout."""
 
 import base64
