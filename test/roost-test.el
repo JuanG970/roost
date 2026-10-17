@@ -22,6 +22,7 @@
          (roost--projects-loaded t) (roost--remembered-projects nil)
          (user-login-name "user")
          (roost--statuses (make-hash-table :test 'equal))
+         (roost--pr-verdicts (make-hash-table :test 'equal))
          (roost--seen (make-hash-table :test 'equal))
          (roost--errors (make-hash-table :test 'equal))
          (roost--installed (make-hash-table :test 'equal))
@@ -2268,7 +2269,7 @@
              question)
          (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt &rest _) (setq question prompt) t)))
            (roost-retire merged))
-         (should (string-match-p "Nothing in them would be lost" question)))
+         (should (string-match-p "nothing in them would be lost" question)))
        (should (equal (caar acted) "retire"))
        ;; Not while its agent works.
        (should-error (roost-retire (roost--cache-task "dev" (roost-test--task nil "running"))) :type 'user-error)))))
@@ -3430,9 +3431,19 @@ Read from the layout transient keeps, whose form varies by version."
         (should (= (aref still 0) #xFF1E1E1E))
         (should (= (aref still (+ (/ width 2) (* (/ height 2) width))) #xFFAA66FF))
         (should (equal still (funcall pixels-at nil 0.5))))
-      (dolist (motion '(pulse glow))
-        (should-not (equal (funcall pixels-at motion 0.0) (funcall pixels-at motion 0.5))))
-      (should (= roost-test--refreshed 6)))))
+      ;; A moving light fades from whole and back, deeper when an agent
+      ;; asks, with nothing drawn around it.
+      (let ((still (funcall pixels-at nil 0.0))
+            (middle (+ (/ width 2) (* (/ height 2) width)))
+            (red (lambda (pixel) (logand (ash pixel -16) 255))))
+        (dolist (motion '(pulse glow))
+          (should (equal (funcall pixels-at motion 0.0) still))
+          (let ((faded (funcall pixels-at motion 0.5)))
+            (should (= (aref faded 0) #xFF1E1E1E))
+            (should (< #x1E (funcall red (aref faded middle)) #xAA))))
+        (should (< (funcall red (aref (funcall pixels-at 'pulse 0.5) middle))
+                   (funcall red (aref (funcall pixels-at 'glow 0.5) middle)))))
+      (should (= roost-test--refreshed 9)))))
 
 (ert-deftest roost-status-lights-paint-the-background-that-shows ()
   ;; A theme can leave the margin face of Emacs 31 and later without a
@@ -4634,6 +4645,222 @@ Read from the layout transient keeps, whose form varies by version."
                                         (roost-test--task)))
                'open))))
 
+(defun roost-test--ago (seconds)
+  "The time SECONDS ago, as GitHub writes it."
+  (format-time-string "%Y-%m-%dT%H:%M:%SZ" (time-subtract nil seconds) t))
+
+(defun roost-test--turn-task (&rest status)
+  "A task whose agent you have seen finish, and whose open pull request
+passed everything, as GitHub said a minute after.  STATUS, fields of its
+`prStatus', go over those; a field (FIELD . :none) is left out."
+  (let ((fields (append status
+                        `((state . "OPEN") (head . "a1") (checks . ((passing . 3) (failing . 0) (pending . 0)))
+                          (mergeable . "MERGEABLE") (requested) (threads . 0)
+                          (checkedAt . "2026-10-03T20:01:00+00:00")))))
+    (roost-test--pr-task
+     `(prStatus . ,(seq-remove (lambda (field) (eq (cdr field) :none))
+                               (seq-uniq fields (lambda (a b) (eq (car a) (car b))))))
+     '(pr . ((number . 12) (url . "https://github.com/o/r/pull/12") (state . "OPEN") (head . "a1")))
+     '(unpushed . 0) '(live . t) '(ahead . 1) '(dirty) '(seen . "2026-10-03T20:00:00+00:00"))))
+
+(ert-deftest roost-a-pull-request-waiting-on-you-counts-as-waiting ()
+  (roost-test--isolated
+   (let ((task (roost--cache-task "dev" (roost-test--turn-task))))
+     (should (equal (roost--display-status task) "to merge"))
+     (should (roost--waiting-p task))
+     (should-not (roost--blocked-p task))
+     (should (< (roost--attention-rank task) (roost--attention-rank (roost-test--task nil "running"))))
+     (should (equal (substring-no-properties (roost--next-step task))
+                    "#12 passed its checks and review: P opens it to merge"))
+     (should (equal (substring-no-properties (roost--summary (list task))) "1 to merge"))
+     (let ((row (roost--sidebar-row task 40)))
+       (should (string-suffix-p "to merge" row))
+       (should (eq (get-text-property (1- (length row)) 'face row) 'roost-status-ready))))
+   ;; What its agent last said comes first, and the next step is the same.
+   (let ((news (roost--cache-task "dev" (assq-delete-all 'seen (roost-test--turn-task)))))
+     (should (equal (roost--display-status news) "ready"))
+     (should (string-prefix-p "#12 passed its checks" (roost--next-step news))))
+   (should (string-prefix-p "Draft #12 passed its checks and review"
+                            (roost--next-step (roost--cache-task "dev" (roost-test--turn-task '(draft . t))))))))
+
+(ert-deftest roost-a-pull-request-is-yours-only-once-github-knows-the-agent-s-work ()
+  (roost-test--isolated
+   (let ((status (lambda (&rest fields)
+                   (roost--display-status (roost--cache-task "dev" (apply #'roost-test--turn-task fields)))))
+         (step (lambda (&rest fields)
+                 (substring-no-properties
+                  (roost--next-step (roost--cache-task "dev" (apply #'roost-test--turn-task fields)))))))
+     ;; Asked too soon after the agent's last event, GitHub may not have
+     ;; had its push.
+     (should (equal (funcall status '(checkedAt . "2026-10-03T20:00:20+00:00")) "ready"))
+     (should (equal (funcall step '(checkedAt . "2026-10-03T20:00:20+00:00"))
+                    "P pushes new commits to its pull request"))
+     (should (equal (funcall status '(checkedAt . :none)) "ready"))
+     ;; The branch has commits the pull request lacks, or can't tell.
+     (let ((ahead (roost--cache-task "dev" (append '((unpushed . 2)) (roost-test--turn-task)))))
+       (should (equal (roost--display-status ahead) "ready"))
+       (should (equal (substring-no-properties (roost--next-step ahead)) "P pushes 2 new commits to #12")))
+     (should (equal (roost--display-status (roost--cache-task "dev" (append '((unpushed)) (roost-test--turn-task))))
+                    "ready"))
+     ;; GitHub is still at work.
+     (should (equal (funcall status '(checks . ((passing . 2) (failing . 0) (pending . 1)))) "ready"))
+     (should (equal (funcall step '(checks . ((passing . 2) (failing . 0) (pending . 1))))
+                    "#12 waits for 1 check"))
+     (should (equal (funcall status '(requested "copilot-pull-request-reviewer")) "ready"))
+     (should (equal (funcall step '(checks . ((passing . 2) (failing . 0) (pending . 2)))
+                             '(requested "copilot-pull-request-reviewer"))
+                    "#12 waits for 2 checks and Copilot's review"))
+     (should (equal (funcall step '(requested "alice" "core")) "#12 waits for reviews from alice, core"))
+     ;; What it doesn't know, or what isn't yours to settle here.
+     (should (equal (funcall status '(threads . :none)) "ready"))
+     (should (equal (funcall status '(requested . :none)) "ready"))
+     (should (equal (funcall status '(checks)) "ready"))
+     (should (equal (funcall status '(mergeable . "UNKNOWN")) "ready"))
+     (should (equal (funcall status '(review . "REVIEW_REQUIRED")) "ready"))
+     (should (equal (funcall status '(review . "CHANGES_REQUESTED")) "ready"))
+     (should (equal (funcall status '(mergeable . "CONFLICTING")) "ready"))
+     (should (equal (funcall step '(mergeable . "CONFLICTING"))
+                    "#12 conflicts with the branch it merges into: e tells its agent, P opens it"))
+     (should (equal (funcall status '(state . "MERGED")) "ready"))
+     (should (equal (funcall status '(state . "CLOSED")) "ready")))
+   ;; Its agent at work, or with work left uncommitted or unmerged, or in
+   ;; a worktree of its own.
+   (dolist (fields '(((status . "running")) ((status . "background")) ((status . "permission"))
+                     ((dirty . t)) ((merging (conflicts "a.py")))
+                     ((agentWork ((path . "/repo/.claude/worktrees/probe") (ahead . 1))))))
+     (let ((task (roost--cache-task "dev" (append fields '((id . "1111111111111111")) (roost-test--turn-task)))))
+       (should-not (member (roost--display-status task) roost--pr-turns))
+       (should-not (roost--pr-verdict task))))
+   ;; A stopped agent's pull request waits on you all the same, once you
+   ;; have seen what it last did.
+   (let ((stopped (roost--cache-task "dev" (append '((status . "stopped") (live))
+                                                   (roost-test--turn-task)))))
+     (should (equal (roost--display-status stopped) "to merge"))
+     (should (string-prefix-p "#12 passed" (roost--next-step stopped))))
+   (let ((unread (roost--cache-task "dev" (append '((status . "stopped") (live) (seen))
+                                                  (roost-test--turn-task)))))
+     (should (equal (roost--display-status unread) "stopped"))
+     (should-not (roost--waiting-p unread)))))
+
+(ert-deftest roost-a-pull-request-is-yours-only-at-the-head-its-host-records ()
+  ;; Another Emacs's lookup recorded a newer head, which the commits the
+  ;; pull request lacks are counted from: checks of the old one say
+  ;; nothing of it.
+  (roost-test--isolated
+   (should (equal (roost--display-status (roost--cache-task "dev" (roost-test--turn-task))) "to merge"))
+   (should-not (roost--pr-verdict (append '((pr . ((number . 12) (state . "OPEN") (head . "b2"))))
+                                          (roost-test--turn-task))))
+   ;; A quiet poll brings the record, and nothing from GitHub.
+   (let ((polled (roost--cache-task
+                  "dev" (assq-delete-all
+                         'prStatus (append '((pr . ((number . 12) (url . "https://github.com/o/r/pull/12")
+                                                    (state . "OPEN") (head . "b2"))))
+                                           (roost-test--turn-task))))))
+     (should-not (roost--field polled 'prStatus))
+     (should (equal (roost--display-status polled) "ready"))
+     (should (equal (substring-no-properties (roost--next-step polled))
+                    "P pushes new commits to its pull request")))
+   ;; Nor what GitHub said of one since recorded closed, or replaced by
+   ;; another at the same head.
+   (dolist (record '(((number . 12) (url . "https://github.com/o/r/pull/12") (state . "CLOSED") (head . "a1"))
+                     ((number . 13) (url . "https://github.com/o/r/pull/13") (state . "OPEN") (head . "a1"))))
+     (roost--cache-task "dev" (roost-test--turn-task))
+     (let ((polled (roost--cache-task "dev" (assq-delete-all 'prStatus (append `((pr . ,record))
+                                                                                 (roost-test--turn-task))))))
+       (should-not (roost--field polled 'prStatus))
+       (should-not (member (roost--display-status polled) roost--pr-turns))))
+   ;; Even in a reply read before the agent's latest event.
+   (roost--cache-task "dev" (roost-test--turn-task))
+   (let ((older (roost--cache-task
+                 "dev" (assq-delete-all
+                        'prStatus (append '((updatedAt . "2026-10-03T19:59:00+00:00")
+                                            (pr . ((number . 12) (url . "https://github.com/o/r/pull/12")
+                                                   (state . "CLOSED") (head . "a1"))))
+                                          (roost-test--turn-task))))))
+     (should (equal (roost--field older 'updatedAt) "2026-10-03T20:00:00+00:00"))
+     (should-not (roost--field older 'prStatus))
+     (should-not (member (roost--display-status older) roost--pr-turns)))))
+
+(ert-deftest roost-a-failed-check-or-open-thread-is-left-to-the-agent-first ()
+  (roost-test--isolated
+   (let* ((failed (lambda (ago &rest fields)
+                    (roost--cache-task "dev" (apply #'roost-test--turn-task
+                                                    (append fields
+                                                            `((checks . ((passing . 2) (failing . 1) (pending . 0)))
+                                                              (failedAt . ,(roost-test--ago ago))))))))
+          (early (funcall failed 60))
+          (late (funcall failed 180)))
+     ;; An agent that watches its pull request has started a turn by now.
+     (should-not (roost--waiting-p early))
+     (should (equal (roost--pr-verdict early) "ci failed"))
+     (should (equal (substring-no-properties (roost--next-step early))
+                    "A check failed on #12: e tells its agent, P opens it"))
+     (should (equal (roost--display-status late) "ci failed"))
+     (should (roost--waiting-p late))
+     (should (eq (roost--status-face "ci failed") 'roost-status-failed))
+     ;; Without a time, which gh may leave out, at once, however often
+     ;; GitHub is asked again.
+     (dolist (ago '(150 60 0))
+       (should (equal (roost--display-status (funcall failed 0 '(failedAt) `(checkedAt . ,(roost-test--ago ago))))
+                      "ci failed")))
+     (let ((stopped (roost--cache-task "dev" (append '((status . "stopped") (live))
+                                                     (roost-test--turn-task
+                                                      '(checks . ((passing . 0) (failing . 2) (pending . 0)))
+                                                      `(failedAt . ,(roost-test--ago 600)))))))
+       (should (equal (substring-no-properties (roost--next-step stopped))
+                      "2 checks failed on #12: s resumes its agent, P opens it"))))
+   (let ((threads (lambda (ago)
+                    (roost--cache-task "dev" (roost-test--turn-task
+                                              '(threads . 2) `(threadAt . ,(roost-test--ago ago)))))))
+     (should (equal (roost--display-status (funcall threads 30)) "ready"))
+     (let ((task (funcall threads 300)))
+       (should (equal (roost--display-status task) "comments"))
+       (should (roost--waiting-p task))
+       (should (equal (substring-no-properties (roost--next-step task))
+                      "#12 has 2 unresolved review threads: e tells its agent to answer them, P opens it"))
+       (should (equal (substring-no-properties (roost--summary (list task))) "1 with review comments"))))))
+
+(ert-deftest roost-a-pull-request-that-comes-to-wait-on-you-notifies ()
+  (roost-test--isolated
+   (let ((roost-notify t) notices)
+     (cl-letf (((symbol-function 'roost--notify) (lambda (title body &rest _) (push (list title body) notices)))
+               ((symbol-function 'roost--watched-task) #'ignore))
+       ;; One that waited when Roost first saw it is no news.
+       (roost--cache-task "dev" (roost-test--turn-task))
+       (should-not notices)
+       (roost--cache-task "dev" (roost-test--turn-task '(checks . ((passing . 2) (failing . 0) (pending . 1)))))
+       (should-not notices)
+       (roost--cache-task "dev" (roost-test--turn-task))
+       (should (equal notices '(("Roost: fix auth — to merge" "dev · #12 passed its checks and review"))))
+       ;; Nor again while it waits, nor once you look at it.
+       (roost--cache-task "dev" (roost-test--turn-task))
+       (should (= (length notices) 1))
+       (roost--cache-task "dev" (roost-test--turn-task '(threads . 1) `(threadAt . ,(roost-test--ago 300))))
+       (should (equal (car notices) '("Roost: fix auth — comments" "dev · #12 has 1 unresolved review thread")))
+       (cl-letf (((symbol-function 'roost--watched-task)
+                  (lambda () (gethash '("dev" "0123456789abcdef") roost--tasks))))
+         (roost--cache-task "dev" (roost-test--turn-task))
+         (should (= (length notices) 2)))
+       ;; Forgotten with the task.
+       (roost--apply-snapshot "dev" nil)
+       (should (eq (gethash '("dev" "0123456789abcdef") roost--pr-verdicts 'gone) 'gone))))))
+
+(ert-deftest roost-the-panel-says-what-a-pull-request-waits-for ()
+  (roost-test--isolated
+   (let ((task (roost--cache-task "dev" (roost-test--turn-task
+                                         '(threads . 2) `(threadAt . ,(roost-test--ago 30))
+                                         '(requested "copilot-pull-request-reviewer" "core")
+                                         '(mergeable . "CONFLICTING")))))
+     (cl-letf (((symbol-function 'roost--refresh-host) #'ignore))
+       (save-window-excursion
+         (roost-task-info task)
+         (with-current-buffer "*roost: fix auth*"
+           (unwind-protect
+               (should (string-match-p
+                        "^Open · 3 passing · 2 unresolved review threads · review requested from Copilot, core · conflicts$"
+                        (buffer-string)))
+             (kill-buffer))))))))
+
 (ert-deftest roost-commits-since-a-merge-are-work-to-lose ()
   (roost-test--isolated
    (let ((later (roost--cache-task "dev" (append '((live . t) (ahead . 3) (landed) (dirty)
@@ -4997,14 +5224,25 @@ Read from the layout transient keeps, whose form varies by version."
          (kill-buffer "*roost doctor*"))))))
 
 (ert-deftest roost-doctor-requires-tmux-control-public-api ()
-  (dolist (case '((nil nil "Install tmux-control") ("0.6.0" nil "0.7.0 or newer")
-                  ("installed" nil "0.7.0 or newer") ("0.7.0" t nil) ("0.10.1" t nil)))
-    (cl-letf (((symbol-function 'roost--library-version)
-               (lambda (library) (and (equal library "tmux-control") (car case)))))
-      (let ((check (assoc "tmux-control" (roost--doctor-local-checks))))
-        (should (eq (and (nth 1 check) t) (nth 1 case)))
-        (should (equal (nth 2 check) (car case)))
-        (when (nth 2 case) (should (string-match-p (nth 2 case) (nth 3 check))))))))
+  (roost-test--isolated
+   (dolist (case '((nil nil "Install tmux-control") ("0.6.0" nil "0.8.1 or newer")
+                   ("installed" nil "0.8.1 or newer") ("0.8.0" nil "0.8.1 or newer")
+                   ("0.8.1" t nil) ("0.10.1" t nil)))
+     (cl-letf (((symbol-function 'roost--library-version)
+                (lambda (library) (and (equal library "tmux-control") (car case)))))
+       (let ((check (assoc "tmux-control" (roost--doctor-local-checks))))
+         (should (eq (and (nth 1 check) t) (nth 1 case)))
+         (should (equal (nth 2 check) (car case)))
+         (when (nth 2 case) (should (string-match-p (nth 2 case) (nth 3 check)))))))))
+
+(ert-deftest roost-doctor-wants-the-tmux-control-package-requires-names ()
+  ;; Package managers install what Package-Requires names; the doctor
+  ;; flags anything older.
+  (roost-test--isolated
+   (with-temp-buffer
+     (insert-file-contents (expand-file-name "roost.el" roost--package-directory))
+     (should (equal (cadr (assq 'tmux-control (read (lm-header "Package-Requires"))))
+                    roost--tmux-control-version)))))
 
 (ert-deftest roost-evil-users-get-working-keys ()
   (let (states)

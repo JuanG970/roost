@@ -1,10 +1,26 @@
 ;;; roost.el --- Run coding agents in Git worktrees and tmux -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026  Clay Sheaff
+
 ;; Author: Clay Sheaff
-;; Version: 0.8.1
-;; Package-Requires: ((emacs "29.1") (tmux-control "0.7.0") (transient "0.4.1"))
+;; Version: 0.9.0
+;; Package-Requires: ((emacs "29.1") (tmux-control "0.8.1") (transient "0.4.1"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/csheaff/roost
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -346,13 +362,16 @@ covers it on the line you are on.")
   "Seconds between background polls that ask GitHub about pull requests.
 A merge there leaves no trace on the host for a poll to notice.")
 (defvar roost--snapshots (make-hash-table :test 'equal)
-  "For each host, the request, counted in `roost--list-requests', whose
-task list Roost holds, or the newest of them; so a view can tell that a
-list asked for after some moment has arrived.")
+  "For each host, the newest request whose task list Roost holds.
+Requests are numbered as `roost--list-requests' counts them, so a view
+can tell that a list asked for after some moment has arrived.")
 (defvar roost--errors (make-hash-table :test 'equal)
   "Last refresh error for each unreachable host.")
 (defvar roost--statuses (make-hash-table :test 'equal)
   "Last observed status for each task key, for notifications.")
+(defvar roost--pr-verdicts (make-hash-table :test 'equal)
+  "For each task key, what its pull request last waited on you for.
+As `roost--pr-verdict' has it, or nil, for notifications.")
 (defvar roost--seen (make-hash-table :test 'equal)
   "For each task key, its `updatedAt' when you last saw its agent.
 A ready agent you have seen since its last event is no longer waiting.")
@@ -773,7 +792,7 @@ and a newer notification about TASK replaces it."
         (t (message "%s: %s" title body))))
 
 (defconst roost--measured-fields
-  '(diff dirty files ahead behind update worktreeMissing prStatus gitStamp agentWork merging landed pr)
+  '(diff dirty files ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging landed pr)
   "A task's fields its host measures for each reply, such as Git statistics.
 They are as new as the reply, whatever its `updatedAt': its pull
 request too, which the host records as it finds one on GitHub.")
@@ -790,9 +809,13 @@ host measured, such as Git statistics, is as new as anything."
     (if (not (and (stringp new) (stringp had) (string< new had)))
         task
       (let ((kept (copy-sequence old)))
-        (dolist (field roost--measured-fields kept)
+        (dolist (field roost--measured-fields)
           (when-let* ((cell (assq field task)))
-            (setq kept (cons cell (assq-delete-all field kept)))))))))
+            (setq kept (cons cell (assq-delete-all field kept)))))
+        ;; Not what GitHub said of a pull request since recorded otherwise.
+        (if (or (assq 'prStatus task) (equal (roost--field task 'pr) (roost--field old 'pr)))
+            kept
+          (assq-delete-all 'prStatus kept))))))
 
 (defun roost--newer-name (task old)
   "TASK, with OLD's name when OLD was renamed since TASK was read.
@@ -823,9 +846,13 @@ bringing back the old name, which the task's tab and panel no longer have."
                         (not (equal (roost--field task 'updatedAt)
                                     (roost--field old 'updatedAt))))))
     ;; Quiet polls skip Git and the latest reply; keep the last full refresh's.
-    (dolist (field '(diff dirty files ahead behind worktreeMissing prStatus lastMessage gitStamp agentWork merging
-                            landed))
-      (unless (assoc field task)
+    ;; Not what GitHub said of a pull request since recorded otherwise, as
+    ;; by another Emacs: closed, or another in its place.
+    (dolist (field '(diff dirty files ahead behind worktreeMissing prStatus unpushed lastMessage gitStamp agentWork
+                            merging landed))
+      (unless (or (assoc field task)
+                  (and (eq field 'prStatus)
+                       (not (equal (roost--field task 'pr) (roost--field old 'pr)))))
         (when (assoc field old) (push (assoc field old) task))))
     (if (not (member status '("retired" "forgotten" "discarded")))
         (puthash key task roost--tasks)
@@ -839,17 +866,31 @@ bringing back the old name, which the task's tab and panel no longer have."
       (roost--name-panels))
     ;; Record the status before notifying, which may cache this task again.
     (puthash key status roost--statuses)
-    (when (and roost-notify previous
-               (or (not (equal previous status)) new-stop)
-               ;; An agent that has just started waits for a prompt, which
-               ;; is no news; one that asks or fails at once is, and polls
-               ;; while Emacs is in the background may see only that.
-               (or (not (equal previous "starting")) (not (equal status "ready")) new-stop)
-               (member status '("ready" "permission" "failed" "crashed" "exited"))
-               ;; Not when you are looking at it already.
-               (not (when-let* ((watched (roost--watched-task)))
-                      (equal (roost--key watched) key))))
-      (roost--notify-attention host task status))
+    (let ((turn (roost--pr-verdict task t))
+          (had (gethash key roost--pr-verdicts 'unknown))
+          ;; Not when you are looking at it already.
+          (unwatched (lambda ()
+                       (not (when-let* ((watched (roost--watched-task)))
+                              (equal (roost--key watched) key))))))
+      (if (gethash key roost--tasks)
+          (puthash key turn roost--pr-verdicts)
+        (remhash key roost--pr-verdicts))
+      (when (and roost-notify previous
+                 (or (not (equal previous status)) new-stop)
+                 ;; An agent that has just started waits for a prompt, which
+                 ;; is no news; one that asks or fails at once is, and polls
+                 ;; while Emacs is in the background may see only that.
+                 (or (not (equal previous "starting")) (not (equal status "ready")) new-stop)
+                 (member status '("ready" "permission" "failed" "crashed" "exited"))
+                 (funcall unwatched))
+        (roost--notify-attention host task status))
+      ;; A pull request that comes to wait on you is news, whatever its
+      ;; agent last said; one there when Roost first saw the task is not.
+      (when (and roost-notify turn (not (eq had 'unknown)) (not (equal had turn))
+                 (funcall unwatched))
+        (roost--notify (format "Roost: %s — %s" (roost--field task 'name) turn)
+                       (concat (roost--host-label host) " · " (roost--pr-reason task turn))
+                       task)))
     task))
 
 (defun roost--notify-attention (host task status)
@@ -886,6 +927,7 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
                (when (and (equal (car key) host) (not (member key keys)))
                  (remhash key roost--tasks)
                  (remhash key roost--statuses)
+                 (remhash key roost--pr-verdicts)
                  (remhash key roost--seen)
                  (roost--remove-notes (lambda (note) (equal (roost--note-key note) key)))))
              roost--tasks)
@@ -1007,7 +1049,8 @@ Hosts in `roost-hosts' are watched until you take them out of it."
       (roost--write-json-list roost-hosts-file roost--remembered-hosts)
       (dolist (task tasks)
         (remhash (roost--key task) roost--tasks)
-        (remhash (roost--key task) roost--statuses))
+        (remhash (roost--key task) roost--statuses)
+        (remhash (roost--key task) roost--pr-verdicts))
       (remhash host roost--errors)
       (remhash host roost--failures)
       (roost--redraw)
@@ -1035,9 +1078,12 @@ recently failed."
 
 ;;;; Choosing a task
 
+(defconst roost--pr-turns '("ci failed" "comments" "to merge")
+  "Statuses of a task whose pull request waits on you; see `roost--pr-turn'.")
+
 (defconst roost--status-order
-  '("permission" "prompt" "ready" "interrupted" "error" "failed" "crashed" "exited" "running"
-    "background" "merged" "idle"
+  '("permission" "prompt" "ready" "interrupted" "error" "failed" "crashed" "exited"
+    "ci failed" "comments" "to merge" "running" "background" "merged" "idle"
     "starting" "stopped")
   "Attention statuses from most to least in need of attention.")
 
@@ -1068,9 +1114,10 @@ it is ready and you have seen it since, rather than \"ready\"."
 (defun roost--waiting-p (task)
   "Whether TASK waits for you.
 Its agent asks something, or finished, failed, crashed or exited since
-you last saw it."
+you last saw it, or its pull request waits on you."
   (let ((status (roost--attention-status task)))
     (or (member status '("permission" "prompt" "ready" "interrupted"))
+        (member status roost--pr-turns)
         (and (member status '("error" "failed" "crashed" "exited"))
              (not (roost--seen-p task))))))
 
@@ -1291,7 +1338,9 @@ made now."
 
 (defun roost--compact-perspective-mode-line (original)
   "Collapse task perspectives in ORIGINAL without changing their identity."
-  (if (not (and original roost-compact-mode-line (with-no-warnings roost-use-perspectives)
+  (if (not (and original roost-compact-mode-line
+                (with-suppressed-warnings ((obsolete roost-use-perspectives))
+                  roost-use-perspectives)
                 (bound-and-true-p persp-mode)))
       original
     (let* ((current (persp-current-name))
@@ -1319,7 +1368,9 @@ made now."
 
 (defun roost--workspace-backend ()
   "The workspace mechanism in use: `perspective', `tab-bar' or nil."
-  (let ((perspective (and (with-no-warnings roost-use-perspectives) (bound-and-true-p persp-mode)
+  (let ((perspective (and (with-suppressed-warnings ((obsolete roost-use-perspectives))
+                            roost-use-perspectives)
+                          (bound-and-true-p persp-mode)
                           (fboundp 'persp-current-name))))
     (pcase roost-workspace
       ('auto (cond (perspective 'perspective)
@@ -1574,7 +1625,6 @@ not another task's: they keep their grid."
   "How many things Roost holds back until the minibuffer is done.
 Such as a task to show, by `roost--when-out-of-minibuffer'.")
 
-;;;###autoload
 (defun roost--when-out-of-minibuffer (function)
   "Call FUNCTION now, or once the minibuffer you are in is done.
 A task is shown when its host replies, which can be while you answer a
@@ -1622,6 +1672,7 @@ quitting would end that command too."
                              (funcall then))))
       (minibuffer-quit-recursive-edit count))))
 
+;;;###autoload
 (defun roost-open-task (&optional task quit-questions)
   "Validate TASK's tmux ownership, then restore its perspective and terminal.
 With QUIT-QUESTIONS, as when you give a command, first quit the
@@ -1783,7 +1834,7 @@ a word, within 40 characters."
 
 (defun roost--agent-command (agent)
   "Executable and arguments for AGENT."
-  (or (with-no-warnings
+  (or (with-suppressed-warnings ((obsolete roost-claude-command))
         ;; Set before `roost-agent-commands' had Claude's.
         (and (equal agent "claude") (not (equal roost-claude-command '("claude")))
              roost-claude-command))
@@ -1905,8 +1956,8 @@ On a project's heading in the dashboard or sidebar, that project."
         ((car (roost--known-projects)))))
 
 (defun roost--may-look-in-p (directory)
-  "Whether looking in DIRECTORY opens no connection: it is local, or on a
-host TRAMP is connected to."
+  "Whether looking in DIRECTORY opens no connection.
+It does not when DIRECTORY is local, or on a host TRAMP is connected to."
   (or (not (file-remote-p directory)) (file-remote-p directory nil t)))
 
 (defun roost--known-project-of (directory)
@@ -2051,8 +2102,8 @@ taken back at the next change of layout, and the selection with it."
 
 (defun roost--display-beside-tiles (buffer alist)
   "Display BUFFER in a window of the frame's that no terminal is in, or a new one.
-A `display-buffer' action, for when the selected window is a tiled
-terminal's pane, which BUFFER would not keep."
+A `display-buffer' action, with its action ALIST, for when the selected
+window is a tiled terminal's pane, which BUFFER would not keep."
   (if-let* ((window (seq-find (lambda (window)
                                 ;; Nor one kept for its buffer, as a note's on
                                 ;; a text terminal.
@@ -4252,6 +4303,127 @@ Without a status from GitHub yet, it is as its host recorded, or open."
                           '(passing failing pending))))
       (when (> (apply #'+ counts) 0) counts))))
 
+(defconst roost--pr-settle 30
+  "Seconds after an agent's last event before GitHub's word counts.
+GitHub asked about its pull request sooner may not know of a push at the
+end of its turn, nor of the checks that push starts.")
+
+(defconst roost--pr-grace 120
+  "Seconds a failed check or an unresolved review thread is left to the agent.
+An agent that watches its own pull request starts a turn by then.")
+
+(defun roost--time (timestamp)
+  "TIMESTAMP, in ISO 8601, as a Lisp time; nil if missing or unreadable."
+  (when (stringp timestamp)
+    (ignore-errors (date-to-time timestamp))))
+
+(defun roost--pr-status (task)
+  "What GitHub last said of TASK's open pull request, if it covers its work.
+That is when its agent neither works nor asks, and GitHub was asked
+`roost--pr-settle' seconds or more after the agent's last event, so it
+knew of every push the agent made.  Its head is the one TASK's host
+records, which another Emacs's lookup may have moved on, as the commits
+the pull request lacks are counted from it.  Nil otherwise."
+  (when-let* ((status (roost--field task 'prStatus))
+              ((equal (alist-get 'state status) "OPEN"))
+              ((equal (alist-get 'head status) (alist-get 'head (roost--field task 'pr))))
+              ((not (member (roost--status-name task) '("starting" "running" "background" "permission"))))
+              (checked (roost--time (alist-get 'checkedAt status)))
+              ((let ((updated (roost--time (roost--field task 'updatedAt))))
+                 (or (not updated) (time-less-p (time-add updated roost--pr-settle) checked)))))
+    status))
+
+(defun roost--pr-verdict (task &optional patient)
+  "What TASK's open pull request waits on you for, as GitHub last said, or nil.
+\"ci failed\" when a check failed; \"comments\" when a review thread is
+unresolved, its agent's reply in it or not; \"to merge\" when every check
+passed, no review is still asked for, none requested changes, and GitHub
+finds no conflicts.  Only as `roost--pr-status' has it, and while the
+pull request has every commit of the task's, with none left uncommitted
+nor in its agent's own worktrees.  PATIENT leaves a failure or thread to
+the agent for `roost--pr-grace' seconds after it came."
+  (when-let* ((status (roost--pr-status task))
+              ((eql (roost--field task 'unpushed) 0))
+              ((not (roost--field task 'dirty)))
+              ((not (roost--field task 'merging)))
+              ((not (roost--agent-work-left task))))
+    (let* ((checks (alist-get 'checks status))
+           (failing (alist-get 'failing checks))
+           (threads (alist-get 'threads status))
+           (due (lambda (field)
+                  (let ((seconds (roost--seconds-since (alist-get field status))))
+                    ;; Without a time, which gh may leave out, at once.
+                    (or (not patient) (not seconds) (>= seconds roost--pr-grace))))))
+      (cond ((and (numberp failing) (> failing 0) (funcall due 'failedAt)) "ci failed")
+            ((and (numberp threads) (> threads 0) (funcall due 'threadAt)) "comments")
+            ((and checks (eql failing 0) (eql (alist-get 'pending checks) 0) (eql threads 0)
+                  (assq 'requested status) (null (alist-get 'requested status))
+                  (not (member (alist-get 'review status) '("CHANGES_REQUESTED" "REVIEW_REQUIRED")))
+                  (equal (alist-get 'mergeable status) "MERGEABLE"))
+             "to merge")))))
+
+(defun roost--pr-turn (task)
+  "TASK's status while its pull request waits on you, or nil.
+One of `roost--pr-turns', from `roost--pr-verdict' giving its agent time
+to take up a failure or thread, once you have seen what the agent last
+did, as for one merged: stopped too, its host keeps it seen only if it
+was before.  It lasts until the pull request or the agent moves: seeing
+it changes nothing, as it does nothing to the pull request."
+  (when (roost--seen-p task)
+    (roost--pr-verdict task t)))
+
+(defun roost--reviewer-name (reviewer)
+  "How to name REVIEWER, a login or team slug that a review is asked of.
+GitHub's GraphQL API names Copilot's reviewer by its bot's login."
+  (if (member (downcase reviewer) '("copilot" "copilot-pull-request-reviewer")) "Copilot" reviewer))
+
+(defun roost--pr-reason (task verdict)
+  "Why TASK's pull request waits on you for VERDICT, from `roost--pr-verdict'."
+  (let* ((status (roost--field task 'prStatus))
+         (number (format "#%s" (alist-get 'number (roost--field task 'pr))))
+         (count (lambda (n what) (format "%d %s%s" n what (if (= n 1) "" "s")))))
+    (pcase verdict
+      ("ci failed"
+       (let ((failing (alist-get 'failing (alist-get 'checks status))))
+         (if (= failing 1)
+             (format "A check failed on %s" number)
+           (format "%d checks failed on %s" failing number))))
+      ("comments" (format "%s has %s" number (funcall count (alist-get 'threads status) "unresolved review thread")))
+      (_ (format "%s%s passed its checks and review" (if (alist-get 'draft status) "Draft " "") number)))))
+
+(defun roost--pr-next-step (task key)
+  "What to do next with TASK's open pull request, naming keys with KEY.
+KEY is a function that formats a key, as in `roost--next-step'."
+  (let* ((status (roost--pr-status task))
+         (number (format "#%s" (alist-get 'number (roost--field task 'pr))))
+         (unpushed (and status (roost--field task 'unpushed)))
+         (verdict (roost--pr-verdict task))
+         (tell (if (roost--agent-running-p task)
+                   (concat (funcall key "e") " tells its agent")
+                 (concat (funcall key "s") " resumes its agent")))
+         (pending (alist-get 'pending (alist-get 'checks status)))
+         (reviewers (mapcar #'roost--reviewer-name (alist-get 'requested status)))
+         (waits (delq nil (list (when (and (numberp pending) (> pending 0))
+                                  (format "%d check%s" pending (if (= pending 1) "" "s")))
+                                (when reviewers
+                                  (if (cdr reviewers)
+                                      (concat "reviews from " (string-join reviewers ", "))
+                                    (concat (car reviewers) "'s review")))))))
+    (cond
+     (verdict
+      (concat (roost--pr-reason task verdict) ": "
+              (pcase verdict
+                ("to merge" (concat (funcall key "P") " opens it to merge"))
+                ("comments" (concat tell " to answer them, " (funcall key "P") " opens it"))
+                (_ (concat tell ", " (funcall key "P") " opens it")))))
+     ((and (numberp unpushed) (> unpushed 0))
+      (format "%s pushes %d new commit%s to %s" (funcall key "P") unpushed (if (= unpushed 1) "" "s") number))
+     ((and status (eql unpushed 0) waits)
+      (format "%s waits for %s" number (string-join waits " and ")))
+     ((and status (equal (alist-get 'mergeable status) "CONFLICTING"))
+      (format "%s conflicts with the branch it merges into: %s, %s opens it" number tell (funcall key "P")))
+     (t (concat (funcall key "P") " pushes new commits to its pull request")))))
+
 (defun roost--pr-marker (task)
   "Compact pull request marker for TASK's dashboard row, such as \"#12 ✓\"."
   (if-let* ((pr (roost--field task 'pr))
@@ -4293,7 +4465,9 @@ Without a status from GitHub yet, it is as its host recorded, or open."
               (state (roost--pr-state task)))
     (let* ((status (roost--field task 'prStatus))
            (counts (roost--pr-checks task))
-           (review (alist-get 'review status)))
+           (review (alist-get 'review status))
+           (threads (alist-get 'threads status))
+           (reviewers (mapcar #'roost--reviewer-name (alist-get 'requested status))))
       (roost--insert-heading "Pull request")
       (insert "  ")
       (insert-text-button (format "#%s" (alist-get 'number pr))
@@ -4315,7 +4489,13 @@ Without a status from GitHub yet, it is as its host recorded, or open."
                        ", "))
                     (when (and review (memq state '(open draft)))
                       (pcase review ("APPROVED" "approved") ("CHANGES_REQUESTED" "changes requested")
-                        ("REVIEW_REQUIRED" "review required")))))
+                        ("REVIEW_REQUIRED" "review required")))
+                    (when (and (memq state '(open draft)) (numberp threads) (> threads 0))
+                      (format "%d unresolved review thread%s" threads (if (= threads 1) "" "s")))
+                    (when (and (memq state '(open draft)) reviewers)
+                      (concat "review requested from " (string-join reviewers ", ")))
+                    (when (and (memq state '(open draft)) (equal (alist-get 'mergeable status) "CONFLICTING"))
+                      "conflicts")))
         " · "))
       (when (eq state 'merged)
         (roost--insert-indented
@@ -4405,7 +4585,7 @@ Magit to commit it."
       (user-error "%s's agent is at work; stop it (K) first, or wait" name))
      ((roost--unmerged-work-p task)
       (funcall offer))
-     ((y-or-n-p (format "Retire %s, removing its worktree and branch?  Nothing in them would be lost. " name))
+     ((y-or-n-p (format "Retire %s, removing its worktree and branch (nothing in them would be lost)? " name))
       (funcall retire)))))
 
 ;;;###autoload
@@ -4496,7 +4676,7 @@ finished work is merged or retired instead."
                                               label (string-join losses " and ")
                                               (if (roost--agent-running-p task) ", and stops its agent" ""))))
                         name)
-               (y-or-n-p (format "Discard %s, %sdeleting its worktree and branch?  Nothing in them would be lost. "
+               (y-or-n-p (format "Discard %s, %sdeleting its worktree and branch (nothing in them would be lost)? "
                                  label (if (roost--agent-running-p task) "stopping its agent and " "")))))
         (message "%s was not discarded" name)
       (roost--act task "discard" (list (cons 'expect (alist-get 'commit told)))
@@ -4541,8 +4721,9 @@ it showed before."
 (defun roost-next-waiting ()
   "Open the next task whose agent is waiting for you.
 Permission requests and agents stuck at a startup prompt come first,
-since they block their agent; then tasks ready for a prompt, and those
-that failed, crashed or exited, in turn."
+since they block their agent; then tasks ready for a prompt, those that
+failed, crashed or exited, and those whose pull request waits on you,
+in turn."
   (interactive)
   (let* ((waiting (sort (seq-filter #'roost--waiting-p (roost-tasks))
                         (lambda (a b) (< (roost--attention-rank a) (roost--attention-rank b)))))
@@ -4582,9 +4763,11 @@ A turn you interrupted, or whose permission prompt you declined, is
 (defun roost--display-status (task)
   "TASK's status, or \"offline\" while its host is unreachable.
 It is \"merged\" when you can retire it, losing nothing, and its agent
-neither works nor has anything new for you."
+neither works nor has anything new for you, and one of `roost--pr-turns'
+while its pull request waits on you."
   (cond ((gethash (roost--field task 'host) roost--errors) "offline")
         ((roost--merged-p task) "merged")
+        ((roost--pr-turn task))
         (t (roost--status-name task))))
 
 (defun roost--merged-p (task)
@@ -4605,10 +4788,10 @@ not fail, and has said nothing you haven't seen."
 (defun roost--status-face (status)
   "Face for STATUS."
   (pcase status
-    ((or "permission" "prompt") 'roost-status-permission)
-    ((or "ready" "interrupted") 'roost-status-ready)
+    ((or "permission" "prompt" "comments") 'roost-status-permission)
+    ((or "ready" "interrupted" "to merge") 'roost-status-ready)
     ((or "running" "background") 'roost-status-running)
-    ((or "failed" "crashed" "error") 'roost-status-failed)
+    ((or "failed" "crashed" "error" "ci failed") 'roost-status-failed)
     ("merged" 'roost-pr-merged)
     (_ 'roost-status-inactive)))
 
@@ -4618,8 +4801,8 @@ The dot has the status's colour.  The word has it too when the agent
 can't go on without you or failed, or the task is merged, is plain
 while the agent waits for you otherwise, and is dim the rest of the time."
   (pcase status
-    ((or "permission" "prompt" "error" "failed" "crashed" "merged") (roost--status-face status))
-    ((or "ready" "interrupted") nil)
+    ((or "permission" "prompt" "error" "failed" "crashed" "merged" "ci failed") (roost--status-face status))
+    ((or "ready" "interrupted" "to merge" "comments") nil)
     (_ 'roost-dim)))
 
 (defconst roost--gap (propertize "\n" 'face '(:height 0.5))
@@ -4776,9 +4959,10 @@ more than MOST lines.  Return the lines."
 
 (defcustom roost-animations nil
   "Whether the status lights of agents waiting for you move.
-One asking you something pulses, and one that finished, failed, crashed
-or exited since you saw it glows slowly; the rest stay still, so motion
-always means an agent needs you.
+They fade out and back in: one asking you something deeply and quickly,
+and one that finished, failed, crashed or exited since you saw it, or
+whose pull request waits on you, less and slowly.  The rest stay still,
+so motion always means an agent needs you.
 This needs Emacs 32's canvas images; without them the lights stay the
 dots they are.  The motion pauses while no Emacs frame has focus.
 Changed with `setopt' or Customize, it shows at once."
@@ -4800,8 +4984,11 @@ it shows, or nil for the mode line; :phase, the step last drawn; and
 (defvar roost--lights-timer nil
   "Timer moving the status lights.")
 
-(defconst roost--light-periods '((pulse . 1.6) (glow . 3.4))
+(defconst roost--light-periods '((pulse . 2.0) (glow . 3.0))
   "Seconds each motion of a status light takes.")
+
+(defconst roost--light-depths '((pulse . 0.75) (glow . 0.5))
+  "How far towards its background each motion fades a status light.")
 
 (defun roost--light-frame-p (frame)
   "Whether FRAME shows status lights: it is graphical.
@@ -4825,7 +5012,8 @@ Only there do its lights show; a text frame shows their dots."
 (defun roost--light-motion (task)
   "How TASK's light moves, or nil if it rests.
 Only an agent waiting for you moves, as `roost--waiting-p' has it: one
-that can't go on without you pulses, and the others glow."
+that can't go on without you pulses, fading deeply, and the others glow,
+fading less."
   (cond ((roost--blocked-p task) 'pulse)
         ((roost--waiting-p task) 'glow)))
 
@@ -4852,9 +5040,10 @@ that can't go on without you pulses, and the others glow."
 
 (defun roost--light-draw (light phase)
   "Draw LIGHT at PHASE, from 0 to 1, of its motion.
-A disc, smoothed at its edge, and while moving a halo that swells and
-fades.  Canvases have no transparency, so it paints its background too.
-Plain arithmetic, cheap even when Roost runs uncompiled."
+A disc, smoothed at its edge, that while moving fades towards its
+background and back, whole at the start of each cycle.  Canvases have
+no transparency, so it paints its background too.  Plain arithmetic,
+cheap even when Roost runs uncompiled."
   (let* ((image (plist-get light :image))
          (pixels (plist-get (cdr image) :data))
          (width (plist-get (cdr image) :data-width))
@@ -4863,30 +5052,26 @@ Plain arithmetic, cheap even when Roost runs uncompiled."
          (color (plist-get light :color))
          (background (plist-get light :background))
          (motion (plist-get light :motion))
+         ;; From 0 at the start of a cycle to 1 halfway, and back.
          (wave (- 0.5 (* 0.5 (cos (* 2 float-pi phase)))))
+         (level (- 1 (* (alist-get motion roost--light-depths 0) wave)))
          (radius (min 3.5 (- (/ (min width height) 2.0) 1)))
-         (halo (pcase motion ('pulse (* 0.5 wave)) ('glow (* 0.25 wave)) (_ 0)))
-         (reach (+ radius (if (eq motion 'pulse) (+ 1.5 (* 2.5 wave)) 2.5)))
          (edge (+ radius 0.5))
          (br (logand (ash background -16) 255)) (bg (logand (ash background -8) 255)) (bb (logand background 255))
-         (dr (- (logand (ash color -16) 255) br)) (dg (- (logand (ash color -8) 255) bg)) (db (- (logand color 255) bb))
-         (kr (logand (ash color -16) 255)) (kg (logand (ash color -8) 255)) (kb (logand color 255))
-         (span (- reach radius)))
+         (dr (- (logand (ash color -16) 255) br)) (dg (- (logand (ash color -8) 255) bg)) (db (- (logand color 255) bb)))
     (fillarray pixels background)
     (dotimes (i (length pixels))
       (let ((d (aref shape i)))
-        (when (< d (max reach edge))
-          (let* ((glow (if (and (> halo 0) (< d reach)) (* halo (expt (/ (- reach d) span) 2)) 0))
-                 (cover (max 0.0 (min 1.0 (- edge d))))
-                 (r (+ br (* glow dr))) (g (+ bg (* glow dg))) (b (+ bb (* glow db))))
+        (when (< d edge)
+          (let ((cover (* level (min 1.0 (- edge d)))))
             (aset pixels i (logior #xFF000000
-                                   (ash (round (+ r (* cover (- kr r)))) 16)
-                                   (ash (round (+ g (* cover (- kg g)))) 8)
-                                   (round (+ b (* cover (- kb b))))))))))
+                                   (ash (round (+ br (* cover dr))) 16)
+                                   (ash (round (+ bg (* cover dg))) 8)
+                                   (round (+ bb (* cover db)))))))))
     (when (fboundp 'canvas-refresh)
       (canvas-refresh image 'reload-data))))
 
-(defconst roost--light-steps 16
+(defconst roost--light-steps 20
   "Steps a light's motion takes per cycle.
 A light is redrawn only when its step changes, and each redraw makes
 Emacs redisplay its window, so fewer steps cost less.")
@@ -5246,8 +5431,9 @@ Only ERR's first line fits there; the echo area and *Messages* have it all."
 
 (defconst roost--url-regexp
   "\\([*_~]*\\)\\(https?://[^[:space:]<>\"'`\ue000\ue001]+\\)"
-  "A URL in what an agent wrote, with the Markdown emphasis that opens on it
-and anything that follows it up to a space.")
+  "A URL in what an agent wrote, and the Markdown emphasis that opens on it.
+The URL's group takes in anything that follows it up to a space;
+`roost--trim-url' takes off what belongs to the prose.")
 
 (defun roost--trim-url (url emphasis)
   "URL without what follows it in the prose.
@@ -5518,6 +5704,7 @@ task panel's list of the agent's own worktrees."
      ((equal status "merged") (funcall retire))
      ((equal status "error")
       (concat "Its last turn failed; open it to try its last prompt again: " (funcall key "RET")))
+     ((member status roost--pr-turns) (roost--pr-next-step task key))
      ((member status '("stopped" "crashed"))
       (concat (funcall key "RET") " or " (funcall key "s") " resumes its conversation"))
      ((not (roost--agent-running-p task))
@@ -5537,8 +5724,7 @@ task panel's list of the agent's own worktrees."
      ;; As for one you haven't looked at since its agent finished.
      ((roost--landed task) (funcall retire))
      (merged (concat "Its pull request is merged, but not its commits since: " (funcall key "m") " merges them"))
-     ((memq state '(open draft))
-      (concat (funcall key "P") " pushes new commits to its pull request"))
+     ((memq state '(open draft)) (roost--pr-next-step task key))
      ((and (numberp (roost--field task 'ahead)) (> (roost--field task 'ahead) 0))
       (concat (funcall key "m") " merges it, or " (funcall key "P") " opens a pull request")))))
 
@@ -5841,8 +6027,9 @@ Windows showing the panel keep their scroll position, and the mark stays."
               (state (concat (roost--status-light task (cons 'panel (current-buffer)) t)
                              (propertize (concat " " status)
                                          'face (roost--status-word-face (roost--attention-status task)))
-                             ;; Not since it merged, but since its agent last moved.
-                             (unless (equal status "merged")
+                             ;; Not since it merged, or its pull request
+                             ;; came to wait on you, but since its agent last moved.
+                             (unless (member status (cons "merged" roost--pr-turns))
                                (propertize (format " for %s" (roost--elapsed (roost--field task 'updatedAt)))
                                            'face 'roost-dim)))))
           ;; The status keeps to one line, below the name when both don't fit.
@@ -6155,6 +6342,9 @@ Refreshes are asynchronous; rendering uses only cached state.
                      ("at a startup prompt" nil "prompt")
                      ("ready" nil "ready")
                      ("interrupted" nil "interrupted")
+                     ("with failed checks" nil "ci failed")
+                     ("with review comments" nil "comments")
+                     ("to merge" nil "to merge")
                      ("seen" nil "idle")
                      ("merged" nil "merged")
                      ("failed" nil "error" "failed" "crashed")
@@ -6869,7 +7059,7 @@ An agent asking, then one that failed, then one that finished."
   (cond ((seq-some #'roost--blocked-p tasks) 'roost-status-permission)
         ((seq-some (lambda (task)
                      (and (roost--waiting-p task)
-                          (member (roost--attention-status task) '("error" "failed" "crashed"))))
+                          (member (roost--attention-status task) '("error" "failed" "crashed" "ci failed"))))
                    tasks)
          'roost-status-failed)
         (t 'roost-status-ready)))
@@ -7302,15 +7492,21 @@ RESULT is `pending', a list of checks, or (error . MESSAGE).")
             (lm-header "Version")))
         "installed")))
 
+(defconst roost--tmux-control-version "0.8.1"
+  "The oldest tmux-control Roost works with, as its Package-Requires says.")
+
 (defun roost--doctor-local-checks ()
   "List the local checks, each (NAME OK DETAIL HINT PATH)."
   (let ((helper (expand-file-name "scripts/roost_remote.py" roost--package-directory)))
     (list (list "Emacs" (version<= "29.1" emacs-version) emacs-version
                 "Roost needs Emacs 29.1 or newer")
           (let ((version (roost--library-version "tmux-control")))
-            (list "tmux-control" (and version (ignore-errors (version<= "0.7.0" version))) version
+            (list "tmux-control"
+                  (and version (ignore-errors (version<= roost--tmux-control-version version)))
+                  version
                   (if version
-                      "Roost needs tmux-control 0.7.0 or newer: https://github.com/csheaff/tmux-control"
+                      (format "Roost needs tmux-control %s or newer: https://github.com/csheaff/tmux-control"
+                              roost--tmux-control-version)
                     "Install tmux-control: https://github.com/csheaff/tmux-control")
                   (locate-library "tmux-control")))
           (list "Eat" (locate-library "eat") (roost--library-version "eat")

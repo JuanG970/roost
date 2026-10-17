@@ -4,7 +4,7 @@ What each release changes, and what to do when upgrading. Newest first.
 
 ## Unreleased
 
-Since 0.8.1:
+Since 0.9.0:
 
 - Codex and Pi tasks show their status as surely as Claude's. A Pi task
   shows `permission` while an extension's dialog, such as one asking
@@ -19,6 +19,54 @@ Since 0.8.1:
   longer experimental. To use it all, upgrade Codex to 0.163.0 and Pi to
   1.1.0 or later; older ones work as before. Resume Pi tasks with `s`
   for its new events.
+
+## 0.9.0
+
+To upgrade from 0.8:
+
+- Update tmux-control to 0.8.1 first, which Roost now needs: with
+  straight.el or a Git checkout, pull it before Roost; with `package-vc`,
+  run `package-vc-upgrade` on tmux-control, then on Roost. Then restart
+  Emacs. `M-x roost-doctor` flags an older tmux-control.
+- In your configuration, replace `roost-claude-command` with the `"claude"`
+  entry of `roost-agent-commands`, and `roost-use-perspectives` with
+  `roost-workspace`; both still work for now. Remove `roost-session-name`,
+  which is ignored now that each task has a tmux session of its own.
+  `roost-list` and `roost-kill` are obsolete: use `roost-switch-task` and
+  `roost-stop`.
+- `m` squashes a task into one commit. Set `roost-merge-style` to `merge` to
+  keep merge commits.
+- `?` opens the menu, as `h` does; a task's details stay on `i`. `c` starts a
+  task, and `d` no longer does.
+- An agent running when you upgrade keeps the hooks and the tmux session it
+  started with. Stop it with `K` and resume it with `s` when convenient, and
+  it reports the worktrees it makes and moves to a session of its own.
+- To be told from the start of each session when an agent needs you, add
+  `(roost-watch-mode 1)` to your configuration, as the install snippets now
+  do; `(roost-sidebar-mode 1)` and `(roost-task-panel-mode 1)` keep the new
+  sidebar and task panel on.
+- To keep the old look, make `roost-prose` inherit `default`, `roost-field`
+  inherit `link`, and `roost-status-running` inherit
+  `font-lock-keyword-face`.
+- Hosts need tmux 3.1 or later; the README said 3.0, which never worked.
+  With tmux 3.4, a click opens a link Claude Code shows, and with Git 2.38,
+  `m` merges while your checkout is on another branch.
+
+Changes since 0.8.1:
+
+- A task whose pull request waits on you counts as waiting, so `n`, the
+  status lights, the mode line and notifications find it once its agent is
+  done. Its status says why: `to merge` when every check passed and no
+  review is asked for or unresolved, `ci failed` when a check failed, and
+  `comments` when a review thread, Copilot's too, is unresolved. A failure
+  or thread waits two minutes first, for an agent that watches its own
+  pull request. The task panel says what a pull request waits for. Roost
+  asks GitHub about review threads with `gh api graphql`, once per
+  repository every two minutes. Nothing to do when upgrading.
+- `P` fetches a task's branch first and pushes only what the pull
+  request lacks. With nothing new, it just opens the pull request, so a
+  commit made on GitHub since, such as an applied review suggestion, no
+  longer makes it fail. Nothing to do when upgrading.
 - The box for a review note opens under a diff line wider than its
   window. It stayed hidden there, so what you typed next went to Magit,
   and the menu of a note under such a line opened beside the window. When
@@ -52,6 +100,11 @@ Since 0.8.1:
   click away from it, where `C-g` doesn't reach it: clicks did nothing
   until Emacs restarted. A click on a task no longer listed says so
   rather than asking which task. Nothing to do when upgrading.
+- On Emacs 32, with `roost-animations` on, the light of an agent waiting
+  for you fades out and back in: deeply and every two seconds when it asks
+  you something, by half and every three when it finished, failed or
+  exited since you saw it, or its pull request waits on you. The other
+  lights stay still. Nothing to do when upgrading.
 - The sidebar shows each task's name and its status, with no dot, so
   names are cut less. The status is in its colour when there is something
   to look at, dim when the agent is only working or stopped, and left out
