@@ -12,8 +12,9 @@ happened in a section below:
    a draft and one from an Org heading. Answer a permission prompt in its
    terminal, interrupt a turn with Esc, and let one finish while you look at
    another: it waits in the sidebar, and `n` reaches it.
-2. Codex and Pi: start a task with each, send a prompt with `e`, and see it
-   reach ready.
+2. Codex and Pi: start a task with each, Pi with an extension that asks
+   before each command. Send a prompt with `e`, answer a request, decline
+   one and press Esc, with `roost-program-status` off and on.
 3. A remote host: start a task over SSH, review it in Magit over TRAMP, write
    a note with `;` and send it with `@`.
 4. Restart Emacs while an agent works: it is still at work, and `RET` brings
@@ -1183,6 +1184,84 @@ in the last, it found:
   in the minibuffer, the question a popup hides once you click
   elsewhere. Fixed after: it shows a menu at the pointer, as the
   project's choice does.
+
+### Codex and Pi as surely as Claude, 2026-10-16
+
+Codex 0.163.0 and Pi 1.3.0 on the Mac, with tmux 3.6a. Each ran first under
+the runner's relay alone, every report and hook logged with its time, then
+as a task in a separate Emacs 30.2 with its own state directory, tmux socket
+and project.
+
+What they report:
+
+- Codex reports OSC 7501 whenever its output is a terminal, with no probe,
+  and only `idle`, `working` and `blocked`, then `clear` at exit. It reports
+  nothing while it asks to trust the folder and the hooks, then idles, works
+  for about a second (its servers starting) and idles again, before any
+  prompt.
+- A finished Codex turn's Stop hook came 15 ms before `idle`, and an Esc's
+  Interrupt hook 3 ms before it. A declined request went `blocked`,
+  `working`, Interrupt hook, `idle`. An approved command showed `working` at
+  once, and its PostToolUse hook came when it ended, 4 s later. With a
+  command left running in the background, no `idle` came after the Stop
+  hook until that command ended.
+- Pi answered the probe and reported `working`; `blocked` with
+  `kind=permission` and the title of an extension's confirm dialog; `done`;
+  and `idle` after Esc. Its extension events `ui_prompt_start` and
+  `ui_prompt_end` came in the same millisecond as `blocked` and the
+  `working` after it. Esc gave `agent_end`, then `agent_settled` with
+  `aborted`, then `idle`.
+
+Before the fix, a relayed Codex task showed `interrupted` right after it
+started, and again after a turn that finished: Roost took `idle` after work
+for Esc, and set the Stop hook aside. Now Codex's hooks say when its turns
+start and end, and its reports add an answered request, a question no hook
+names, its start, and a turn that ends without its hooks.
+
+Tasks in Emacs:
+
+- Codex (gpt-6.1-sol, low effort), relay on. It asked to trust the folder,
+  then to review Roost's eight hooks, while the panel said to answer in its
+  terminal. It began the task's prompt with its hook browser still open, and
+  until the hooks were trusted the task showed `ready` while Codex worked;
+  from its first tool call it showed `running`. Its request to commit (its
+  sandbox keeps `.git` read-only) showed `permission`, "Asks to run git add
+  greet.py test_greet.py && git commit …", and declined, `interrupted`. A
+  prompt sent with `e` asked again; approved, `running` within a second, and
+  the turn ended `ready`, its reply in the notification. Esc mid-turn:
+  `interrupted`. `K` and `s` resumed the same conversation, `ready` within a
+  second, and a turn after it ended `ready`. `m` squashed it into main and
+  removed its worktree and branch.
+- Pi, with its own configuration: qwen3.6-35b-a3b in LM Studio, no API key,
+  and an extension asking before each bash command. Relay off. Each dialog
+  showed `permission` ("Run this command?") and, answered, `running`; Esc at
+  a dialog, `running`, and Esc again, `interrupted`. LM Studio had loaded the
+  model with an 8k context, too small for Pi's prompt, and it went round in
+  circles. Reloaded at 48k for the run, it added `farewell` with a test, ran
+  the tests and committed. A declined command went `permission`, `running`,
+  `ready`. Resumed with the relay on, into the same session: a dialog showed
+  `permission`, an approval `running`, the turn's end `ready`, and Esc
+  `interrupted`. `m` squashed it into main.
+- Claude Code 2.1.302 (Haiku), relay on: as before, `ready` after a turn
+  and `interrupted` after Esc. At first it reported nothing, since the shell
+  that started this Emacs exports `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`,
+  which turns its reports off; resumed without it, it reported.
+- One notification came for each request, each turn that ended and each
+  interruption, and none as Codex started.
+
+Two cases found on reading it over had no live run: a dialog shown while
+the agent rests, as a Pi extension's at startup or Claude Code's sign-in,
+which ended `interrupted` through the relay and now ends `ready`; and a Pi
+dialog between runs, which shows `permission`. Review found three more:
+Pi's reports reaching the helper out of order across back-to-back dialogs,
+which Pi doesn't wait on; a Pi dialog at startup, before its first report;
+and a Codex report recorded after a newer hook, as when the registry is
+busy. The Python tests replay all of them, with both agents' sequences
+above: Codex's through a fixture that reports as it does, Pi's with and
+without its newer events, and Pi's extension itself under Node.
+
+Left: with the relay on, a Codex turn that starts before you trust Roost's
+hooks shows `ready`, and a Pi dialog names only its title.
 
 ### Codex and Pi adapters
 

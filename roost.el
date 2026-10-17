@@ -266,13 +266,14 @@ as they are."
 
 (defcustom roost-program-status nil
   "Whether Roost reads the status an agent reports to its terminal.
-Claude Code 2.1.295 and later reports whether it works, waits on you,
-or is done, by the Program Status Protocol (OSC 7501), but only to a
-terminal that answers its probe, which tmux does not.  With this on, a
-task's agent gets a terminal of its own, relayed to its tmux pane, that
-answers.  Its status then shows at once when you press Esc, decline a
-request or approve one, which its hooks don't report.  New tasks, and
-tasks you resume, follow this."
+Claude Code 2.1.295, Codex 0.163.0 and Pi 1.1.0 and later report
+whether they work or wait on you, by the Program Status Protocol (OSC
+7501), which tmux drops; Claude Code and Pi report only to a terminal
+that answers their probe, which tmux does not.  With this on, a task's
+agent gets a terminal of its own, relayed to its tmux pane, that
+answers.  Its status then shows at once when you approve a request, and
+for Claude Code when you press Esc or decline one, which hooks don't
+report.  New tasks, and tasks you resume, follow this."
   :type 'boolean)
 
 (defcustom roost-notes-file (locate-user-emacs-file "roost/notes.json")
@@ -6113,7 +6114,9 @@ Windows showing the panel keep their scroll position, and the mark stays."
           ("starting"
            (when (equal (roost--field task 'agent) "codex")
              (roost--insert-indented
-              "Codex reports status from its first turn. Open the terminal, review any hook or startup prompts, and enter the first prompt there; sending prompts from Emacs works after that."
+              (if (roost--field task 'programStatus)
+                  "Codex may be asking you to trust this folder or Roost's hooks; answer in its terminal. Sending prompts from Emacs works once it waits for one."
+                "Codex reports status from its first turn. Open the terminal, review any hook or startup prompts, and enter the first prompt there; sending prompts from Emacs works after that.")
               'roost-dim))))
         (when-let* ((error (roost--field task 'error)))
           (roost--insert-indented (concat "Last error: " error) 'roost-status-failed))

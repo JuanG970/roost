@@ -11,6 +11,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import signal
 from pathlib import Path
 import subprocess
@@ -999,6 +1000,61 @@ class Lifecycle(unittest.TestCase):
         roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "first native prompt", "Enter")
         self.wait(task, "ready", event="Stop")
         self.assertTrue(self.request("send", id=task["id"], text="second prompt")["ok"])
+
+    def test_a_relayed_codex_ends_its_turns_by_its_hooks(self):
+        # Codex reports only working, blocked and idle, and idles alike after
+        # a turn that ended and one you stopped; its hooks say which.
+        task = self.create(agent="codex", programStatus=True, command=[sys.executable, str(FAKE_AGENT), "codex"])
+        self.wait_for(task, lambda record: record.get("programStatusRun") == record["runId"])
+        self.assertTrue(self.request("send", id=task["id"], text="hello")["ok"])
+        self.wait(task, "ready", "Stop")
+        self.assertTrue(self.request("send", id=task["id"], text="interrupt")["ok"])
+        self.wait(task, "ready", "Interrupt")
+        # An approval shows before the command ends.
+        self.assertTrue(self.request("send", id=task["id"], text="ask sleep 2")["ok"])
+        record = self.wait(task, "permission")
+        self.assertEqual(record["request"], "Asks to run sleep 2")
+        roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "yes", "Enter")
+        record = self.wait(task, "running", "Approved")
+        self.assertNotIn("request", record)
+        self.wait(task, "ready", "Stop")
+        self.assertTrue(self.request("send", id=task["id"], text="ask make")["ok"])
+        self.wait(task, "permission")
+        roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "decline", "Enter")
+        self.wait(task, "ready", "Interrupt")
+        # Codex works on while a command it left running runs, but waits for you.
+        self.assertTrue(self.request("send", id=task["id"], text="background")["ok"])
+        self.wait(task, "ready", "Stop")
+
+    def test_pi_says_when_a_dialog_waits_on_you(self):
+        for agent, relayed in (("pi", True), ("pi", False), ("pi-old", False)):
+            with self.subTest(agent=agent, relayed=relayed):
+                task = self.create(name=agent, agent="pi", programStatus=relayed,
+                                   command=[sys.executable, str(FAKE_AGENT), agent])
+                if relayed:
+                    self.wait_for(task, lambda record: record.get("programStatusRun") == record["runId"])
+                self.assertTrue(self.request("send", id=task["id"], text="dialog")["ok"])
+                if agent == "pi-old":
+                    # Older Pi says nothing of its dialogs.
+                    self.wait_for(task, lambda record: record["status"] == "running")
+                else:
+                    record = self.wait(task, "permission")
+                    self.assertEqual(record["request"], "Allow [2J bash?")
+                roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "yes", "Enter")
+                if agent != "pi-old":
+                    self.assertNotIn("request", self.wait(task, "running"))
+                self.wait(task, "ready", "Stop")
+                self.assertTrue(self.request("send", id=task["id"], text="interrupt")["ok"])
+                self.wait(task, "ready", "Stop" if agent == "pi-old" else "Interrupt")
+                if agent != "pi-old":
+                    # A dialog between runs waits on you too, and ends no turn.
+                    self.assertTrue(self.request("send", id=task["id"], text="rest dialog")["ok"])
+                    self.assertEqual(self.wait(task, "permission")["request"], "Trust this project?")
+                    roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "yes", "Enter")
+                    record = self.wait_for(task, lambda record: record["status"] == "ready"
+                                           and record.get("lastEvent") not in ("Interrupt", "Stop"))
+                    self.assertNotIn("request", record)
+                self.assertTrue(self.request("retire", id=task["id"])["ok"])
 
     def test_provider_flags_are_checked_before_worktree_creation(self):
         before = self.git("worktree", "list", "--porcelain")
@@ -3276,8 +3332,16 @@ class ProgramStatus(unittest.TestCase):
         self.assertEqual(self.apply(task, "working")["lastEvent"], "Approved")
         self.assertIsNone(task.get("request"))
         self.assertEqual(self.apply(task, "idle")["lastEvent"], "Interrupt")
+        self.apply(task, "working")
         self.apply(task, "blocked", kind="question")
         self.assertEqual(self.apply(task, "idle")["lastEvent"], "Interrupt")
+        # A dialog while it rests, as at its start or one you open, ends no turn.
+        for rest, after in (("starting", "idle"), ("ready", "done"), ("ready", "idle")):
+            task = dict(status=rest, runId="run")
+            self.assertEqual(self.apply(task, "blocked", kind="auth")["status"], "permission")
+            self.assertEqual(self.apply(task, after), dict(status="ready", lastEvent="Idle", request=None,
+                                                         activity=None, error=None))
+        task = dict(status="starting", runId="run")
         self.apply(task, "working")
         self.assertEqual(self.apply(task, "done")["lastEvent"], "Stop")
         self.assertEqual(self.apply(task, "error", msg="Rate limited"),
@@ -3320,6 +3384,142 @@ class ProgramStatus(unittest.TestCase):
         self.assertEqual(beside(hook, "permission"), dict(agentSession="s"))
         self.assertEqual(beside(dict(hook, status="background"), "ready")["status"], "background")
         self.assertEqual(beside(dict(hook, status="failed"), "running")["status"], "failed")
+
+    def test_codex_works_and_idles_between_turns_its_hooks_mark(self):
+        # As Codex 0.163.0 reported in a live run: no done, and work at
+        # startup, before any prompt.
+        task = dict(status="starting", agent="codex", runId="run")
+        for state in ("idle", "working", "idle"):
+            self.apply(task, state)
+        self.assertEqual((task["status"], task["lastEvent"]), ("ready", "SessionStart"))
+        # Its hooks start and end a turn; the reports between change nothing.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            task.update(id="0" * 16, worktree="/w")
+            store.save(task)
+
+            def hook(event, **fields):
+                roost.update_hook(store, task["id"], dict(hook_event_name=event, **fields), "run")
+                return store.read(task["id"])
+
+            def report(state):
+                task = store.read("0" * 16)
+                self.apply(task, state)
+                store.save(task)
+                return task
+
+            report("working")
+            self.assertEqual(hook("UserPromptSubmit")["status"], "running")
+            self.assertEqual((hook("Stop")["status"], report("idle")["lastEvent"]), ("ready", "Stop"))
+            hook("UserPromptSubmit")
+            self.assertEqual(hook("Interrupt")["lastEvent"], "Interrupt")
+            self.assertEqual(report("idle")["lastEvent"], "Interrupt")
+            # An approval shows at once; another tool's end, while it asks, doesn't.
+            hook("UserPromptSubmit")
+            self.assertEqual(hook("PermissionRequest", tool_name="Bash", tool_input=dict(command="make"))["request"],
+                             "Asks to run make")
+            self.assertEqual(report("blocked")["request"], "Asks to run make")
+            self.assertEqual(hook("PostToolUse", tool_name="Bash")["status"], "permission")
+            self.assertEqual(report("working")["lastEvent"], "Approved")
+            # Work after its turn, as on a command it left running, is not a turn.
+            hook("Stop")
+            self.assertEqual(report("working")["status"], "ready")
+            # A turn that ended without its hooks, as on a failed request.
+            hook("UserPromptSubmit")
+            self.assertEqual(report("idle")["lastEvent"], "Idle")
+
+    def test_a_codex_report_older_than_its_last_hook_is_left_out(self):
+        # The relay reads reports at once but records them once the registry
+        # is free; Codex's hooks record theirs before it goes on.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            store.save(dict(id="0" * 16, agent="codex", worktree="/w", status="ready", runId="run",
+                            programStatusRun="run"))
+            said = time.time()
+            roost.update_hook(store, "0" * 16, dict(hook_event_name="UserPromptSubmit"), "run")
+            task = store.read("0" * 16)
+            # The last turn's end and this one's start, recorded only now.
+            for state in ("idle", "working"):
+                roost.apply_program_status(task, dict(state=state, receivedAt=said), "run")
+            self.assertEqual(task["status"], "running")
+            roost.apply_program_status(task, dict(state="idle", receivedAt=time.time()), "run")
+            self.assertEqual((task["status"], task["lastEvent"]), ("ready", "Idle"))
+            self.assertNotIn("hookAt", roost.outgoing(dict(task)))
+        # The recorder notes when each report was read.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            store.save(dict(id="0" * 16, agent="codex", worktree="/w", status="running", runId="run",
+                            hookAt=time.time() + 60))
+            report, finish = roost.program_status_recorder(store, "0" * 16, "run")
+            report(dict(state="idle"))
+            finish()
+            self.assertEqual(store.read("0" * 16)["status"], "running")
+
+    def test_pi_dialogs_wait_on_you(self):
+        pi = roost.PiAgent()
+        asks = pi.observe(dict(event="ui_prompt_start", title="Allow\x1b[2J\n bash?‮"), "running")
+        self.assertEqual((asks["status"], asks["request"]), ("permission", "Allow [2J bash?"))
+        self.assertNotIn("request", pi.observe(dict(event="ui_prompt_start"), "background"))
+        self.assertEqual(pi.observe(dict(event="ui_prompt_start", title="Trust?"), "starting")["status"],
+                         "permission")
+        self.assertEqual(pi.observe(dict(event="ui_prompt_end", idle=False), "permission")["status"], "running")
+        self.assertEqual(pi.observe(dict(event="ui_prompt_end", idle=True), "permission")["status"], "ready")
+        # Its context can't say, after a session switch.
+        self.assertEqual(pi.observe(dict(event="ui_prompt_end"), "permission")["status"], "running")
+        self.assertIsNone(pi.observe(dict(event="ui_prompt_end", idle=True), "ready"))
+        stopped = pi.observe(dict(event="agent_settled", aborted=True), "ready")
+        self.assertEqual((stopped["status"], stopped["lastEvent"]), ("ready", "Interrupt"))
+        self.assertIsNone(pi.observe(dict(event="agent_settled", aborted=False), "ready"))
+
+    def test_a_pi_dialog_at_startup_ends_no_turn(self):
+        # It can open before Pi's first report, while its hooks still set
+        # its status, and close once the relay does.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            store.save(dict(id="0" * 16, agent="pi", worktree="/w", status="starting", runId="run"))
+            roost.update_hook(store, "0" * 16, dict(event="ui_prompt_start", title="Trust this project?"), "run")
+            for event, state in ((None, "blocked"), (dict(event="ui_prompt_end", idle=True), None),
+                                 (None, "idle")):
+                if event:
+                    roost.update_hook(store, "0" * 16, event, "run")
+                else:
+                    task = store.read("0" * 16)
+                    roost.apply_program_status(task, dict(state=state, kind="permission"), "run")
+                    store.save(task)
+            task = store.read("0" * 16)
+            self.assertEqual((task["status"], task["lastEvent"]), ("ready", "Idle"))
+            self.assertNotIn("request", task)
+
+    @unittest.skipUnless(shutil.which("node"), "needs Node")
+    def test_pi_reports_reach_the_helper_in_order(self):
+        # Pi doesn't wait for its dialogs' handlers before its next event.
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = roost.Store(str(root / "state"))
+            roost.PiAgent().launch(store, dict(id="0" * 16, command=["pi"], prompt=None), False)
+            extension = next(store.root.glob("pi-observer-*.mjs"))
+            log = root / "log"
+            helper = root / "helper.py"
+            helper.write_text("import json, sys, time\n"
+                              "event = json.load(sys.stdin)\n"
+                              "time.sleep(0.3 if event.get('title') == 'First' else 0)\n"
+                              "open(%r, 'a').write(json.dumps(event) + '\\n')\n" % str(log))
+            driver = root / "driver.mjs"
+            driver.write_text(
+                "const { default: observe } = await import(%s);\n"
+                "const handlers = {};\n"
+                "observe({ on: (name, handler) => { handlers[name] = handler; } });\n"
+                "const ctx = { sessionManager: { getSessionFile: () => 's' }, isIdle: () => false };\n"
+                "const done = [handlers.ui_prompt_start({ title: 'First' }, ctx),\n"
+                "              handlers.ui_prompt_end({}, ctx),\n"
+                "              handlers.ui_prompt_start({ title: 'Second' }, ctx)];\n"
+                "await Promise.all(done);\n" % json.dumps(extension.as_uri()))
+            env = dict(os.environ, ROOST_PYTHON=sys.executable, ROOST_HELPER=str(helper))
+            subprocess.run(["node", str(driver)], env=env, check=True, timeout=30)
+            events = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([(e["event"], e.get("title")) for e in events],
+                             [("ui_prompt_start", "First"), ("ui_prompt_end", None), ("ui_prompt_start", "Second")])
+            self.assertEqual(events[1]["idle"], False)
 
 
 if __name__ == "__main__":

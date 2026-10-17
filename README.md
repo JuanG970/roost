@@ -114,8 +114,9 @@ These work in the dashboard, the sidebar and a task's panel, and on the menu.
 ## Good to know
 
 - Roost is built around Claude Code and checked against each new release of
-  it. Codex and Pi tasks work with less: Codex asks before each commit and
-  reports nothing until its first turn, and Pi is experimental.
+  it. Codex and Pi tasks show the same statuses; Codex asks before each
+  commit, and its approvals show only once it moves on unless
+  `roost-program-status` is on.
 - Roost never answers an agent's prompts, never changes your global agent
   settings, and never stages or commits your work. It deletes work only when
   you discard a task and type its name.

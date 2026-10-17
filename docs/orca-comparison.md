@@ -38,7 +38,7 @@ visible in Emacs. Tiling is now explicit and idempotent. It also found that
 process callbacks could restore focus after selecting the shell. Shell focus is
 applied after tiling settles, with guards for subsequent navigation.
 
-Each agent (Claude Code, Codex and the experimental Pi) has a small host-side
+Each agent (Claude Code, Codex and Pi) has a small host-side
 adapter for command validation, launch/resume arguments and hook
 interpretation, while Git, SSH and tmux lifecycle operations stay outside it.
 Older Claude records still resume.
