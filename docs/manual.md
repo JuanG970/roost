@@ -319,11 +319,14 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   no trace there; `merge` brings it in with a merge commit, keeping its
   commits.
 - `roost-program-status` (nil, experimental): let the agent say what it is
-  doing. Claude Code 2.1.295 and later reports whether it works, waits on you
-  or is done (OSC 7501), but only to a terminal that answers its probe, which
-  tmux doesn't. With this on, the agent of each new or resumed task runs on a
-  terminal of Roost's own, relayed to its tmux pane, that does: an approval, a
-  declined request and Esc then show at once.
+  doing. Claude Code 2.1.295, Codex 0.163.0 and Pi 1.1.0 and later report
+  whether they work or wait on you (OSC 7501), which tmux drops; Claude Code
+  and Pi report only to a terminal that answers their probe, which tmux
+  doesn't. With this on, the agent of each new or resumed task runs on a
+  terminal of Roost's own, relayed to its tmux pane, that does: an approval
+  then shows at once, and for Claude Code a declined request and Esc too. A
+  Codex task is `ready` once you have answered its startup questions, rather
+  than at its first turn.
 - `roost-notes-file`: review notes not yet sent, kept across sessions.
 - `roost-note-box-lines` (4): how many lines of text the box for writing a
   note shows. Faces `roost-note` and `roost-note-button` color the notes and
@@ -383,16 +386,18 @@ draws from a local cache. The helper creates worktrees, starts each agent under
 a runner in its own tmux window, and records the task.
 
 Status comes from each agent's native lifecycle events: Claude Code hooks passed
-with `--settings`, Codex hooks passed per invocation, and a Pi extension. Roost
-never changes your global agent settings or answers prompts.
+with `--settings`, Codex hooks passed per invocation, and a Pi extension; with
+`roost-program-status` on, also from what the agent reports to its terminal.
+Roost never changes your global agent settings or answers prompts.
 
 | Status | Meaning |
 | --- | --- |
 | `running` | The agent is working on a prompt |
-| `permission` | The agent asked for permission; answer it in the terminal |
+| `permission` | The agent asked for permission, or a question or dialog waits on you; answer it in the terminal |
+| `interrupted` | You stopped its turn, with Esc or by declining a request; it waits for your next prompt |
 | `ready` | The agent is waiting for your next prompt. Not "reviewed" or "done" |
 | `background` | Claude background work or Pi queued messages remain |
-| `starting` | Startup prompts may be showing; Codex reports status from its first turn |
+| `starting` | Startup prompts may be showing; without `roost-program-status`, Codex reports status only from its first turn |
 | `error` | A turn ended on an API error, such as a usage limit, and the agent waits; `RET` opens it to try again |
 | `exited`, `failed` | The agent exited normally, or the CLI failed; `RET` shows its last output |
 | `crashed` | The agent's tmux pane disappeared |
@@ -413,13 +418,18 @@ retire again.
 
 Things to know:
 
-- Agents report nothing when you answer a permission request, so Roost looks
-  for itself. A Claude Code command you approve shows `running` at the next
-  poll, once Roost sees it start; declined, or stopped with Esc, the task
-  shows `ready`, read from its transcript. Claude Code's other tools, and
-  Codex and Pi tasks, may keep showing `permission` until the agent moves on.
-  `e` asks before sending to a task in that state. With `roost-program-status`
-  on, Claude Code says so itself, at once.
+- Claude Code and Codex run no hook when you answer a permission request, so
+  Roost looks for itself. A Claude Code command you approve shows `running` at
+  the next poll, once Roost sees it start; declined, or stopped with Esc, the
+  task shows `interrupted`, read from its transcript. Codex's hooks say when
+  you decline or press Esc. Claude Code's other tools, and Codex, may keep
+  showing `permission` until the agent moves on, and `e` asks before sending
+  to a task in that state. With `roost-program-status` on, both say so
+  themselves, at once.
+- Pi has no permission prompts of its own, but an extension can ask, as one
+  that asks before each command does. Pi 0.84.4 and later say when such a
+  dialog waits on you, and Pi 1.1.0 and later when you stop a turn with Esc;
+  with older Pi a task shows `running` through a dialog and `ready` after Esc.
 - Roost's task sessions stay out of the corner where tmux-control names other
   sessions with new output, and its terminals don't show that corner: it
   lights up whenever an agent prints anything, and only shows its terminal.
@@ -440,9 +450,11 @@ Things to know:
 - Claude and Codex each ask once per repository to trust it; every task worktree
   of that repository is trusted after that.
 - Codex asks you to review Roost's observer hooks the first time. The hook
-  command stays the same across Roost upgrades. Codex's sandbox keeps a
-  worktree's shared `.git` read-only, so it asks before committing.
-- Pi is experimental: launch, events and resume were checked, but no full model run.
+  command stays the same across Roost upgrades. Until you trust them, Roost
+  can't tell when Codex starts or ends a turn, even with
+  `roost-program-status` on: Codex reports work between turns too, as while
+  a command it left running runs. Codex's sandbox keeps a worktree's shared
+  `.git` read-only, so it asks before committing.
 - A GitHub issue's text goes to the agent as written, and anyone can open an
   issue on a public repository. Read it in the draft before pressing `C-c C-c`.
 
@@ -552,6 +564,6 @@ about three minutes) through each status Roost derives: a reply, a permission
 request approved and declined, Esc, a minute idle and `/clear`. Run them after
 Claude Code updates.
 
-See [validation](validation.md) for the live runs with Claude Code and Codex on
-local and remote hosts, [the demo notes](demo.md) for how the screenshots
+See [validation](validation.md) for the live runs with Claude Code, Codex and
+Pi on local and remote hosts, [the demo notes](demo.md) for how the screenshots
 were made, and [MELPA](melpa.md) for the package recipes.

@@ -218,13 +218,21 @@ Larger, or undecided.
 
 - Codex's sandbox keeps a worktree's shared `.git` read-only, so Codex asks
   before each commit.
-- An approval of a tool other than Bash, and any Codex or Pi approval, shows
-  `permission` until the agent moves on. Claude Code has no hook for an
-  answered permission or an interrupt; both would be requests upstream.
-  With `roost-program-status` on (experimental), Claude Code 2.1.295 and
-  later report approvals, declines and `Esc` through the terminal instead,
-  which closes this for Claude. It could become the default once it has
+- An approval of a Claude Code tool other than Bash, and any Codex
+  approval, shows `permission` until the agent moves on. Neither has a hook
+  for an answered request, and Claude Code none for an interrupt; those
+  would be requests upstream (Pi's dialogs have them, from 0.84.4). With
+  `roost-program-status` on (experimental), Claude Code 2.1.295, Codex
+  0.163.0 and Pi 1.1.0 and later report through the terminal instead,
+  which closes this for all three. It could become the default once it has
   had some weeks of daily use and its protocol, still changing, settles.
+- Codex reports only whether it works, waits on you or idles, and works
+  between turns too, while its servers start or a command it left running
+  runs. So its hooks say when a turn starts and ends, and a turn that starts
+  before you trust them, as the first one of a new task's can, shows
+  `ready` while Codex works.
+- A Pi extension's dialog names only its title ("Run this command?"), not
+  what it asks about, so that is all the request shows.
 - While you write a commit message in a remote task, Magit can't show the
   diff beside it ("Error showing commit diff"); the commit goes through.
   The bug is Magit's, with any TRAMP method: from a linked worktree's Git

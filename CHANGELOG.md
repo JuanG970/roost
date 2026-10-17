@@ -6,6 +6,17 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.8.1:
 
+- Codex and Pi tasks show their status as surely as Claude's. A Pi task
+  shows `permission` while an extension's dialog, such as one asking
+  whether a command may run, waits on you, and `interrupted` after Esc.
+  With `roost-program-status` on, Codex 0.163.0 and Pi 1.1.0 report
+  through the terminal too: an approval shows `running` at once, and a
+  Codex task is `ready` once its startup questions are answered. A
+  finished Codex turn showed `interrupted` there, and one that left a
+  command running showed `running`; both show `ready`. Pi is no longer
+  experimental. To use it all, upgrade Codex to 0.163.0 and Pi to 1.1.0
+  or later; older ones work as before. Resume Pi tasks with `s` for its
+  new events.
 - The box for a review note opens under a diff line wider than its
   window. It stayed hidden there, so what you typed next went to Magit,
   and the menu of a note under such a line opened beside the window. When
