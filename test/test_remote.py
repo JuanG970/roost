@@ -3428,6 +3428,33 @@ class ProgramStatus(unittest.TestCase):
             hook("UserPromptSubmit")
             self.assertEqual(report("idle")["lastEvent"], "Idle")
 
+    def test_a_codex_report_older_than_its_last_hook_is_left_out(self):
+        # The relay reads reports at once but records them once the registry
+        # is free; Codex's hooks record theirs before it goes on.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            store.save(dict(id="0" * 16, agent="codex", worktree="/w", status="ready", runId="run",
+                            programStatusRun="run"))
+            said = time.time()
+            roost.update_hook(store, "0" * 16, dict(hook_event_name="UserPromptSubmit"), "run")
+            task = store.read("0" * 16)
+            # The last turn's end and this one's start, recorded only now.
+            for state in ("idle", "working"):
+                roost.apply_program_status(task, dict(state=state, receivedAt=said), "run")
+            self.assertEqual(task["status"], "running")
+            roost.apply_program_status(task, dict(state="idle", receivedAt=time.time()), "run")
+            self.assertEqual((task["status"], task["lastEvent"]), ("ready", "Idle"))
+            self.assertNotIn("hookAt", roost.outgoing(dict(task)))
+        # The recorder notes when each report was read.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            store.save(dict(id="0" * 16, agent="codex", worktree="/w", status="running", runId="run",
+                            hookAt=time.time() + 60))
+            report, finish = roost.program_status_recorder(store, "0" * 16, "run")
+            report(dict(state="idle"))
+            finish()
+            self.assertEqual(store.read("0" * 16)["status"], "running")
+
     def test_pi_dialogs_wait_on_you(self):
         pi = roost.PiAgent()
         asks = pi.observe(dict(event="ui_prompt_start", title="Allow\x1b[2J\n bash?‮"), "running")

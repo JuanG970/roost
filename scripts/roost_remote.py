@@ -2668,6 +2668,8 @@ def update_hook(store, task_id, payload, run_id=None):
             relayed = task.get("programStatusRun") == task.get("runId")
             if relayed:
                 updates = beside_program_status(updates, before, agent.reports_turns)
+            if not agent.reports_turns and "status" in updates:
+                task["hookAt"] = time.time()
             # What the agent asks, if its adapter can say better than its payload.
             named = updates.pop("request", None)
             task.update(updates)
@@ -2847,8 +2849,12 @@ def apply_program_status(task, fields, run_id):
     state, status = fields["state"], task["status"]
     task["programStatusRun"] = run_id
     # For an agent whose hooks say when its turns start and end, its work
-    # is news only as the answer to a request.
+    # is news only as the answer to a request, and what it said before the
+    # hook that last set its status is older news than that hook's: it runs
+    # its hooks before it goes on, but its reports wait for the registry.
     turns = agent_for(task).reports_turns
+    if not turns and fields.get("receivedAt", float("inf")) < (task.get("hookAt") or 0):
+        return task != before
     changes = None
     if state == "working" and status != "running" and (turns or status == "permission"):
         changes = dict(status="running", lastEvent="Approved" if status == "permission" else "Working")
@@ -2929,7 +2935,8 @@ def program_status_recorder(store, task_id, run_id):
     def report(fields):
         if thread.ident is None:
             thread.start()
-        reports.put(fields)
+        # When the agent said it, which may be well before it is recorded.
+        reports.put(dict(fields, receivedAt=time.time()))
 
     def finish():
         # However long: a report recorded after the runner records the
@@ -3154,7 +3161,7 @@ def require_not_removing(store, task, action):
 
 
 # Kept in task records for the helper's own use, and not sent to Emacs.
-PRIVATE = ("lastReply", "transcript", "requestFrom")
+PRIVATE = ("lastReply", "transcript", "requestFrom", "hookAt")
 
 
 def outgoing(result):
