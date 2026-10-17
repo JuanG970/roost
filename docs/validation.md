@@ -1252,9 +1252,13 @@ Tasks in Emacs:
 Two cases found on reading it over had no live run: a dialog shown while
 the agent rests, as a Pi extension's at startup or Claude Code's sign-in,
 which ended `interrupted` through the relay and now ends `ready`; and a Pi
-dialog between runs, which shows `permission`. The Python tests replay
-them, with both agents' sequences above: Codex's through a fixture that
-reports as it does, and Pi's with and without its newer events.
+dialog between runs, which shows `permission`. Review found three more:
+Pi's reports reaching the helper out of order across back-to-back dialogs,
+which Pi doesn't wait on; a Pi dialog at startup, before its first report;
+and a Codex report recorded after a newer hook, as when the registry is
+busy. The Python tests replay all of them, with both agents' sequences
+above: Codex's through a fixture that reports as it does, Pi's with and
+without its newer events, and Pi's extension itself under Node.
 
 Left: with the relay on, a Codex turn that starts before you trust Roost's
 hooks shows `ready`, and a Pi dialog names only its title.
