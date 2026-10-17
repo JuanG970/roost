@@ -13,10 +13,12 @@ Since 0.8.1:
   through the terminal too: an approval shows `running` at once, and a
   Codex task is `ready` once its startup questions are answered. A
   finished Codex turn showed `interrupted` there, and one that left a
-  command running showed `running`; both show `ready`. Pi is no longer
-  experimental. To use it all, upgrade Codex to 0.163.0 and Pi to 1.1.0
-  or later; older ones work as before. Resume Pi tasks with `s` for its
-  new events.
+  command running showed `running`; both show `ready`. So does an agent
+  back from a dialog it showed while at rest, as Claude Code's sign-in
+  or a Pi extension's at startup, which showed `interrupted`. Pi is no
+  longer experimental. To use it all, upgrade Codex to 0.163.0 and Pi to
+  1.1.0 or later; older ones work as before. Resume Pi tasks with `s`
+  for its new events.
 - The box for a review note opens under a diff line wider than its
   window. It stayed hidden there, so what you typed next went to Magit,
   and the menu of a note under such a line opened beside the window. When

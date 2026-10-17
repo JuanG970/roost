@@ -1231,10 +1231,15 @@ Tasks in Emacs:
 - One notification came for each request, each turn that ended and each
   interruption, and none as Codex started.
 
+Two cases found on reading it over had no live run: a dialog shown while
+the agent rests, as a Pi extension's at startup or Claude Code's sign-in,
+which ended `interrupted` through the relay and now ends `ready`; and a Pi
+dialog between runs, which shows `permission`. The Python tests replay
+them, with both agents' sequences above: Codex's through a fixture that
+reports as it does, and Pi's with and without its newer events.
+
 Left: with the relay on, a Codex turn that starts before you trust Roost's
-hooks shows `ready`, and a Pi dialog names only its title. The Python tests
-replay both agents' sequences, Codex's through a fixture that reports as it
-does, and Pi's with and without its newer events.
+hooks shows `ready`, and a Pi dialog names only its title.
 
 ### Codex and Pi adapters
 

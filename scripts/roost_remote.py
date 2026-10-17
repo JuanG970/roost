@@ -669,6 +669,7 @@ PI_EXTENSION = r'''import { spawn } from "node:child_process";
 export default function (pi) {
   // A dialog that outlives its session has a context that throws.
   const sessionOf = ctx => { try { return ctx.sessionManager.getSessionFile(); } catch { return undefined; } };
+  const idleOf = ctx => { try { return ctx.isIdle(); } catch { return undefined; } };
   const report = (event, ctx, extra = {}) => new Promise(resolve => {
     const child = spawn(process.env.ROOST_PYTHON, [process.env.ROOST_HELPER, "hook-env"],
       { stdio: ["pipe", "ignore", "ignore"] });
@@ -687,7 +688,7 @@ export default function (pi) {
   // Pi 0.84.4 and later say when a dialog, such as an extension's asking
   // whether a tool may run, waits on you. Older Pi never sends these.
   pi.on("ui_prompt_start", (event, ctx) => report("ui_prompt_start", ctx, { title: event.title }));
-  pi.on("ui_prompt_end", (_event, ctx) => report("ui_prompt_end", ctx));
+  pi.on("ui_prompt_end", (_event, ctx) => report("ui_prompt_end", ctx, { idle: idleOf(ctx) }));
   // Pi emits shutdown when replacing a session too; the runner records actual exit.
 }
 '''
@@ -731,14 +732,13 @@ class PiAgent:
         elif event == "agent_settled" and payload.get("aborted") is True:
             # You stopped the run, with Esc; its end, just before, said only that it ended.
             status, last = "ready", "Interrupt"
-        elif event == "ui_prompt_start" and current in ("running", "background"):
-            # A dialog between runs, as a command of yours opens, asks
-            # nothing of the agent's.
+        elif event == "ui_prompt_start":
+            # During a run, or between runs, as an extension's at startup.
             status = "permission"
             request = one_line(text(payload.get("title")) or "")
         elif event == "ui_prompt_end" and current == "permission":
-            # Answered; if the run ended meanwhile, its end says so.
-            status = "running"
+            # Answered. If the run ended meanwhile, its end says so.
+            status = "ready" if payload.get("idle") is True else "running"
         if not status:
             return None
         updates = dict(status=status, updatedAt=now(), lastEvent=last)
@@ -2706,7 +2706,12 @@ def apply_program_status(task, fields, run_id):
     if state == "working" and status != "running" and (turns or status == "permission"):
         changes = dict(status="running", lastEvent="Approved" if status == "permission" else "Working")
     elif state == "blocked" and status != "permission":
-        changes = dict(status="permission", lastEvent="Blocked")
+        # A dialog while it rests, as one at its start or one you open,
+        # waits on you too, but holds up no turn.
+        changes = dict(status="permission", lastEvent="Blocked" if status == "running" else "Dialog")
+    elif state in ("done", "idle") and status == "permission" and task.get("lastEvent") == "Dialog":
+        # Back at rest, as before the dialog: no turn ended.
+        changes = dict(status="ready", lastEvent="Idle")
     elif state == "done" and status in ("starting", "running", "permission"):
         # Work left in the background, which a hook says, stays as it is.
         changes = dict(status="ready", lastEvent="Stop")

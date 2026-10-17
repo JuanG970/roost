@@ -1045,6 +1045,14 @@ class Lifecycle(unittest.TestCase):
                 self.wait(task, "ready", "Stop")
                 self.assertTrue(self.request("send", id=task["id"], text="interrupt")["ok"])
                 self.wait(task, "ready", "Stop" if agent == "pi-old" else "Interrupt")
+                if agent != "pi-old":
+                    # A dialog between runs waits on you too, and ends no turn.
+                    self.assertTrue(self.request("send", id=task["id"], text="rest dialog")["ok"])
+                    self.assertEqual(self.wait(task, "permission")["request"], "Trust this project?")
+                    roost.tmux(self.socket, "send-keys", "-t", task["paneId"], "yes", "Enter")
+                    record = self.wait_for(task, lambda record: record["status"] == "ready"
+                                           and record.get("lastEvent") not in ("Interrupt", "Stop"))
+                    self.assertNotIn("request", record)
                 self.assertTrue(self.request("retire", id=task["id"])["ok"])
 
     def test_provider_flags_are_checked_before_worktree_creation(self):
@@ -3061,8 +3069,16 @@ class ProgramStatus(unittest.TestCase):
         self.assertEqual(self.apply(task, "working")["lastEvent"], "Approved")
         self.assertIsNone(task.get("request"))
         self.assertEqual(self.apply(task, "idle")["lastEvent"], "Interrupt")
+        self.apply(task, "working")
         self.apply(task, "blocked", kind="question")
         self.assertEqual(self.apply(task, "idle")["lastEvent"], "Interrupt")
+        # A dialog while it rests, as at its start or one you open, ends no turn.
+        for rest, after in (("starting", "idle"), ("ready", "done"), ("ready", "idle")):
+            task = dict(status=rest, runId="run")
+            self.assertEqual(self.apply(task, "blocked", kind="auth")["status"], "permission")
+            self.assertEqual(self.apply(task, after), dict(status="ready", lastEvent="Idle", request=None,
+                                                         activity=None, error=None))
+        task = dict(status="starting", runId="run")
         self.apply(task, "working")
         self.assertEqual(self.apply(task, "done")["lastEvent"], "Stop")
         self.assertEqual(self.apply(task, "error", msg="Rate limited"),
@@ -3149,14 +3165,18 @@ class ProgramStatus(unittest.TestCase):
             hook("UserPromptSubmit")
             self.assertEqual(report("idle")["lastEvent"], "Idle")
 
-    def test_pi_dialogs_wait_on_you_only_during_a_run(self):
+    def test_pi_dialogs_wait_on_you(self):
         pi = roost.PiAgent()
         asks = pi.observe(dict(event="ui_prompt_start", title="Allow\x1b[2J\n bash?‮"), "running")
         self.assertEqual((asks["status"], asks["request"]), ("permission", "Allow [2J bash?"))
         self.assertNotIn("request", pi.observe(dict(event="ui_prompt_start"), "background"))
-        self.assertIsNone(pi.observe(dict(event="ui_prompt_start", title="Model"), "ready"))
+        self.assertEqual(pi.observe(dict(event="ui_prompt_start", title="Trust?"), "starting")["status"],
+                         "permission")
+        self.assertEqual(pi.observe(dict(event="ui_prompt_end", idle=False), "permission")["status"], "running")
+        self.assertEqual(pi.observe(dict(event="ui_prompt_end", idle=True), "permission")["status"], "ready")
+        # Its context can't say, after a session switch.
         self.assertEqual(pi.observe(dict(event="ui_prompt_end"), "permission")["status"], "running")
-        self.assertIsNone(pi.observe(dict(event="ui_prompt_end"), "ready"))
+        self.assertIsNone(pi.observe(dict(event="ui_prompt_end", idle=True), "ready"))
         stopped = pi.observe(dict(event="agent_settled", aborted=True), "ready")
         self.assertEqual((stopped["status"], stopped["lastEvent"]), ("ready", "Interrupt"))
         self.assertIsNone(pi.observe(dict(event="agent_settled", aborted=False), "ready"))

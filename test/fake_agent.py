@@ -93,6 +93,14 @@ else:
 print("FAKE_AGENT_READY " + session, flush=True)
 for line in sys.stdin:
     line = line.strip()
+    if line == "rest dialog" and not codex:
+        # An extension asks something between runs, as one might at startup.
+        report("ui_prompt_start", title="Trust this project?")
+        status("blocked", kind="permission")
+        sys.stdin.readline()
+        report("ui_prompt_end", idle=True)
+        status("idle")
+        continue
     if codex and deferred_start:
         report("SessionStart")
         deferred_start = False
@@ -129,7 +137,7 @@ for line in sys.stdin:
         report("ui_prompt_start", title="Allow\x1b[2J bash?\n")
         status("blocked", kind="permission")
         sys.stdin.readline()
-        report("ui_prompt_end")
+        report("ui_prompt_end", idle=False)
         status("working")
         time.sleep(0.5)
         report("agent_end", pending=False)

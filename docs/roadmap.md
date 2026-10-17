@@ -228,9 +228,9 @@ Larger, or undecided.
   had some weeks of daily use and its protocol, still changing, settles.
 - Codex reports only whether it works, waits on you or idles, and works
   between turns too, while its servers start or a command it left running
-  runs. So its hooks say when a turn starts and ends, and a turn that starts
-  before you trust them, as the first one of a new task's can, shows
-  `ready` while Codex works.
+  runs. So its hooks say when a turn starts and ends, and with
+  `roost-program-status` on, a turn that starts before you trust them, as
+  a new task's first one can, shows `ready` while Codex works.
 - A Pi extension's dialog names only its title ("Run this command?"), not
   what it asks about, so that is all the request shows.
 - While you write a commit message in a remote task, Magit can't show the
