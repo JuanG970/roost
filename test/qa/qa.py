@@ -219,6 +219,9 @@ class Run:
 (require 'roost)
 (require 'qa)
 (require 'roost-sweep)
+;; Org's first load takes about a second by itself, which the step that
+;; opens an Org file would otherwise count as Emacs not responding.
+(require 'org)
 (setq roost-state-directory %(state)s
       roost-socket-name %(server)s
       roost-hosts '(%(hosts)s)
@@ -1632,7 +1635,9 @@ def pull_request(qa, repo):
     def opened(screen):
         return (screen.get("task") or {}).get("name") == name and selected_terminal(screen)
 
-    for _ in range(int(qa.emacs.eval("(seq-count #'roost--waiting-p (roost-tasks))"))):
+    # An agent asking for permission comes first, so n goes back to it
+    # between each of the others.
+    for _ in range(2 * int(qa.emacs.eval("(seq-count #'roost--waiting-p (roost-tasks))"))):
         qa.keys("C-c r n")
         if opened(qa.until(opened, 5)):
             break
