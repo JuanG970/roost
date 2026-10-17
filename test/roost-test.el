@@ -152,6 +152,21 @@
          (roost--notify-attention "dev" asking "permission"))
        (should (equal body "dev · Asks to run make test"))))))
 
+(ert-deftest roost-a-starting-codex-task-says-what-to-answer ()
+  ;; Codex reports nothing through its hooks before its first turn, but
+  ;; through the relay once its startup questions are answered.
+  (roost-test--isolated
+   (dolist (relayed '(nil t))
+     (let ((task (roost--cache-task "dev" (append `((agent . "codex") (programStatus . ,relayed))
+                                                  (roost-test--task nil "starting")))))
+       (with-temp-buffer
+         (roost-task-info-mode)
+         (setq roost--buffer-task-key (roost--key task))
+         (roost--render-task-info)
+         (should (string-match-p (if relayed "trust this folder or Roost's hooks"
+                                   "enter the first prompt there")
+                                 (buffer-string))))))))
+
 (ert-deftest roost-task-panel-shows-latest-reply ()
   (roost-test--isolated
    (let ((task (roost--cache-task "dev" (append `((lastMessage . ,roost-test--reply))

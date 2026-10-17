@@ -67,6 +67,7 @@ KIND is `committed', `uncommitted', `untracked' or `binary'."
   `(("starting" (status . "starting") (updatedAt . ,roost-sweep--recent) (live . t))
     ("stuck starting" (status . "starting") (live . t))
     ("codex starting" (status . "starting") (agent . "codex") (live . t))
+    ("codex relayed starting" (status . "starting") (agent . "codex") (programStatus . t) (live . t))
     ("running" (status . "running") (live . t) (task . ,roost-sweep--long-prompt)
      (diff . "") (ahead . 0))
     ("permission" (status . "permission") (live . t) (request . "Asks to run python3 -m unittest")

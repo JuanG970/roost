@@ -463,6 +463,9 @@ class ClaudeAgent:
     """Agent-specific CLI and events; Git/tmux lifecycle stays outside this adapter."""
 
     default_command = ["claude"]
+    # Its status reports, which the runner reads for a task that asks,
+    # say when a turn ends and how.
+    reports_turns = True
 
     def validate(self, command):
         validate_command(command, "Claude")
@@ -602,6 +605,12 @@ class CodexAgent:
     """Native Codex TUI with per-invocation, normally reviewed lifecycle hooks."""
 
     default_command = ["codex"]
+    # Codex 0.163.0 and later report only whether they work, wait on you
+    # or idle: they idle alike after a turn that ended and one you stopped,
+    # and work on, between turns, while a command left in the background
+    # runs or a server starts. Its hooks, which it runs before it goes on,
+    # say when a turn starts and how it ends.
+    reports_turns = False
 
     def validate(self, command):
         validate_command(command, "Codex")
@@ -658,6 +667,8 @@ class CodexAgent:
 
 PI_EXTENSION = r'''import { spawn } from "node:child_process";
 export default function (pi) {
+  // A dialog that outlives its session has a context that throws.
+  const sessionOf = ctx => { try { return ctx.sessionManager.getSessionFile(); } catch { return undefined; } };
   const report = (event, ctx, extra = {}) => new Promise(resolve => {
     const child = spawn(process.env.ROOST_PYTHON, [process.env.ROOST_HELPER, "hook-env"],
       { stdio: ["pipe", "ignore", "ignore"] });
@@ -666,11 +677,17 @@ export default function (pi) {
     child.on("error", done);
     child.on("close", done);
     child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify({ event, session: ctx.sessionManager.getSessionFile(), ...extra }));
+    child.stdin.end(JSON.stringify({ event, session: sessionOf(ctx), ...extra }));
   });
   pi.on("session_start", (_event, ctx) => report("session_start", ctx));
   pi.on("agent_start", (_event, ctx) => report("agent_start", ctx));
   pi.on("agent_end", (_event, ctx) => report("agent_end", ctx, { pending: ctx.hasPendingMessages() }));
+  // Pi 1.1.0 and later say whether you stopped the run.
+  pi.on("agent_settled", (event, ctx) => report("agent_settled", ctx, { aborted: event.aborted === true }));
+  // Pi 0.84.4 and later say when a dialog, such as an extension's asking
+  // whether a tool may run, waits on you. Older Pi never sends these.
+  pi.on("ui_prompt_start", (event, ctx) => report("ui_prompt_start", ctx, { title: event.title }));
+  pi.on("ui_prompt_end", (_event, ctx) => report("ui_prompt_end", ctx));
   // Pi emits shutdown when replacing a session too; the runner records actual exit.
 }
 '''
@@ -680,6 +697,8 @@ class PiAgent:
     """Observe Pi extension events without changing tools or approval extensions."""
 
     default_command = ["pi"]
+    # Pi 1.1.0 and later report their status, and say when a turn ends and how.
+    reports_turns = True
 
     def validate(self, command):
         validate_command(command, "Pi")
@@ -705,11 +724,26 @@ class PiAgent:
     def observe(self, payload, current=None):
         event = payload.get("event")
         status = {"session_start": "ready", "agent_start": "running", "agent_end": "ready"}.get(event)
-        if not status:
-            return None
+        last = "Stop" if event == "agent_end" else event
+        request = None
         if event == "agent_end" and payload.get("pending"):
             status = "background"
-        updates = dict(status=status, updatedAt=now(), lastEvent="Stop" if event == "agent_end" else event)
+        elif event == "agent_settled" and payload.get("aborted") is True:
+            # You stopped the run, with Esc; its end, just before, said only that it ended.
+            status, last = "ready", "Interrupt"
+        elif event == "ui_prompt_start" and current in ("running", "background"):
+            # A dialog between runs, as a command of yours opens, asks
+            # nothing of the agent's.
+            status = "permission"
+            request = one_line(text(payload.get("title")) or "")
+        elif event == "ui_prompt_end" and current == "permission":
+            # Answered; if the run ended meanwhile, its end says so.
+            status = "running"
+        if not status:
+            return None
+        updates = dict(status=status, updatedAt=now(), lastEvent=last)
+        if request:
+            updates["request"] = request[:REQUEST_LIMIT]
         if payload.get("session"):
             updates["agentSession"] = payload["session"]
         return updates
@@ -2449,13 +2483,20 @@ def require_agent_work_kept(task):
                          % (entry["path"], ("branch %s: " % entry["branch"]) if entry["branch"] else "", what))
 
 
-def beside_program_status(updates, before):
+def beside_program_status(updates, before, reports_turns=True):
     """What of a hook's UPDATES to record, for an agent whose status was
-    BEFORE, that reports its status to its terminal: all but the status,
-    which its reports give sooner and surer, unless the hook knows more:
-    that its turn ended with work left in the background, or on an API error."""
+    BEFORE, that reports its status to its terminal. For one whose reports
+    say when a turn ends and how (REPORTS_TURNS), all but the status, which
+    its reports give sooner and surer, unless the hook knows more: that its
+    turn ended with work left in the background, or on an API error. For
+    one whose hooks say that instead, all but a return to work while it
+    waits on you: one tool's end says nothing of another's request."""
     status = updates.get("status")
-    if status == "failed" or status == "background" and before in ("running", "ready"):
+    if reports_turns:
+        kept = status == "failed" or status == "background" and before in ("running", "ready")
+    else:
+        kept = not (status == "running" and before == "permission")
+    if kept:
         return updates
     return {key: value for key, value in updates.items()
             if key not in ("status", "updatedAt", "lastEvent", "error")}
@@ -2473,14 +2514,17 @@ def update_hook(store, task_id, payload, run_id=None):
         if made and made not in (task.get("agentWorktrees") or []):
             task["agentWorktrees"] = (task.get("agentWorktrees") or []) + [made]
             store.save(task)
-        updates = agent_for(task).observe(payload, before)
+        agent = agent_for(task)
+        updates = agent.observe(payload, before)
         if updates:
             asks = updates.get("status", before) == "permission"
             relayed = task.get("programStatusRun") == task.get("runId")
             if relayed:
-                updates = beside_program_status(updates, before)
+                updates = beside_program_status(updates, before, agent.reports_turns)
+            # What the agent asks, if its adapter can say better than its payload.
+            named = updates.pop("request", None)
             task.update(updates)
-            request = permission_request(payload, task.get("worktree")) if asks else None
+            request = (named or permission_request(payload, task.get("worktree"))) if asks else None
             if request:
                 task["request"] = request
                 task.pop("requestFrom", None)
@@ -2492,10 +2536,11 @@ def update_hook(store, task_id, payload, run_id=None):
                     task["requestCommand"] = command[:APPROVAL_MARKER_LIMIT]
                 else:
                     task.pop("requestCommand", None)
-            elif not relayed and (task["status"] != "permission" or before != "permission"):
+            elif ((not relayed or not agent.reports_turns)
+                  and (task["status"] != "permission" or before != "permission")):
                 # The notification that follows a request names no tool:
                 # keep the request it follows, and only that one. The agent's
-                # status reports clear it, for one that sends them.
+                # status reports clear it, for one whose reports end its turns.
                 task.pop("request", None)
                 task.pop("requestCommand", None)
             store.save(task)
@@ -2557,11 +2602,17 @@ def parse_program_status(body):
                 value = base64.b64decode(fields.pop(key), validate=True).decode()
             except ValueError:
                 continue
-            # Control characters, bidi and invisible formatting are no part of a line.
-            value = "".join(" " if unicodedata.category(c) == "Cc" else c for c in value
-                            if unicodedata.category(c) != "Cf")
-            fields[key] = " ".join(value.split()) or None
+            fields[key] = one_line(value)
     return fields
+
+
+def one_line(value):
+    """VALUE, an agent's words for Roost to show, on one line, or None if
+    nothing is left. Control characters, bidi and invisible formatting are
+    no part of a line."""
+    value = "".join(" " if unicodedata.category(c) == "Cc" else c for c in value
+                    if unicodedata.category(c) != "Cf")
+    return " ".join(value.split()) or None
 
 
 class ProgramStatusFilter:
@@ -2648,8 +2699,11 @@ def apply_program_status(task, fields, run_id):
     before = dict(task)
     state, status = fields["state"], task["status"]
     task["programStatusRun"] = run_id
+    # For an agent whose hooks say when its turns start and end, its work
+    # is news only as the answer to a request.
+    turns = agent_for(task).reports_turns
     changes = None
-    if state == "working" and status != "running":
+    if state == "working" and status != "running" and (turns or status == "permission"):
         changes = dict(status="running", lastEvent="Approved" if status == "permission" else "Working")
     elif state == "blocked" and status != "permission":
         changes = dict(status="permission", lastEvent="Blocked")
@@ -2657,8 +2711,10 @@ def apply_program_status(task, fields, run_id):
         # Work left in the background, which a hook says, stays as it is.
         changes = dict(status="ready", lastEvent="Stop")
     elif state == "idle" and status in ("running", "permission"):
-        # Stopped by you, with Esc or by declining a request.
-        changes = dict(status="ready", lastEvent="Interrupt")
+        # Stopped by you, with Esc or by declining a request; or, for an
+        # agent whose hooks end its turns, ended without them, as on a
+        # failed request to its model.
+        changes = dict(status="ready", lastEvent="Interrupt" if turns else "Idle")
     elif state == "idle" and status == "starting":
         changes = dict(status="ready", lastEvent="SessionStart")
     elif state == "error" and status != "failed":
