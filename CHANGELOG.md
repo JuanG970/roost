@@ -85,8 +85,8 @@ Changes since 0.8.1:
 - On Emacs 32, with `roost-animations` on, the light of an agent waiting
   for you fades out and back in: deeply and every two seconds when it asks
   you something, by half and every three when it finished, failed or
-  exited since you saw it. The other lights stay still. Nothing to do when
-  upgrading.
+  exited since you saw it, or its pull request waits on you. The other
+  lights stay still. Nothing to do when upgrading.
 - The sidebar shows each task's name and its status, with no dot, so
   names are cut less. The status is in its colour when there is something
   to look at, dim when the agent is only working or stopped, and left out

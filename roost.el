@@ -4959,9 +4959,9 @@ more than MOST lines.  Return the lines."
 (defcustom roost-animations nil
   "Whether the status lights of agents waiting for you move.
 They fade out and back in: one asking you something deeply and quickly,
-and one that finished, failed, crashed or exited since you saw it less
-and slowly.  The rest stay still, so motion always means an agent needs
-you.
+and one that finished, failed, crashed or exited since you saw it, or
+whose pull request waits on you, less and slowly.  The rest stay still,
+so motion always means an agent needs you.
 This needs Emacs 32's canvas images; without them the lights stay the
 dots they are.  The motion pauses while no Emacs frame has focus.
 Changed with `setopt' or Customize, it shows at once."

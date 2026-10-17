@@ -370,7 +370,8 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
 - `roost-animations` (nil): on Emacs 32, which draws canvas images, the
   status light of an agent waiting for you fades out and back in: deeply
   and quickly when it asks you something, less and slowly when it
-  finished, failed or exited since you saw it. The rest stay still, and
+  finished, failed or exited since you saw it, or its pull request waits
+  on you. The rest stay still, and
   the motion pauses while Emacs isn't in front. Elsewhere the lights stay
   dots.
 - Faces: `roost-prose` sets what you and the agents wrote (prompts, replies,
