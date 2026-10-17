@@ -11,6 +11,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import signal
 from pathlib import Path
 import subprocess
@@ -3442,6 +3443,56 @@ class ProgramStatus(unittest.TestCase):
         stopped = pi.observe(dict(event="agent_settled", aborted=True), "ready")
         self.assertEqual((stopped["status"], stopped["lastEvent"]), ("ready", "Interrupt"))
         self.assertIsNone(pi.observe(dict(event="agent_settled", aborted=False), "ready"))
+
+    def test_a_pi_dialog_at_startup_ends_no_turn(self):
+        # It can open before Pi's first report, while its hooks still set
+        # its status, and close once the relay does.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            store.save(dict(id="0" * 16, agent="pi", worktree="/w", status="starting", runId="run"))
+            roost.update_hook(store, "0" * 16, dict(event="ui_prompt_start", title="Trust this project?"), "run")
+            for event, state in ((None, "blocked"), (dict(event="ui_prompt_end", idle=True), None),
+                                 (None, "idle")):
+                if event:
+                    roost.update_hook(store, "0" * 16, event, "run")
+                else:
+                    task = store.read("0" * 16)
+                    roost.apply_program_status(task, dict(state=state, kind="permission"), "run")
+                    store.save(task)
+            task = store.read("0" * 16)
+            self.assertEqual((task["status"], task["lastEvent"]), ("ready", "Idle"))
+            self.assertNotIn("request", task)
+
+    @unittest.skipUnless(shutil.which("node"), "needs Node")
+    def test_pi_reports_reach_the_helper_in_order(self):
+        # Pi doesn't wait for its dialogs' handlers before its next event.
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = roost.Store(str(root / "state"))
+            roost.PiAgent().launch(store, dict(id="0" * 16, command=["pi"], prompt=None), False)
+            extension = next(store.root.glob("pi-observer-*.mjs"))
+            log = root / "log"
+            helper = root / "helper.py"
+            helper.write_text("import json, sys, time\n"
+                              "event = json.load(sys.stdin)\n"
+                              "time.sleep(0.3 if event.get('title') == 'First' else 0)\n"
+                              "open(%r, 'a').write(json.dumps(event) + '\\n')\n" % str(log))
+            driver = root / "driver.mjs"
+            driver.write_text(
+                "const { default: observe } = await import(%s);\n"
+                "const handlers = {};\n"
+                "observe({ on: (name, handler) => { handlers[name] = handler; } });\n"
+                "const ctx = { sessionManager: { getSessionFile: () => 's' }, isIdle: () => false };\n"
+                "const done = [handlers.ui_prompt_start({ title: 'First' }, ctx),\n"
+                "              handlers.ui_prompt_end({}, ctx),\n"
+                "              handlers.ui_prompt_start({ title: 'Second' }, ctx)];\n"
+                "await Promise.all(done);\n" % json.dumps(extension.as_uri()))
+            env = dict(os.environ, ROOST_PYTHON=sys.executable, ROOST_HELPER=str(helper))
+            subprocess.run(["node", str(driver)], env=env, check=True, timeout=30)
+            events = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([(e["event"], e.get("title")) for e in events],
+                             [("ui_prompt_start", "First"), ("ui_prompt_end", None), ("ui_prompt_start", "Second")])
+            self.assertEqual(events[1]["idle"], False)
 
 
 if __name__ == "__main__":

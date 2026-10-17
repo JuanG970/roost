@@ -672,7 +672,7 @@ export default function (pi) {
   // A dialog that outlives its session has a context that throws.
   const sessionOf = ctx => { try { return ctx.sessionManager.getSessionFile(); } catch { return undefined; } };
   const idleOf = ctx => { try { return ctx.isIdle(); } catch { return undefined; } };
-  const report = (event, ctx, extra = {}) => new Promise(resolve => {
+  const send = payload => new Promise(resolve => {
     const child = spawn(process.env.ROOST_PYTHON, [process.env.ROOST_HELPER, "hook-env"],
       { stdio: ["pipe", "ignore", "ignore"] });
     const timer = setTimeout(() => { child.kill(); resolve(); }, 3000);
@@ -680,8 +680,16 @@ export default function (pi) {
     child.on("error", done);
     child.on("close", done);
     child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify({ event, session: sessionOf(ctx), ...extra }));
+    child.stdin.end(payload);
   });
+  // Pi goes on to its next event without waiting for some handlers, as
+  // its dialogs', so each report, as it was when its event came, waits
+  // for the one before: the helper reads them in order.
+  let reported = Promise.resolve();
+  const report = (event, ctx, extra = {}) => {
+    const payload = JSON.stringify({ event, session: sessionOf(ctx), ...extra });
+    return reported = reported.then(() => send(payload));
+  };
   pi.on("session_start", (_event, ctx) => report("session_start", ctx));
   pi.on("agent_start", (_event, ctx) => report("agent_start", ctx));
   pi.on("agent_end", (_event, ctx) => report("agent_end", ctx, { pending: ctx.hasPendingMessages() }));
@@ -735,8 +743,10 @@ class PiAgent:
             # You stopped the run, with Esc; its end, just before, said only that it ended.
             status, last = "ready", "Interrupt"
         elif event == "ui_prompt_start":
-            # During a run, or between runs, as an extension's at startup.
+            # During a run, or between runs, as an extension's at startup:
+            # one between runs holds up no turn, as the relay notes too.
             status = "permission"
+            last = event if current in ("running", "background") else "Dialog"
             request = one_line(text(payload.get("title")) or "")
         elif event == "ui_prompt_end" and current == "permission":
             # Answered. If the run ended meanwhile, its end says so.
