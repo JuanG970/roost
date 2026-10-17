@@ -1702,6 +1702,17 @@ if args[:2] == ["pr", "list"]:
     listed = json.load(open(path)) if os.path.exists(path) else []
     state = args[args.index("--state") + 1].upper() if "--state" in args else "OPEN"
     print(json.dumps([pr for pr in listed if state == "ALL" or pr.get("state", "OPEN") == state]))
+elif args[:2] == ["api", "graphql"]:
+    # Each pull request the query asks for, as reviews.json has it by number.
+    import re
+    query = next(arg for arg in args if arg.startswith("query="))
+    path = os.path.join(directory, "reviews.json")
+    if not os.path.exists(path):
+        sys.stderr.write("canned reviews.json missing\\n")
+        sys.exit(1)
+    reviews = json.load(open(path))
+    print(json.dumps(dict(data=dict(repository={
+        "pr" + number: reviews.get(number) for number in re.findall(r"pullRequest\\(number: (\\d+)\\)", query)}))))
 elif args[:2] == ["pr", "create"]:
     if os.path.exists(os.path.join(directory, "linger")):
         os.system("sleep 1.5 > /dev/null 2>&1 &")
@@ -1813,6 +1824,86 @@ elif args[:2] == ["auth", "status"]:
         reply = self.request("pr", id=task["id"])
         self.assertIn("Commit the task's changes", reply["error"])
 
+    def elsewhere(self, task):
+        """A clone of the origin with the task's branch checked out, as on
+        GitHub or another machine, whose pushes this repository hasn't fetched."""
+        clone = self.root / ("elsewhere-" + task["id"][:6])
+        self.git("clone", "-q", "--branch", task["branch"], str(self.origin), str(clone))
+        for key, value in (("user.name", "Elsewhere"), ("user.email", "elsewhere@example.invalid")):
+            self.git("config", key, value, cwd=clone)
+        return clone
+
+    def test_pr_opens_a_pull_request_with_a_commit_made_on_github(self):
+        # As when a review's suggestion was committed there: pushing the
+        # branch as it is would be refused.
+        self.github()
+        task = self.create()
+        self.commit_in(task, "one")
+        self.assertTrue(self.request("pr", id=task["id"], title="Fix it")["ok"])
+        clone = self.elsewhere(task)
+        self.git("commit", "-q", "--allow-empty", "-m", "Apply suggestion", cwd=clone)
+        self.git("push", "-q", "origin", task["branch"], cwd=clone)
+        suggested = self.git("rev-parse", "HEAD", cwd=clone)
+        reply = self.request("pr", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["pushed"], 0)
+        self.assertEqual(self.git("rev-parse", "refs/heads/" + task["branch"], cwd=self.origin), suggested)
+
+    def test_pr_fetches_the_branch_in_a_clone_that_fetches_only_some(self):
+        # As a single-branch clone does: fetching the branch by name alone
+        # would not update its remote-tracking branch.
+        self.github()
+        task = self.create()
+        self.commit_in(task, "one")
+        self.assertTrue(self.request("pr", id=task["id"], title="Fix it")["ok"])
+        self.git("config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+        self.git("update-ref", "-d", "refs/remotes/origin/" + task["branch"])
+        clone = self.elsewhere(task)
+        self.git("commit", "-q", "--allow-empty", "-m", "Apply suggestion", cwd=clone)
+        self.git("push", "-q", "origin", task["branch"], cwd=clone)
+        reply = self.request("pr", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["pushed"], 0)
+
+    def test_pr_pushes_when_it_cannot_fetch(self):
+        # Rewound elsewhere, and not to be fetched: what was last fetched,
+        # the commit itself, is no sign the pull request has it.
+        self.github()
+        task = self.create()
+        first = self.commit_in(task, "one")
+        self.assertTrue(self.request("pr", id=task["id"], title="Fix it")["ok"])
+        tip = self.commit_in(task, "two")
+        self.assertEqual(self.request("pr", id=task["id"])["result"]["pushed"], 1)
+        clone = self.elsewhere(task)
+        self.git("push", "-q", "-f", "origin", "%s:refs/heads/%s" % (first, task["branch"]), cwd=clone)
+        original = roost.remote_git
+
+        def unreachable(repo, *args, **kwargs):
+            if args[0] == "fetch":
+                return subprocess.CompletedProcess(args, 128, "", "fatal: unable to access")
+            return original(repo, *args, **kwargs)
+
+        with patch.object(roost, "remote_git", unreachable):
+            reply = self.request("pr", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.git("rev-parse", "refs/heads/" + task["branch"], cwd=self.origin), tip)
+
+    def test_pr_pushes_to_a_branch_rewound_elsewhere(self):
+        # Taken back a commit from another machine since last fetched here:
+        # the commit is pushed again, not taken as already there.
+        self.github()
+        task = self.create()
+        first = self.commit_in(task, "one")
+        self.assertTrue(self.request("pr", id=task["id"], title="Fix it")["ok"])
+        tip = self.commit_in(task, "two")
+        self.assertEqual(self.request("pr", id=task["id"])["result"]["pushed"], 1)
+        clone = self.elsewhere(task)
+        self.git("push", "-q", "-f", "origin", "%s:refs/heads/%s" % (first, task["branch"]), cwd=clone)
+        reply = self.request("pr", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["pushed"], 1)
+        self.assertEqual(self.git("rev-parse", "refs/heads/" + task["branch"], cwd=self.origin), tip)
+
     def test_issues_lists_open_issues_and_create_records_the_chosen_one(self):
         self.github()
         (self.gh_dir / "issues.json").write_text(json.dumps([
@@ -1861,14 +1952,21 @@ elif args[:2] == ["auth", "status"]:
                 dict(__typename="CheckRun", status="IN_PROGRESS", conclusion=""),
                 dict(__typename="StatusContext", state="PENDING"),
                 dict(__typename="StatusContext", state="SUCCESS")])]))
+        before = roost.now()
         listed = self.request("list", full=True)["result"][0]
+        checked = listed["prStatus"].pop("checkedAt")
+        self.assertLessEqual(before, checked)
+        # GitHub didn't say what it has of reviews (reviews.json is missing).
         self.assertEqual(listed["prStatus"], dict(
             state="OPEN", draft=True, review="APPROVED", head=tip,
-            checks=dict(passing=3, failing=1, pending=2)))
-        self.assertEqual(self.gh_calls()[-1],
+            checks=dict(passing=3, failing=1, pending=2), failedAt=None))
+        self.assertEqual(listed["unpushed"], 0)
+        self.assertEqual(self.gh_calls()[-2],
                          ["pr", "list", "--head", task["branch"], "--state", "all", "--limit", "10", "--json",
                           "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"])
+        self.assertEqual(self.gh_calls()[-1][:3], ["api", "graphql", "--hostname"])
         self.assertNotIn("prStatus", store.read(task["id"]))
+        self.assertNotIn("unpushed", store.read(task["id"]))
         # What it shows is recorded, for views that ask GitHub nothing.
         self.assertEqual(store.read(task["id"])["pr"], dict(number=7, url="https://github.com/octo/repo/pull/7",
                                                             state="OPEN", head=tip))
@@ -1879,6 +1977,155 @@ elif args[:2] == ["auth", "status"]:
         self.assertEqual(len(self.gh_calls()), calls)
         (self.gh_dir / "list.json").unlink()
         self.assertNotIn("prStatus", self.request("list", full=True)["result"][0])
+
+    @staticmethod
+    def thread(resolved, *times):
+        """A review thread as GitHub's GraphQL API gives it, with the time of its last comment."""
+        return dict(isResolved=resolved, comments=dict(nodes=[dict(createdAt=at) for at in times[-1:]]))
+
+    def test_an_open_pull_request_says_what_its_review_and_checks_wait_for(self):
+        self.github()
+        task = self.create()
+        tip = self.commit_in(task)
+        self.push(task)
+        url = "https://github.com/octo/repo/pull/7"
+        (self.gh_dir / "list.json").write_text(json.dumps([dict(
+            number=7, url=url, state="OPEN", headRefOid=tip,
+            statusCheckRollup=[
+                dict(__typename="CheckRun", status="COMPLETED", conclusion="FAILURE",
+                     completedAt="2026-10-16T21:40:00Z"),
+                dict(__typename="CheckRun", status="COMPLETED", conclusion="TIMED_OUT",
+                     completedAt="2026-10-16T21:47:50Z"),
+                dict(__typename="CheckRun", status="COMPLETED", conclusion="SUCCESS",
+                     completedAt="2026-10-16T21:59:00Z"),
+                dict(__typename="StatusContext", state="ERROR", createdAt="2026-10-16T21:45:00Z")])]))
+        (self.gh_dir / "reviews.json").write_text(json.dumps({"7": dict(
+            mergeable="MERGEABLE",
+            reviewRequests=dict(nodes=[dict(requestedReviewer=dict(login="copilot-pull-request-reviewer")),
+                                       dict(requestedReviewer=dict(slug="core")),
+                                       dict(requestedReviewer=None)]),
+            reviewThreads=dict(totalCount=3, nodes=[
+                self.thread(True, "2026-10-16T21:58:00Z"),
+                self.thread(False, "2026-10-16T21:41:00Z"),
+                self.thread(False, "2026-10-16T21:43:00Z")]))}))
+        status = self.request("list", full=True)["result"][0]["prStatus"]
+        # From the first failure and the first of the unresolved threads'
+        # last comments: a newer one leaves those overdue.
+        self.assertEqual({key: status[key] for key in ("failedAt", "mergeable", "requested", "threads", "threadAt")},
+                         dict(failedAt="2026-10-16T21:40:00Z", mergeable="MERGEABLE",
+                              requested=["copilot-pull-request-reviewer", "core", "someone"],
+                              threads=2, threadAt="2026-10-16T21:41:00Z"))
+        query = self.gh_calls()[-1]
+        self.assertEqual(query[:5] + query[6:], ["api", "graphql", "--hostname", "github.com", "-f",
+                                                 "-f", "owner=octo", "-f", "name=repo"])
+        self.assertIn("pr7: pullRequest(number: 7)", query[5])
+        # A failure or thread without a time has none to wait from.
+        listed = json.loads((self.gh_dir / "list.json").read_text())
+        listed[0]["statusCheckRollup"].append(dict(__typename="StatusContext", state="FAILURE"))
+        (self.gh_dir / "list.json").write_text(json.dumps(listed))
+        reviews = json.loads((self.gh_dir / "reviews.json").read_text())
+        reviews["7"]["reviewThreads"]["nodes"].append(dict(isResolved=False, comments=dict(nodes=[])))
+        reviews["7"]["reviewThreads"]["totalCount"] += 1
+        (self.gh_dir / "reviews.json").write_text(json.dumps(reviews))
+        status = self.request("list", full=True)["result"][0]["prStatus"]
+        self.assertEqual((status["failedAt"], status["threads"], status["threadAt"]), (None, 3, None))
+        # Nothing unresolved, nor too many threads to tell.
+        (self.gh_dir / "reviews.json").write_text(json.dumps({"7": dict(
+            mergeable="CONFLICTING", reviewRequests=dict(nodes=[]),
+            reviewThreads=dict(totalCount=1, nodes=[self.thread(True, "2026-10-16T21:58:00Z")]))}))
+        status = self.request("list", full=True)["result"][0]["prStatus"]
+        self.assertEqual((status["mergeable"], status["requested"], status["threads"], status["threadAt"]),
+                         ("CONFLICTING", [], 0, None))
+        (self.gh_dir / "reviews.json").write_text(json.dumps({"7": dict(
+            mergeable="UNKNOWN", reviewRequests=dict(nodes=[]),
+            reviewThreads=dict(totalCount=101, nodes=[self.thread(True, "2026-10-16T21:58:00Z")] * 100))}))
+        status = self.request("list", full=True)["result"][0]["prStatus"]
+        self.assertEqual(status["mergeable"], "UNKNOWN")
+        self.assertNotIn("threads", status)
+        self.assertNotIn("threadAt", status)
+        # A merged one is asked nothing more.
+        calls = len(self.gh_calls())
+        (self.gh_dir / "list.json").write_text(json.dumps([dict(number=7, url=url, state="MERGED", headRefOid=tip)]))
+        status = self.request("list", full=True)["result"][0]["prStatus"]
+        self.assertEqual(len(self.gh_calls()), calls + 1)
+        self.assertEqual(set(status), {"state", "draft", "review", "checks", "head"})
+
+    def test_reviews_are_asked_once_for_each_repository(self):
+        self.github()
+        first, second = self.create(name="first"), self.create(name="second")
+        tips = [self.commit_in(task, task["name"]) for task in (first, second)]
+        for task in (first, second):
+            self.push(task)
+        url = "https://github.com/octo/repo/pull/%d"
+        (self.gh_dir / "list.json").write_text(json.dumps([dict(number=7, url=url % 7, state="OPEN", headRefOid=tips[0]),
+                                                           dict(number=8, url=url % 8, state="OPEN", headRefOid=tips[1])]))
+        (self.gh_dir / "reviews.json").write_text(json.dumps({
+            number: dict(mergeable="MERGEABLE", reviewRequests=dict(nodes=[]),
+                         reviewThreads=dict(totalCount=0, nodes=[])) for number in ("7", "8")}))
+        listed = {task["name"]: task for task in self.request("list", full=True)["result"]}
+        self.assertEqual([listed[name]["prStatus"]["threads"] for name in ("first", "second")], [0, 0])
+        queries = [call for call in self.gh_calls() if call[:2] == ["api", "graphql"]]
+        self.assertEqual(len(queries), 1)
+        self.assertIn("pr7: pullRequest(number: 7)", queries[0][5])
+        self.assertIn("pr8: pullRequest(number: 8)", queries[0][5])
+        # One whose URL isn't of a pull request is asked nothing.
+        self.assertEqual(roost.pull_request_reviews([dict(number=9, url="https://example.com/9")],
+                                                    time.monotonic() + 5), {})
+        self.assertEqual(len([call for call in self.gh_calls() if call[:2] == ["api", "graphql"]]), 1)
+        # Past the deadline, GitHub is not asked about reviews, and what
+        # its pull request lists said still shows.
+        with patch.object(roost, "PULL_REQUEST_DEADLINE", 2.5):
+            (self.gh_dir / "slow").write_text("1.8")
+            listed = self.request("list", full=True)["result"]
+        (self.gh_dir / "slow").unlink()
+        self.assertEqual(len([call for call in self.gh_calls() if call[:2] == ["api", "graphql"]]), 1)
+        for task in listed:
+            self.assertEqual(task["prStatus"]["state"], "OPEN")
+            self.assertNotIn("threads", task["prStatus"])
+
+    def test_an_open_pull_request_says_how_many_commits_it_lacks(self):
+        self.github()
+        task = self.create()
+        tip = self.commit_in(task)
+        self.push(task)
+        url = "https://github.com/octo/repo/pull/7"
+        listed = self.gh_dir / "list.json"
+        listed.write_text(json.dumps([dict(number=7, url=url, state="OPEN", headRefOid=tip)]))
+        self.assertEqual(self.request("list", full=True)["result"][0]["unpushed"], 0)
+        # Committed since, as in Magit: measuring the task says so, asking GitHub nothing.
+        self.commit_in(task, "two")
+        self.commit_in(task, "three")
+        calls = len(self.gh_calls())
+        self.assertEqual(self.request("list", full=[task["id"]])["result"][0]["unpushed"], 2)
+        self.assertEqual(len(self.gh_calls()), calls)
+        self.assertEqual(self.request("list", full=True)["result"][0]["unpushed"], 2)
+        self.assertNotIn("unpushed", self.request("list")["result"][0])
+        # A commit made on GitHub, fetched here, which the branch lacks.
+        wt = Path(task["worktree"])
+        suggested = self.git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "Apply suggestion", cwd=wt)
+        listed.write_text(json.dumps([dict(number=7, url=url, state="OPEN", headRefOid=suggested)]))
+        self.assertEqual(self.request("list", full=True)["result"][0]["unpushed"], 0)
+        # One not fetched, or not after the branch's tip: it can't tell.
+        listed.write_text(json.dumps([dict(number=7, url=url, state="OPEN", headRefOid="f" * 40)]))
+        self.assertIsNone(self.request("list", full=True)["result"][0]["unpushed"])
+        # Nor while its agent has the worktree on another branch, whose
+        # commits it would miss.
+        listed.write_text(json.dumps([dict(number=7, url=url, state="OPEN", headRefOid=suggested)]))
+        self.git("checkout", "-q", "-b", "side", cwd=wt)
+        self.commit_in(task, "aside")
+        self.assertIsNone(self.request("list", full=True)["result"][0]["unpushed"])
+        self.assertIsNone(self.request("list", full=[task["id"]])["result"][0]["unpushed"])
+        # With its branch gone too, it says it can't tell, rather than nothing.
+        tip = self.git("rev-parse", task["branch"])
+        self.git("branch", "-D", task["branch"])
+        measured = self.request("list", full=[task["id"]])["result"][0]
+        self.assertIn("unpushed", measured)
+        self.assertIsNone(measured["unpushed"])
+        self.git("branch", task["branch"], tip)
+        self.git("checkout", "-q", task["branch"], cwd=wt)
+        # Nor is it said of one that is no longer open.
+        listed.write_text(json.dumps([dict(number=7, url=url, state="CLOSED", headRefOid="f" * 40)]))
+        self.assertNotIn("unpushed", self.request("list", full=True)["result"][0])
 
     def test_retire_accepts_a_squash_merged_pull_request_and_deletes_the_remote_branch(self):
         self.github()
@@ -2051,6 +2298,21 @@ elif args[:2] == ["auth", "status"]:
         (self.gh_dir / "list.json").write_text(json.dumps([dict(number=9, state="MERGED", headRefOid=tip)]))
         polled = self.request("list", pullRequests=True)["result"][0]
         self.assertEqual((polled["landed"], polled["dirty"]), (True, True))
+
+    def test_an_open_pull_request_comes_with_whether_the_task_is_clean(self):
+        # An edit not yet staged moves no Git stamp: a poll that asks
+        # GitHub measures a task it may say waits to be merged.
+        self.github()
+        task = self.create()
+        tip = self.commit_in(task)
+        self.push(task)
+        url = "https://github.com/octo/repo/pull/9"
+        (self.gh_dir / "list.json").write_text(json.dumps([dict(number=9, url=url, state="OPEN", headRefOid=tip)]))
+        self.assertIs(self.request("list", full=True)["result"][0]["dirty"], False)
+        (Path(task["worktree"]) / "work").write_text("edited since\n")
+        polled = self.request("list", pullRequests=True)["result"][0]
+        self.assertEqual((polled["prStatus"]["state"], polled["dirty"], polled["unpushed"]), ("OPEN", True, 0))
+        self.assertNotIn("dirty", self.request("list")["result"][0])
 
     def test_a_same_named_pull_request_on_main_is_not_a_task_with_no_work(self):
         # Someone else's fork, with a branch of the same name at main's commit.
