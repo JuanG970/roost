@@ -939,14 +939,17 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
     (remhash host roost--errors)))
 
 (defun roost--task-states (host)
-  "HOST's cached tasks as an alist of ID to (STATUS UPDATED-AT GIT-STAMP).
+  "HOST's cached tasks as an alist of ID to (STATUS UPDATED-AT GIT-STAMP PR).
 Each agent hook event, such as finishing a tool, moves UPDATED-AT; Git
-commands in the worktree, such as your commit, change GIT-STAMP."
+commands in the worktree, such as your commit, change GIT-STAMP.  PR is
+the state its host recorded of its pull request, which another Emacs
+may have changed: closed, it no longer says whether the task conflicts."
   (let (states)
     (maphash (lambda (key task)
                (when (equal (car key) host)
                  (push (list (cadr key) (roost--field task 'status)
-                             (roost--field task 'updatedAt) (roost--field task 'gitStamp))
+                             (roost--field task 'updatedAt) (roost--field task 'gitStamp)
+                             (alist-get 'state (roost--field task 'pr)))
                        states)))
              roost--tasks)
     states))

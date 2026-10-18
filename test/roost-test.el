@@ -3361,6 +3361,23 @@ Read from the layout transient keeps, whose form varies by version."
        (should (= (length calls) 4))
        (should (equal (caar calls) ["0123456789abcdef"]))))))
 
+(ert-deftest roost-a-pull-request-closed-elsewhere-fetches-git-statistics ()
+  ;; As by another Emacs: GitHub no longer says whether the task conflicts.
+  (roost-test--isolated
+   (let ((roost-hosts '("dev")) calls
+         (pr (lambda (state) `((pr (number . 9) (url . "https://github.com/o/r/pull/9") (state . ,state))))))
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (_host _action params success _failure)
+                  (push (cons (alist-get 'full params) success) calls))))
+       (roost--cache-task "dev" (append (funcall pr "OPEN") (roost-test--task nil "ready")))
+       (roost-refresh t)
+       (funcall (cdar calls) (list (append (funcall pr "OPEN") (roost-test--task nil "ready"))))
+       (should (= (length calls) 1))
+       (roost-refresh t)
+       (funcall (cdar calls) (list (append (funcall pr "CLOSED") (roost-test--task nil "ready"))))
+       (should (= (length calls) 3))
+       (should (equal (caar calls) ["0123456789abcdef"]))))))
+
 (ert-deftest roost-saving-a-file-in-a-worktree-measures-its-task ()
   (roost-test--isolated
    (let ((task (roost--cache-task "dev" (roost-test--task))) refreshes)
