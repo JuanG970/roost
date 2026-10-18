@@ -32,6 +32,39 @@ happened in a section below:
 8. Narrow and widen the frame, and open a second one: the sidebar and panel
    follow.
 
+## tmux-control's terminal interface — 2026-10-18
+
+- **tmux-control main (34a6ec7).** tmux-control now uses Eat through one
+  interface
+  ([tmux-control#195](https://github.com/csheaff/tmux-control/pull/195)), and
+  fits a window's buffer to its pane when the window's active pane changes
+  ([tmux-control#200](https://github.com/csheaff/tmux-control/pull/200)).
+  With it loaded, `check-declare` finds every tmux-control function Roost
+  declares, taking the same arguments, and Roost compiles with no warnings.
+  `make qa` on Emacs 32 with Eat 0.9.4, once the journey below was fixed: 142
+  steps with no problems with `--remote --tuned`, and 147 locally with one,
+  a pause noted below.
+- **A journey that cut the connection too soon.** With `--remote`, `dropped`
+  failed in all four runs, one of them on tmux-control 0.8.2. `open_task`
+  waited only for the task's terminal, which Roost had shown already on
+  creating the task, so it returned before the host replied to the open it
+  asked for. The journey
+  then cut the connection, and tmux-control said `C-c C-r reconnects`. Then
+  the late reply put "Roost: opening hold-line…" in its place, and Roost
+  reconnected the terminal. `open_task` now waits for the reply to its own
+  open, and `dropped` for the agent's screen before it cuts the connection.
+- **Seen once, not since.** Opening a draft from an Org heading over
+  `--remote` stalled Emacs for 19 seconds, and going back to a split task
+  once said "tmux kept the window at 142x36 (asked 98x16)". Neither came back
+  in reruns of those journeys on tmux-control 0.8.2 and main: 5 runs each of
+  `panes`, and one each of `frames`, `org`, `tabs` and `dropped` over
+  `--remote`. Locally, opening `plans.org` once took 1.12 seconds, over the
+  pause limit, and less in three reruns.
+- **A dropped terminal hides the agent's last screen.** Once the connection
+  goes, tmux-control writes its notice after the whole screen, blank rows
+  included, and shows the end: the agent's lines scroll out of view above
+  it. tmux-control 0.8.2 does the same.
+
 ## Conflicts before merge time — 2026-10-17
 
 - **`make qa`.** 147 steps, none with problems, with Git 2.54. The new
