@@ -6,6 +6,10 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- `n` reaches every waiting task while one asks for permission or is
+  stuck at a startup prompt, going back to that one between each of the
+  others. Before, it went back and forth between that task and one
+  other, and never reached a third. Nothing to do when upgrading.
 - A task whose commits would conflict with the branch it merges into says
   so before you merge it: the task panel and menu name the files and
   that `u` merges that branch into the task, and once you've seen what
