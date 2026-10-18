@@ -4478,23 +4478,27 @@ worktrees, nor a merge under way: until then those come first."
     (concat (string-join shown ", ")
             (when (> more 0) (format " and %d more" more)))))
 
+(defun roost--unmerged-files (task)
+  "The paths of TASK's changed files, as its host last listed them.
+Of a task whose commits are merged, only those it changes since."
+  (let ((landed (roost--landed task)))
+    (seq-keep (lambda (file)
+                (when (or (not landed) (alist-get 'uncommitted file) (alist-get 'untracked file))
+                  (alist-get 'path file)))
+              (roost--field task 'files))))
+
 (defun roost--overlaps (task)
   "Other tasks of TASK's project that change files it changes, committed or not.
-A list of (OTHER . FILES), from the files each one's host last listed,
-in the order of `roost-tasks'.  Of a task whose commits are merged, only
-the files it changes since."
-  (when-let* ((files (mapcar (lambda (file) (alist-get 'path file)) (roost--field task 'files))))
+A list of (OTHER . FILES), in the order of `roost-tasks', from each
+one's `roost--unmerged-files'."
+  (when-let* ((files (roost--unmerged-files task)))
     (let (overlaps)
       (dolist (other (roost-tasks))
         (when-let* (((not (equal (roost--key other) (roost--key task))))
                     ((equal (roost--field other 'host) (roost--field task 'host)))
                     ((equal (roost--field other 'repo) (roost--field task 'repo)))
-                    (both (seq-filter (lambda (file)
-                                        (and (member (alist-get 'path file) files)
-                                             (or (not (roost--landed other))
-                                                 (alist-get 'uncommitted file) (alist-get 'untracked file))))
-                                      (roost--field other 'files))))
-          (push (cons other (mapcar (lambda (file) (alist-get 'path file)) both)) overlaps)))
+                    (both (seq-filter (lambda (path) (member path files)) (roost--unmerged-files other))))
+          (push (cons other both) overlaps)))
       (nreverse overlaps))))
 
 (defun roost--conflict-next-step (task key)

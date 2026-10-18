@@ -4819,6 +4819,15 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
                             (roost--overlaps task))
                     '(("ledger totals" "report.py") ("merged one" "report.py"))))
      (should (string-match-p "^ledger totals also changes report\\.py$" (funcall panel)))
+     ;; Its own work merged, only what it changes since.
+     (should-not (roost--overlaps (roost--cache-task "dev" (roost-test--conflicted '(conflicts) '(landed . t)))))
+     (should (equal (mapcar #'cdr (roost--overlaps
+                                   (roost--cache-task "dev" (roost-test--conflicted
+                                                             '(conflicts) '(landed . t) '(dirty . t)
+                                                             '(files ((path . "report.py") (uncommitted . t))
+                                                                     ((path . "ledger.py")))))))
+                    '(("report.py") ("report.py"))))
+     (setq task (roost--cache-task "dev" (roost-test--conflicted '(conflicts))))
      (dotimes (n 4)
        (funcall other (format "%016d" (+ 5 n)) (format "more %d" n) "/home/user/ledger"
                 `(files ,(funcall file "ledger.py"))))
