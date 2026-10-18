@@ -36,7 +36,7 @@
          (roost--hosts-loaded t) (roost--remembered-hosts nil)
          (roost-notes-file (expand-file-name "notes.json" (nth 1 ,scratch)))
          (roost--notes nil) (roost--notes-loaded t)
-         (roost--requests nil) (roost-notify nil) (roost--current-task nil)
+         (roost--requests nil) (roost-notify nil) (roost--current-task nil) (roost--next-unblocked nil)
          (roost--perspectives (make-hash-table :test 'equal)))
      (set-frame-parameter nil 'roost-task nil)
      ;; Seeing an agent is recorded on its host too; tests that check it say so.
@@ -3103,9 +3103,10 @@ Read from the layout transient keeps, whose form varies by version."
        (roost-next-waiting) (should (equal (car opened) "b"))
        (roost-next-waiting) (should (equal (car opened) "a"))
        (roost-next-waiting) (should (equal (car opened) "b"))
-       ;; A new permission request jumps ahead of the remaining ready tasks.
+       ;; Back from it, n goes on from the ready task it last opened, and a
+       ;; new permission request jumps ahead of the remaining ready tasks.
        (roost--cache-task "d" (roost-test--task nil "ready"))
-       (roost-next-waiting) (should (equal (car opened) "a"))
+       (roost-next-waiting) (should (equal (car opened) "d"))
        (roost--cache-task "c" (roost-test--task nil "permission"))
        (roost-next-waiting) (should (equal (car opened) "b"))
        (roost-next-waiting) (should (equal (car opened) "c"))
@@ -3125,6 +3126,27 @@ Read from the layout transient keeps, whose form varies by version."
                 (lambda (task &rest _) (setq opened (roost--key task) roost--current-task opened))))
        (should (equal (cl-loop repeat 4 do (roost-next-waiting) collect (car opened))
                       '("a" "b" "c" "a")))))))
+
+(ert-deftest roost-next-attention-visits-each-task-between-a-blocked-one ()
+  ;; With one task asking, n went back and forth between it and the first
+  ;; other, and never reached the rest.
+  (roost-test--isolated
+   (roost--cache-task "a" (roost-test--task nil "permission"))
+   (dolist (host '("b" "c" "d"))
+     (roost--cache-task host (roost-test--turn-task)))
+   (dolist (host '("b" "c" "d"))
+     (should (equal (roost--attention-status (gethash (list host "0123456789abcdef") roost--tasks))
+                    "to merge")))
+   (let (opened)
+     (cl-letf (((symbol-function 'roost-open-task)
+                (lambda (task &rest _) (setq opened (roost--key task) roost--current-task opened))))
+       (should (equal (cl-loop repeat 7 do (roost-next-waiting) collect (car opened))
+                      '("a" "b" "a" "c" "a" "d" "a")))
+       ;; Once the task it last opened stops waiting, it starts again.
+       (roost-next-waiting)
+       (roost--cache-task "b" (roost-test--task nil "running"))
+       (roost-next-waiting) (should (equal (car opened) "a"))
+       (roost-next-waiting) (should (equal (car opened) "c"))))))
 
 (ert-deftest roost-background-refresh-never-steals-focus ()
   (roost-test--isolated

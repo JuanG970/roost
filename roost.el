@@ -388,6 +388,10 @@ A ready agent you have seen since its last event is no longer waiting.")
 
 (defvar roost--current-task nil
   "Key of the task most recently opened.")
+(defvar roost--next-unblocked nil
+  "Key of the last task `roost-next-waiting' went to that wasn't blocked.
+From a blocked task, it goes on from there, or starts again from the
+first if that task no longer waits.")
 (defvar roost--perspectives (make-hash-table :test 'equal)
   "Names the perspectives of renamed tasks may have, by task key.
 perspective.el renames only the current perspective, of each frame's
@@ -4751,12 +4755,20 @@ in turn."
                     (when-let* ((task (ignore-errors (roost--task-at-point))))
                       (roost--key task))))
          (blocked (mapcar #'roost--key (seq-filter #'roost--blocked-p waiting)))
+         (others (seq-difference keys blocked))
          (key (if (and blocked (not (equal blocked (list viewing))))
                   ;; In turn from the one you are looking at, if blocked.
                   (or (cadr (member viewing blocked))
                       (seq-find (lambda (key) (not (equal key viewing))) blocked))
-                (or (cadr (member (or viewing roost--current-task) keys)) (car keys)))))
+                ;; Back from a blocked task, on from the last other one.
+                (or (cadr (member (if (member viewing blocked)
+                                      roost--next-unblocked
+                                    (or viewing roost--current-task))
+                                  others))
+                    (car others) (car keys)))))
     (unless key (user-error "No tasks are waiting for you"))
+    (cond ((member key others) (setq roost--next-unblocked key))
+          ((member viewing others) (setq roost--next-unblocked viewing)))
     (roost-open-task (gethash key roost--tasks) t)))
 
 (defun roost--project-name (task)

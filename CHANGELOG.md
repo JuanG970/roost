@@ -6,6 +6,10 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- `n` reaches every waiting task while one asks for permission or is
+  stuck at a startup prompt, going back to that one between each of the
+  others. Before, it went back and forth between that task and one
+  other, and never reached a third. Nothing to do when upgrading.
 - With tmux-control 0.8.2, clicks in the sidebar and elsewhere work again
   after a mouse press in a terminal whose release never reached it, as
   when tmux wasn't replying. Until a click in a terminal, every click
