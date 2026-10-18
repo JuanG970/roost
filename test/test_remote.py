@@ -2416,6 +2416,28 @@ elif args[:2] == ["auth", "status"]:
         self.assertEqual((polled["prStatus"]["state"], polled["dirty"], polled["unpushed"]), ("OPEN", True, 0))
         self.assertNotIn("dirty", self.request("list")["result"][0])
 
+    def test_conflicts_are_measured_once_github_no_longer_says(self):
+        self.github()
+        task = self.create()
+        wt = Path(task["worktree"])
+        (wt / "hello").write_text("task\n")
+        self.git("commit", "-qam", "task", cwd=wt)
+        tip = self.git("rev-parse", "HEAD", cwd=wt)
+        self.push(task)
+        (self.repo / "hello").write_text("main\n")
+        self.git("commit", "-qam", "main")
+        url = "https://github.com/octo/repo/pull/9"
+        listed = self.gh_dir / "list.json"
+        listed.write_text(json.dumps([dict(number=9, url=url, state="OPEN", headRefOid=tip)]))
+        self.assertIsNone(self.request("list", full=True)["result"][0]["conflicts"])
+        # Closed on GitHub, with neither branch moved: a poll that asks GitHub measures it.
+        listed.write_text(json.dumps([dict(number=9, url=url, state="CLOSED", headRefOid=tip)]))
+        self.assertEqual(self.request("list", pullRequests=True)["result"][0]["conflicts"], ["hello"])
+        self.assertNotIn("conflicts", self.request("list", pullRequests=True)["result"][0])
+        # Merged there, as by a squash, its work has nothing left to conflict.
+        listed.write_text(json.dumps([dict(number=9, url=url, state="MERGED", headRefOid=tip)]))
+        self.assertEqual(self.request("list", pullRequests=True)["result"][0]["conflicts"], [])
+
     def test_a_same_named_pull_request_on_main_is_not_a_task_with_no_work(self):
         # Someone else's fork, with a branch of the same name at main's commit.
         self.github()

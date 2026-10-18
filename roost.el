@@ -4446,12 +4446,15 @@ KEY is a function that formats a key, as in `roost--next-step'."
 (defun roost--conflicts (task)
   "Whether TASK's work conflicts with the branch it merges into, or nil.
 For an open pull request, t when GitHub said so, as `roost--pr-status'
-has it.  Otherwise the files in which merging its committed work would
-conflict, as its host last measured them."
+has it, while the pull request has every commit of the task's.
+Otherwise the files in which merging its committed work would conflict,
+as its host last measured them, unless that work is merged."
   (if (memq (roost--pr-state task) '(open draft))
-      (when-let* ((status (roost--pr-status task)))
+      (when-let* ((status (roost--pr-status task))
+                  ((eql (roost--field task 'unpushed) 0)))
         (equal (alist-get 'mergeable status) "CONFLICTING"))
-    (roost--field task 'conflicts)))
+    (unless (roost--landed task)
+      (roost--field task 'conflicts))))
 
 (defun roost--conflict-turn (task)
   "Whether TASK's work conflicts with the branch it merges into, for you.
@@ -4478,15 +4481,18 @@ worktrees, nor a merge under way: until then those come first."
 (defun roost--overlaps (task)
   "Other tasks of TASK's project that change files it changes, committed or not.
 A list of (OTHER . FILES), from the files each one's host last listed,
-in the order of `roost-tasks', leaving out tasks whose work is merged."
+in the order of `roost-tasks'.  Of a task whose commits are merged, only
+the files it changes since."
   (when-let* ((files (mapcar (lambda (file) (alist-get 'path file)) (roost--field task 'files))))
     (let (overlaps)
       (dolist (other (roost-tasks))
         (when-let* (((not (equal (roost--key other) (roost--key task))))
                     ((equal (roost--field other 'host) (roost--field task 'host)))
                     ((equal (roost--field other 'repo) (roost--field task 'repo)))
-                    ((not (roost--landed other)))
-                    (both (seq-filter (lambda (file) (member (alist-get 'path file) files))
+                    (both (seq-filter (lambda (file)
+                                        (and (member (alist-get 'path file) files)
+                                             (or (not (roost--landed other))
+                                                 (alist-get 'uncommitted file) (alist-get 'untracked file))))
                                       (roost--field other 'files))))
           (push (cons other (mapcar (lambda (file) (alist-get 'path file)) both)) overlaps)))
       (nreverse overlaps))))
@@ -4498,7 +4504,7 @@ KEY is a function that formats a key, as in `roost--next-step'."
       (roost--pr-next-step task key)
     (let ((integration (or (roost--field task 'integrationBranch) "its branch")))
       (format "Conflicts with %s in %s: %s merges %s into it, to resolve them there"
-              integration (roost--file-list (roost--field task 'conflicts))
+              integration (roost--file-list (roost--conflicts task))
               (funcall key "u") integration))))
 
 (defun roost--pr-marker (task)
@@ -5803,7 +5809,7 @@ task panel's list of the agent's own worktrees."
               (when menu (concat "; " (funcall key "i") " shows it"))))
      ;; As for one you haven't looked at since its agent finished.
      ((roost--landed task) (funcall retire))
-     ((roost--field task 'conflicts) (roost--conflict-next-step task key))
+     ((consp (roost--conflicts task)) (roost--conflict-next-step task key))
      (merged (concat "Its pull request is merged, but not its commits since: " (funcall key "m") " merges them"))
      ((memq state '(open draft)) (roost--pr-next-step task key))
      ((and (numberp (roost--field task 'ahead)) (> (roost--field task 'ahead) 0))
@@ -6181,11 +6187,11 @@ Windows showing the panel keep their scroll position, and the mark stays."
                         integration)))
              'roost-status-permission)
           (cond
-           ((consp (roost--field task 'conflicts))
+           ((consp (roost--conflicts task))
             (roost--insert-indented
              (substitute-command-keys
               (format "Merging it into %s would conflict in %s: \\<roost-task-info-mode-map>\\[roost-update] merges %s into this task, to resolve them here first."
-                      integration (roost--file-list (roost--field task 'conflicts) 10) integration))
+                      integration (roost--file-list (roost--conflicts task) 10) integration))
              'roost-status-permission))
            ;; Not when it moved on by merging the task.
            ((and (> (or (roost--field task 'behind) 0) 0) (not (eq (roost--landed task t) t)))

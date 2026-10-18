@@ -1548,9 +1548,10 @@ def add_git_stats(tasks):
                              "refs/heads/" + integration + "..HEAD", "--")
             if behind.returncode == 0 and ahead.returncode == 0:
                 task["behind"], task["ahead"] = int(behind.stdout), int(ahead.stdout)
-        # GitHub says whether an open pull request conflicts.
-        task["conflicts"] = (merge_conflicts(task, tip, integration)
-                             if integration and pr.get("state") != "OPEN" else None)
+        # GitHub says whether an open pull request conflicts, and work
+        # merged already has nothing left to conflict.
+        task["conflicts"] = (None if not integration or pr.get("state") == "OPEN"
+                             else [] if task["landed"] else merge_conflicts(task, tip, integration))
 
 
 def stop(store, task, inventory=None):
@@ -3285,15 +3286,19 @@ def rpc(request):
             # a merge, leave no trace here.
             full = request.get("full")
             measured = result if full is True else [t for t in result if isinstance(full, list) and t["id"] in full]
+            was_open = {t["id"] for t in result if recorded_pull_request(t).get("state") == "OPEN"}
             checked = check_pull_requests(store, result) if full is True or request.get("pullRequests") else []
             add_git_stats(measured)
             for task in checked:
                 # Merged since, or with its pull request open, it is
                 # measured whole, or its cleanliness would be older than the
                 # news that it can be retired, or merged: an edit not yet
-                # staged moves no Git stamp.
+                # staged moves no Git stamp. One whose pull request closed
+                # is too, as GitHub no longer says whether it conflicts.
                 if "landed" not in task:
-                    if landed(task, branch_tip(task)) or (task.get("prStatus") or {}).get("state") == "OPEN":
+                    state = (task.get("prStatus") or {}).get("state")
+                    if (landed(task, branch_tip(task)) or state == "OPEN"
+                            or (task["id"] in was_open and state not in (None, "OPEN"))):
                         add_git_stats([task])
                     else:
                         task["landed"] = False
