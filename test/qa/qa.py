@@ -900,9 +900,15 @@ def start_task(qa, prompt, prefix=None):
 
 
 def open_task(qa, name):
+    """Open task NAME and wait until its host has replied and its terminal
+    shows.  A terminal shown already, as when Roost opened the task it
+    created, isn't enough: the reply can still come, and reconnect it."""
+    started = qa.screen()["opens"]["started"]
     qa.keys("C-c r l")
     qa.type(name + "\r")
-    return qa.wait(name + "'s terminal", lambda s: (s.get("task") or {}).get("name") == name
+    return qa.wait(name + "'s terminal", lambda s: s["opens"]["started"] > started
+                   and s["opens"]["replied"] == s["opens"]["started"]
+                   and (s.get("task") or {}).get("name") == name
                    and selected_terminal(s))
 
 
@@ -1822,6 +1828,8 @@ def dropped(qa, repo):
     laptop sleeps: the terminal says so, and C-c C-r brings it back."""
     name = start_task(qa, "Hold the line")
     open_task(qa, name)
+    # A terminal in use, not one still connecting.
+    qa.wait("the agent's screen", lambda s: "PROMPT Hold the line" in (selected_terminal(s) or {}).get("text", ""))
     os.kill(int(qa.emacs.eval("(qa-terminal-pid)")), signal.SIGKILL)
     qa.wait("word of it", lambda s: "C-c C-r" in (s["echo"] or ""))
     qa.step("The connection gone", expect=[

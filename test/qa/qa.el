@@ -269,6 +269,40 @@ Return nil when it isn't there."
 
 (advice-add 'roost--request :filter-args #'qa--slow-request)
 
+(defvar qa--opens-started 0
+  "How many times Roost has asked a host about a task it was opening.")
+
+(defvar qa--opens-replied 0
+  "How many of those questions the host has answered, either way.")
+
+(defvar qa--opening nil
+  "Non-nil while `roost-open-task' runs.")
+
+(defun qa--note-opening (open &rest args)
+  "Call OPEN, `roost-open-task', with ARGS, noting when its host replies."
+  (let ((qa--opening t))
+    (apply open args)))
+
+(defun qa--count-open (args)
+  "ARGS of `roost--request', counted until the host replies, if it opens a task.
+A terminal already shown doesn't say an open is done: the reply can
+still come and reconnect it, as after Roost opened the task it created."
+  (pcase-let ((`(,host ,action ,params ,success ,failure) args))
+    (if (not (and qa--opening (equal action "inspect") success failure))
+        args
+      (cl-incf qa--opens-started)
+      (let* ((replied nil)
+             (counted (lambda (callback)
+                        (lambda (&rest reply)
+                          (unwind-protect (apply callback reply)
+                            (unless replied
+                              (setq replied t)
+                              (cl-incf qa--opens-replied)))))))
+        (list host action params (funcall counted success) (funcall counted failure))))))
+
+(advice-add 'roost-open-task :around #'qa--note-opening)
+(advice-add 'roost--request :filter-args #'qa--count-open)
+
 (defun qa-drafts ()
   "The text of each draft of a new task."
   (let (drafts)
@@ -508,6 +542,7 @@ question from another of the same prompt asked after it."
        (questions . ,(vconcat (qa--questions)))
        (in-question . ,(if (minibufferp (window-buffer (selected-window)) t) t :json-false))
        (held . ,roost--held-for-minibuffer)
+       (opens . ((started . ,qa--opens-started) (replied . ,qa--opens-replied)))
        (minibuffer . ,(when (active-minibuffer-window)
                         (with-current-buffer (window-buffer (active-minibuffer-window))
                           (buffer-substring-no-properties (minibuffer-prompt-end) (point-max)))))
