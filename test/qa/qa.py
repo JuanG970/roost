@@ -1091,6 +1091,52 @@ def update(qa, repo):
         ("the panel no longer says it is behind", lambda s: "has moved on" not in panel_text(qa, s))])
 
 
+@journey("Conflicts before merge time")
+def conflicts(qa, repo):
+    first = new_task(qa, "ask printf 'one\\n' > SHARED.md && git add SHARED.md && git commit -qm 'Share one'")
+    answer_yes(qa, first)
+    qa.wait("its commit", lambda s: "Committed" in panel_text(qa, s))
+    second = new_task(qa, "ask printf 'two\\n' > SHARED.md && git add SHARED.md && git commit -qm 'Share two'")
+    answer_yes(qa, second)
+    qa.wait("its commit", lambda s: "Committed" in panel_text(qa, s))
+    qa.wait("the other task's files", lambda s: "also changes" in panel_text(qa, s))
+    qa.step("Two tasks change one file", expect=[
+        ("the panel names the other task", lambda s: "%s also changes SHARED.md" % first in panel_text(qa, s))])
+    open_task(qa, first)
+    qa.keys("C-c r m")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type("y")
+    qa.wait("the task to go", lambda s: qa.task(s, first) is None)
+    open_task(qa, second)
+    qa.wait("the conflict", lambda s: "Conflicts with main" in panel_text(qa, s))
+    qa.step("Its work conflicts with main", expect=[
+        ("the panel names the file and u",
+         lambda s: "Conflicts with main in SHARED.md: u merges main into it" in panel_text(qa, s)),
+        ("the sidebar says so", lambda s: sidebar_row(qa, s, second).endswith("conflicts")),
+        ("main is as it was", lambda s: (repo / "SHARED.md").read_text() == "one\n")])
+    qa.keys("C-c r u")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.step("Updating asks whether its agent resolves them", expect=[
+        ("it names the file", lambda s: "SHARED.md" in (s["prompt"] or ""))])
+    qa.type("n")
+    qa.wait("the merge under way", lambda s: "Finish merging main" in panel_text(qa, s))
+    qa.step("Resolving them in the task", expect=[
+        ("the panel says to finish the merge", lambda s: "Finish merging main into it in Magit" in panel_text(qa, s)),
+        ("and no longer that it would conflict", lambda s: "Conflicts with main" not in panel_text(qa, s))])
+    worktree = qa.emacs.json("(json-encode (roost--field (roost--frame-task) 'worktree))")
+    qa.git(worktree, "merge", "--abort")
+    qa.wait("the conflict again", lambda s: "Conflicts with main" in panel_text(qa, s))
+    qa.step("The merge given up", expect=[
+        ("the panel says again that it would conflict",
+         lambda s: "Conflicts with main in SHARED.md" in panel_text(qa, s))])
+    # Settled, so that it no longer waits on you in the journeys after.
+    qa.git(worktree, "merge", "-q", "--no-edit", "-X", "theirs", "main")
+    qa.wait("the conflict to go", lambda s: "conflict" not in panel_text(qa, s))
+    qa.step("Resolved", expect=[
+        ("the sidebar no longer says so",
+         lambda s: not sidebar_row(qa, s, second).endswith("conflicts"))])
+
+
 @journey("Restart Emacs")
 def restart(qa, repo):
     name = start_task(qa, "Remember me", "remember-me")
@@ -1792,7 +1838,7 @@ def dropped(qa, repo):
 
 
 JOURNEYS = [sweep, answer, fold, resize, merge, review, panes, shell,
-            dashboard, stop_resume, retire, send, update, restart, search, question_left, walk_away,
+            dashboard, stop_resume, retire, send, update, conflicts, restart, search, question_left, walk_away,
             frames, org, tabs,
             forget, rename, fork, merged, pull_request, exits, unreachable, scrollback, fleet, dropped]
 

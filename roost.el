@@ -796,7 +796,8 @@ and a newer notification about TASK replaces it."
         (t (message "%s: %s" title body))))
 
 (defconst roost--measured-fields
-  '(diff dirty files ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging landed pr)
+  '(diff dirty files ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging landed
+    conflicts pr)
   "A task's fields its host measures for each reply, such as Git statistics.
 They are as new as the reply, whatever its `updatedAt': its pull
 request too, which the host records as it finds one on GitHub.")
@@ -853,7 +854,7 @@ bringing back the old name, which the task's tab and panel no longer have."
     ;; Not what GitHub said of a pull request since recorded otherwise, as
     ;; by another Emacs: closed, or another in its place.
     (dolist (field '(diff dirty files ahead behind worktreeMissing prStatus unpushed lastMessage gitStamp agentWork
-                            merging landed))
+                            merging landed conflicts))
       (unless (or (assoc field task)
                   (and (eq field 'prStatus)
                        (not (equal (roost--field task 'pr) (roost--field old 'pr)))))
@@ -942,14 +943,17 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
     (remhash host roost--errors)))
 
 (defun roost--task-states (host)
-  "HOST's cached tasks as an alist of ID to (STATUS UPDATED-AT GIT-STAMP).
+  "HOST's cached tasks as an alist of ID to (STATUS UPDATED-AT GIT-STAMP PR).
 Each agent hook event, such as finishing a tool, moves UPDATED-AT; Git
-commands in the worktree, such as your commit, change GIT-STAMP."
+commands in the worktree, such as your commit, change GIT-STAMP.  PR is
+the state its host recorded of its pull request, which another Emacs
+may have changed: closed, it no longer says whether the task conflicts."
   (let (states)
     (maphash (lambda (key task)
                (when (equal (car key) host)
                  (push (list (cadr key) (roost--field task 'status)
-                             (roost--field task 'updatedAt) (roost--field task 'gitStamp))
+                             (roost--field task 'updatedAt) (roost--field task 'gitStamp)
+                             (alist-get 'state (roost--field task 'pr)))
                        states)))
              roost--tasks)
     states))
@@ -1087,7 +1091,7 @@ recently failed."
 
 (defconst roost--status-order
   '("permission" "prompt" "ready" "interrupted" "error" "failed" "crashed" "exited"
-    "ci failed" "comments" "to merge" "running" "background" "merged" "idle"
+    "ci failed" "comments" "conflicts" "to merge" "running" "background" "merged" "idle"
     "starting" "stopped")
   "Attention statuses from most to least in need of attention.")
 
@@ -1118,9 +1122,10 @@ it is ready and you have seen it since, rather than \"ready\"."
 (defun roost--waiting-p (task)
   "Whether TASK waits for you.
 Its agent asks something, or finished, failed, crashed or exited since
-you last saw it, or its pull request waits on you."
+you last saw it, or its pull request waits on you, or its work conflicts
+with the branch it merges into."
   (let ((status (roost--attention-status task)))
-    (or (member status '("permission" "prompt" "ready" "interrupted"))
+    (or (member status '("permission" "prompt" "ready" "interrupted" "conflicts"))
         (member status roost--pr-turns)
         (and (member status '("error" "failed" "crashed" "exited"))
              (not (roost--seen-p task))))))
@@ -4439,11 +4444,79 @@ KEY is a function that formats a key, as in `roost--next-step'."
                 (_ (concat tell ", " (funcall key "P") " opens it")))))
      ((and (numberp unpushed) (> unpushed 0))
       (format "%s pushes %d new commit%s to %s" (funcall key "P") unpushed (if (= unpushed 1) "" "s") number))
-     ((and status (eql unpushed 0) waits)
-      (format "%s waits for %s" number (string-join waits " and ")))
      ((and status (equal (alist-get 'mergeable status) "CONFLICTING"))
       (format "%s conflicts with the branch it merges into: %s, %s opens it" number tell (funcall key "P")))
+     ((and status (eql unpushed 0) waits)
+      (format "%s waits for %s" number (string-join waits " and ")))
      (t (concat (funcall key "P") " pushes new commits to its pull request")))))
+
+(defun roost--conflicts (task)
+  "Whether TASK's work conflicts with the branch it merges into, or nil.
+For an open pull request, t when GitHub said so, as `roost--pr-status'
+has it, while the pull request has every commit of the task's.
+Otherwise the files in which merging its committed work would conflict,
+as its host last measured them, unless that work is merged."
+  (if (memq (roost--pr-state task) '(open draft))
+      (when-let* ((status (roost--pr-status task))
+                  ((eql (roost--field task 'unpushed) 0)))
+        (equal (alist-get 'mergeable status) "CONFLICTING"))
+    (unless (roost--landed task)
+      (roost--field task 'conflicts))))
+
+(defun roost--conflict-turn (task)
+  "Whether TASK's work conflicts with the branch it merges into, for you.
+That is once you have seen what its agent last did, and it neither works,
+asks nor failed, with nothing left uncommitted or in its agent's own
+worktrees, nor a merge under way: until then those come first."
+  (and (roost--seen-p task)
+       (not (member (roost--status-name task)
+                    '("starting" "running" "background" "permission" "error" "failed" "crashed")))
+       (not (roost--field task 'dirty))
+       (not (roost--field task 'merging))
+       (not (roost--agent-work-left task))
+       (roost--conflicts task)
+       t))
+
+(defun roost--file-list (files &optional most)
+  "FILES joined for a sentence: the first MOST, 3 by default, and how many more."
+  (let* ((most (or most 3))
+         (shown (seq-take files most))
+         (more (- (length files) (length shown))))
+    (concat (string-join shown ", ")
+            (when (> more 0) (format " and %d more" more)))))
+
+(defun roost--unmerged-files (task)
+  "The paths of TASK's changed files, as its host last listed them.
+Of a task whose commits are merged, only those it changes since."
+  (let ((landed (roost--landed task)))
+    (seq-keep (lambda (file)
+                (when (or (not landed) (alist-get 'uncommitted file) (alist-get 'untracked file))
+                  (alist-get 'path file)))
+              (roost--field task 'files))))
+
+(defun roost--overlaps (task)
+  "Other tasks of TASK's project that change files it changes, committed or not.
+A list of (OTHER . FILES), in the order of `roost-tasks', from each
+one's `roost--unmerged-files'."
+  (when-let* ((files (roost--unmerged-files task)))
+    (let (overlaps)
+      (dolist (other (roost-tasks))
+        (when-let* (((not (equal (roost--key other) (roost--key task))))
+                    ((equal (roost--field other 'host) (roost--field task 'host)))
+                    ((equal (roost--field other 'repo) (roost--field task 'repo)))
+                    (both (seq-filter (lambda (path) (member path files)) (roost--unmerged-files other))))
+          (push (cons other both) overlaps)))
+      (nreverse overlaps))))
+
+(defun roost--conflict-next-step (task key)
+  "What to do about TASK's conflicts with the branch it merges into.
+KEY is a function that formats a key, as in `roost--next-step'."
+  (if (memq (roost--pr-state task) '(open draft))
+      (roost--pr-next-step task key)
+    (let ((integration (or (roost--field task 'integrationBranch) "its branch")))
+      (format "Conflicts with %s in %s: %s merges %s into it, to resolve them there"
+              integration (roost--file-list (roost--conflicts task))
+              (funcall key "u") integration))))
 
 (defun roost--pr-marker (task)
   "Compact pull request marker for TASK's dashboard row, such as \"#12 ✓\"."
@@ -4792,11 +4865,13 @@ A turn you interrupted, or whose permission prompt you declined, is
 (defun roost--display-status (task)
   "TASK's status, or \"offline\" while its host is unreachable.
 It is \"merged\" when you can retire it, losing nothing, and its agent
-neither works nor has anything new for you, and one of `roost--pr-turns'
-while its pull request waits on you."
+neither works nor has anything new for you, one of `roost--pr-turns'
+while its pull request waits on you, and \"conflicts\" as
+`roost--conflict-turn' has it."
   (cond ((gethash (roost--field task 'host) roost--errors) "offline")
         ((roost--merged-p task) "merged")
         ((roost--pr-turn task))
+        ((roost--conflict-turn task) "conflicts")
         (t (roost--status-name task))))
 
 (defun roost--merged-p (task)
@@ -4817,7 +4892,7 @@ not fail, and has said nothing you haven't seen."
 (defun roost--status-face (status)
   "Face for STATUS."
   (pcase status
-    ((or "permission" "prompt" "comments") 'roost-status-permission)
+    ((or "permission" "prompt" "comments" "conflicts") 'roost-status-permission)
     ((or "ready" "interrupted" "to merge") 'roost-status-ready)
     ((or "running" "background") 'roost-status-running)
     ((or "failed" "crashed" "error" "ci failed") 'roost-status-failed)
@@ -4831,7 +4906,7 @@ can't go on without you or failed, or the task is merged, is plain
 while the agent waits for you otherwise, and is dim the rest of the time."
   (pcase status
     ((or "permission" "prompt" "error" "failed" "crashed" "merged" "ci failed") (roost--status-face status))
-    ((or "ready" "interrupted" "to merge" "comments") nil)
+    ((or "ready" "interrupted" "to merge" "comments" "conflicts") nil)
     (_ 'roost-dim)))
 
 (defconst roost--gap (propertize "\n" 'face '(:height 0.5))
@@ -5734,6 +5809,7 @@ task panel's list of the agent's own worktrees."
      ((equal status "error")
       (concat "Its last turn failed; open it to try its last prompt again: " (funcall key "RET")))
      ((member status roost--pr-turns) (roost--pr-next-step task key))
+     ((equal status "conflicts") (roost--conflict-next-step task key))
      ((member status '("stopped" "crashed"))
       (concat (funcall key "RET") " or " (funcall key "s") " resumes its conversation"))
      ((not (roost--agent-running-p task))
@@ -5752,6 +5828,7 @@ task panel's list of the agent's own worktrees."
               (when menu (concat "; " (funcall key "i") " shows it"))))
      ;; As for one you haven't looked at since its agent finished.
      ((roost--landed task) (funcall retire))
+     ((consp (roost--conflicts task)) (roost--conflict-next-step task key))
      (merged (concat "Its pull request is merged, but not its commits since: " (funcall key "m") " merges them"))
      ((memq state '(open draft)) (roost--pr-next-step task key))
      ((and (numberp (roost--field task 'ahead)) (> (roost--field task 'ahead) 0))
@@ -6058,7 +6135,7 @@ Windows showing the panel keep their scroll position, and the mark stays."
                                          'face (roost--status-word-face (roost--attention-status task)))
                              ;; Not since it merged, or its pull request
                              ;; came to wait on you, but since its agent last moved.
-                             (unless (member status (cons "merged" roost--pr-turns))
+                             (unless (member status (append '("merged" "conflicts") roost--pr-turns))
                                (propertize (format " for %s" (roost--elapsed (roost--field task 'updatedAt)))
                                            'face 'roost-dim)))))
           ;; The status keeps to one line, below the name when both don't fit.
@@ -6128,13 +6205,28 @@ Windows showing the panel keep their scroll position, and the mark stays."
                 (format "A merge of %s is under way in it: commit it in Magit (\\<roost-task-info-mode-map>\\[roost-review])."
                         integration)))
              'roost-status-permission)
-          ;; Not when it moved on by merging the task.
-          (when (and (> (or (roost--field task 'behind) 0) 0) (not (eq (roost--landed task t) t)))
+          (cond
+           ((consp (roost--conflicts task))
             (roost--insert-indented
-           (substitute-command-keys
-            (format "%s has moved on; \\<roost-task-info-mode-map>\\[roost-update] merges it into this task before you merge the task back."
-                    integration))
-           'roost-dim)))
+             (substitute-command-keys
+              (format "Merging it into %s would conflict in %s: \\<roost-task-info-mode-map>\\[roost-update] merges %s into this task, to resolve them here first."
+                      integration (roost--file-list (roost--conflicts task) 10) integration))
+             'roost-status-permission))
+           ;; Not when it moved on by merging the task.
+           ((and (> (or (roost--field task 'behind) 0) 0) (not (eq (roost--landed task t) t)))
+            (roost--insert-indented
+             (substitute-command-keys
+              (format "%s has moved on; \\<roost-task-info-mode-map>\\[roost-update] merges it into this task before you merge the task back."
+                      integration))
+             'roost-dim))))
+        (let ((overlaps (roost--overlaps task)))
+          (dolist (overlap (seq-take overlaps 3))
+            (roost--insert-indented
+             (format "%s also changes %s" (roost--field (car overlap) 'name) (roost--file-list (cdr overlap)))
+             'roost-dim))
+          (when (length> overlaps 3)
+            (roost--insert-indented (format "%d more tasks change them too" (- (length overlaps) 3))
+                                    'roost-dim)))
         (roost--insert-agent-work task)
         ;; How an agent ended, or why it waits, is the next step's, above.
         (pcase status
@@ -6373,6 +6465,7 @@ Refreshes are asynchronous; rendering uses only cached state.
                      ("interrupted" nil "interrupted")
                      ("with failed checks" nil "ci failed")
                      ("with review comments" nil "comments")
+                     ("with conflicts" nil "conflicts")
                      ("to merge" nil "to merge")
                      ("seen" nil "idle")
                      ("merged" nil "merged")

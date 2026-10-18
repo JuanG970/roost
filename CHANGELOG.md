@@ -10,6 +10,14 @@ Since 0.9.0:
   stuck at a startup prompt, going back to that one between each of the
   others. Before, it went back and forth between that task and one
   other, and never reached a third. Nothing to do when upgrading.
+- A task whose commits would conflict with the branch it merges into says
+  so before you merge it: the task panel and menu name the files and
+  that `u` merges that branch into the task, and once you've seen what
+  its agent last said, the task says `conflicts` and counts as waiting,
+  for `n` too. The task's host checks whenever either branch moves,
+  with `git merge-tree` (Git 2.38 or newer); for an open pull request,
+  GitHub says. The panel also names other tasks changing the same
+  files. Nothing to do when upgrading.
 - With tmux-control 0.8.2, clicks in the sidebar and elsewhere work again
   after a mouse press in a terminal whose release never reached it, as
   when tmux wasn't replying. Until a click in a terminal, every click

@@ -678,6 +678,52 @@ class Lifecycle(unittest.TestCase):
         self.git("commit", "-q", "--no-edit", cwd=wt)
         self.assertIsNone(self.request("list", full=True)["result"][0]["merging"])
 
+    def test_a_conflict_with_the_integration_branch_is_listed_before_merging(self):
+        task = self.create()
+        wt = Path(task["worktree"])
+        listed = lambda: self.request("list", full=True)["result"][0]
+        self.assertEqual(listed()["conflicts"], [])
+        (wt / "hello").write_text("task\n")
+        (wt / "both").write_text("task\n")
+        self.git("add", ".", cwd=wt)
+        self.git("commit", "-qm", "task", cwd=wt)
+        # Nothing on main to conflict with.
+        self.assertEqual(listed()["conflicts"], [])
+        stamp = listed()["gitStamp"]
+        (self.repo / "hello").write_text("main\n")
+        (self.repo / "both").write_text("main\n")
+        (self.repo / "apart").write_text("main\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "main")
+        # Moving main moves the stamp, so Emacs measures the task again.
+        self.assertNotEqual(listed()["gitStamp"], stamp)
+        self.assertEqual(listed()["conflicts"], ["both", "hello"])
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        # Merging main into the task settles them once it is committed.
+        self.assertTrue(self.request("update", id=task["id"])["ok"])
+        self.assertEqual(listed()["conflicts"], ["both", "hello"])
+        (wt / "hello").write_text("both\n")
+        (wt / "both").write_text("both\n")
+        self.git("add", ".", cwd=wt)
+        self.git("commit", "-q", "--no-edit", cwd=wt)
+        self.assertEqual(listed()["conflicts"], [])
+        # Older Git can't tell without a working tree.
+        (self.repo / "hello").write_text("main again\n")
+        self.git("commit", "-qam", "main again")
+        self.assertEqual(listed()["conflicts"], ["hello"])
+        with patch.object(roost, "merges_without_checkout", lambda: False):
+            self.assertIsNone(listed()["conflicts"])
+        # GitHub says so for an open pull request, and nobody for a branch that's gone.
+        store = roost.Store(str(self.state))
+        for change in (dict(pr=dict(number=12, url="https://github.com/o/r/pull/12", state="OPEN")),
+                       dict(integrationBranch="gone")):
+            with self.subTest(change=change), patch.object(roost, "gh", side_effect=roost.RoostError("offline")):
+                record = store.read(task["id"])
+                store.save(dict(record, **change))
+                self.assertIsNone(listed()["conflicts"])
+                store.save(record)
+        self.assertNotIn("conflicts", store.read(task["id"]))
+
     def test_merge_conflict_aborts_and_keeps_task(self):
         task = self.create()
         wt = Path(task["worktree"])
@@ -2369,6 +2415,28 @@ elif args[:2] == ["auth", "status"]:
         polled = self.request("list", pullRequests=True)["result"][0]
         self.assertEqual((polled["prStatus"]["state"], polled["dirty"], polled["unpushed"]), ("OPEN", True, 0))
         self.assertNotIn("dirty", self.request("list")["result"][0])
+
+    def test_conflicts_are_measured_once_github_no_longer_says(self):
+        self.github()
+        task = self.create()
+        wt = Path(task["worktree"])
+        (wt / "hello").write_text("task\n")
+        self.git("commit", "-qam", "task", cwd=wt)
+        tip = self.git("rev-parse", "HEAD", cwd=wt)
+        self.push(task)
+        (self.repo / "hello").write_text("main\n")
+        self.git("commit", "-qam", "main")
+        url = "https://github.com/octo/repo/pull/9"
+        listed = self.gh_dir / "list.json"
+        listed.write_text(json.dumps([dict(number=9, url=url, state="OPEN", headRefOid=tip)]))
+        self.assertIsNone(self.request("list", full=True)["result"][0]["conflicts"])
+        # Closed on GitHub, with neither branch moved: a poll that asks GitHub measures it.
+        listed.write_text(json.dumps([dict(number=9, url=url, state="CLOSED", headRefOid=tip)]))
+        self.assertEqual(self.request("list", pullRequests=True)["result"][0]["conflicts"], ["hello"])
+        self.assertNotIn("conflicts", self.request("list", pullRequests=True)["result"][0])
+        # Merged there, as by a squash, its work has nothing left to conflict.
+        listed.write_text(json.dumps([dict(number=9, url=url, state="MERGED", headRefOid=tip)]))
+        self.assertEqual(self.request("list", pullRequests=True)["result"][0]["conflicts"], [])
 
     def test_a_same_named_pull_request_on_main_is_not_a_task_with_no_work(self):
         # Someone else's fork, with a branch of the same name at main's commit.
