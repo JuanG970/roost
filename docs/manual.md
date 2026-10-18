@@ -205,7 +205,17 @@ on a file shows the whole file with its changes marked, and you can still
 stage there.
 
 **Catch up and finish.** When other tasks land first, the dashboard shows the
-task falling behind (`↓2`). `u` merges the integration branch into the task's
+task falling behind (`↓2`). If merging the task's commits would then
+conflict, the task panel and menu say so before you press `m`, as in
+"Conflicts with main in ledger.py: `u` merges main into it", and once
+you've seen what its agent last said, the task says `conflicts` and counts
+as waiting: `n` visits it. Roost checks whenever the task's branch or the
+integration branch moves, with `git merge-tree` on the task's host (Git
+2.38 or newer; older Git doesn't check). For a task with an open pull
+request, GitHub says whether it conflicts instead. The panel also names
+other tasks of the project that change the same files, committed or not
+("ledger totals also changes report.py"), which may conflict once one
+of them merges. `u` merges the integration branch into the task's
 own worktree. If that conflicts, Roost offers to have the task's agent resolve
 it, run the tests and commit. Then `m` merges the task into the branch it
 started from and removes its worktree, branch and window. For work you don't

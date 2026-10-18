@@ -3361,6 +3361,23 @@ Read from the layout transient keeps, whose form varies by version."
        (should (= (length calls) 4))
        (should (equal (caar calls) ["0123456789abcdef"]))))))
 
+(ert-deftest roost-a-pull-request-closed-elsewhere-fetches-git-statistics ()
+  ;; As by another Emacs: GitHub no longer says whether the task conflicts.
+  (roost-test--isolated
+   (let ((roost-hosts '("dev")) calls
+         (pr (lambda (state) `((pr (number . 9) (url . "https://github.com/o/r/pull/9") (state . ,state))))))
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (_host _action params success _failure)
+                  (push (cons (alist-get 'full params) success) calls))))
+       (roost--cache-task "dev" (append (funcall pr "OPEN") (roost-test--task nil "ready")))
+       (roost-refresh t)
+       (funcall (cdar calls) (list (append (funcall pr "OPEN") (roost-test--task nil "ready"))))
+       (should (= (length calls) 1))
+       (roost-refresh t)
+       (funcall (cdar calls) (list (append (funcall pr "CLOSED") (roost-test--task nil "ready"))))
+       (should (= (length calls) 3))
+       (should (equal (caar calls) ["0123456789abcdef"]))))))
+
 (ert-deftest roost-saving-a-file-in-a-worktree-measures-its-task ()
   (roost-test--isolated
    (let ((task (roost--cache-task "dev" (roost-test--task))) refreshes)
@@ -4729,6 +4746,111 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
    (should (string-prefix-p "Draft #12 passed its checks and review"
                             (roost--next-step (roost--cache-task "dev" (roost-test--turn-task '(draft . t))))))))
 
+;; Not the files of `roost-sweep--files', which needs no Roost of its own.
+(defun roost-test--conflicted (&rest fields)
+  "An idle task whose work conflicts with main, with FIELDS over its own."
+  (append fields
+          '((integrationBranch . "main") (repo . "/home/user/ledger") (live . t) (ahead . 1) (behind . 2)
+            (dirty) (landed) (diff . "2 files +4 −2") (conflicts "ledger.py" "report.py") (merging)
+            (files ((path . "ledger.py") (added . 2) (deleted . 1))
+                   ((path . "report.py") (added . 2) (deleted . 1)))
+            (seen . "2026-10-03T20:00:00+00:00"))
+          (roost-test--task)))
+
+(ert-deftest roost-a-conflict-with-the-integration-branch-shows-before-merge-time ()
+  (roost-test--isolated
+   (let ((task (roost--cache-task "dev" (roost-test--conflicted)))
+         (step (lambda (&rest fields)
+                 (when-let* ((step (roost--next-step (roost--cache-task "dev" (apply #'roost-test--conflicted fields)))))
+                   (substring-no-properties step))))
+         (status (lambda (&rest fields)
+                   (roost--attention-status (roost--cache-task "dev" (apply #'roost-test--conflicted fields))))))
+     (should (equal (roost--display-status task) "conflicts"))
+     (should (roost--waiting-p task))
+     (should (equal (substring-no-properties (roost--summary (list task))) "1 with conflicts"))
+     (should (string-suffix-p "conflicts" (roost--sidebar-row task 40)))
+     (should (equal (funcall step)
+                    "Conflicts with main in ledger.py, report.py: u merges main into it, to resolve them there"))
+     (with-temp-buffer
+       (roost-task-info-mode)
+       (setq roost--buffer-task-key (roost--key task))
+       (roost--render-task-info)
+       (should (string-match-p "^Merging it into main would conflict in ledger.py, report.py: u merges main into this task, to resolve them here first\\.$"
+                               (buffer-string)))
+       (should-not (string-match-p "has moved on" (buffer-string)))
+       ;; Not since its agent last moved: since a branch did.
+       (should (string-match-p "\\`fix auth   ● conflicts\n" (buffer-string))))
+     ;; What its agent last said comes first, and the next step is the same.
+     (should (equal (funcall status '(seen)) "ready"))
+     (should (string-prefix-p "Conflicts with main" (funcall step '(seen))))
+     (should (equal (funcall step '(conflicts "a.py" "b.py" "c.py" "d.py" "e.py"))
+                    "Conflicts with main in a.py, b.py, c.py and 2 more: u merges main into it, to resolve them there"))
+     ;; Its agent at work, or work left uncommitted or merging, comes first.
+     (should (equal (funcall status '(status . "running")) "running"))
+     (should-not (funcall step '(status . "running")))
+     (should (equal (funcall status '(dirty . t)) "idle"))
+     (should (string-prefix-p "Review and commit" (funcall step '(dirty . t))))
+     (should (equal (funcall status '(merging (conflicts "ledger.py"))) "idle"))
+     (should (equal (funcall status '(status . "crashed") '(live)) "crashed"))
+     ;; A stopped agent's conflicts are yours all the same.
+     (should (equal (funcall status '(status . "stopped") '(live)) "conflicts"))
+     (should (string-prefix-p "Conflicts with main" (funcall step '(status . "stopped") '(live))))
+     ;; Merged already, as by a squash its branch's tip isn't in.
+     (should (equal (funcall status '(landed . t)) "merged"))
+     (with-temp-buffer
+       (roost-task-info-mode)
+       (setq roost--buffer-task-key (roost--key (roost--cache-task "dev" (roost-test--conflicted '(landed . t)))))
+       (roost--render-task-info)
+       (should-not (string-match-p "onflict" (buffer-string))))
+     ;; None, or Git couldn't tell.
+     (should (equal (funcall status '(conflicts)) "idle"))
+     (should (equal (funcall step '(conflicts)) "m merges it, or P opens a pull request"))
+     ;; A quiet poll keeps them; a measured one that finds none forgets them.
+     (roost--cache-task "dev" (roost-test--conflicted))
+     (roost--apply-snapshot "dev" (list (roost-test--task)))
+     (should (equal (roost--field (car (roost-tasks)) 'conflicts) '("ledger.py" "report.py")))
+     (roost--apply-snapshot "dev" (list (append '((conflicts)) (roost-test--task))))
+     (should-not (roost--field (car (roost-tasks)) 'conflicts)))))
+
+(ert-deftest roost-the-task-panel-names-other-tasks-changing-its-files ()
+  (roost-test--isolated
+   (let* ((file (lambda (path) `((path . ,path) (added . 1) (deleted . 0))))
+          (task (roost--cache-task "dev" (roost-test--conflicted '(conflicts))))
+          (other (lambda (id name repo &rest fields)
+                   (roost--cache-task "dev" (append fields `((id . ,id) (name . ,name) (repo . ,repo))
+                                                    (roost-test--task id)))))
+          (panel (lambda ()
+                   (with-temp-buffer
+                     (roost-task-info-mode)
+                     (setq roost--buffer-task-key (roost--key task))
+                     (roost--render-task-info)
+                     (buffer-string)))))
+     (funcall other "1111111111111111" "ledger totals" "/home/user/ledger"
+              `(files ,(funcall file "README.md") ,(funcall file "report.py")))
+     (funcall other "2222222222222222" "elsewhere" "/home/user/other" `(files ,(funcall file "ledger.py")))
+     ;; Of one merged, only what it changes since.
+     (funcall other "3333333333333333" "merged one" "/home/user/ledger" '(landed . t) '(dirty . t)
+              `(files ,(funcall file "ledger.py") ((path . "report.py") (uncommitted . t))))
+     (funcall other "4444444444444444" "no files" "/home/user/ledger")
+     (should (equal (mapcar (lambda (overlap) (cons (roost--field (car overlap) 'name) (cdr overlap)))
+                            (roost--overlaps task))
+                    '(("ledger totals" "report.py") ("merged one" "report.py"))))
+     (should (string-match-p "^ledger totals also changes report\\.py$" (funcall panel)))
+     ;; Its own work merged, only what it changes since.
+     (should-not (roost--overlaps (roost--cache-task "dev" (roost-test--conflicted '(conflicts) '(landed . t)))))
+     (should (equal (mapcar #'cdr (roost--overlaps
+                                   (roost--cache-task "dev" (roost-test--conflicted
+                                                             '(conflicts) '(landed . t) '(dirty . t)
+                                                             '(files ((path . "report.py") (uncommitted . t))
+                                                                     ((path . "ledger.py")))))))
+                    '(("report.py") ("report.py"))))
+     (setq task (roost--cache-task "dev" (roost-test--conflicted '(conflicts))))
+     (dotimes (n 4)
+       (funcall other (format "%016d" (+ 5 n)) (format "more %d" n) "/home/user/ledger"
+                `(files ,(funcall file "ledger.py"))))
+     (should (string-match-p "^ledger totals also changes report\\.py\nmerged one also changes report\\.py\nmore 0 also changes ledger\\.py\n3 more tasks change them too$"
+                             (funcall panel))))))
+
 (ert-deftest roost-a-pull-request-is-yours-only-once-github-knows-the-agent-s-work ()
   (roost-test--isolated
    (let ((status (lambda (&rest fields)
@@ -4764,8 +4886,17 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
      (should (equal (funcall status '(mergeable . "UNKNOWN")) "ready"))
      (should (equal (funcall status '(review . "REVIEW_REQUIRED")) "ready"))
      (should (equal (funcall status '(review . "CHANGES_REQUESTED")) "ready"))
-     (should (equal (funcall status '(mergeable . "CONFLICTING")) "ready"))
+     ;; A conflict waits on you, before checks that may never run.
+     (should (equal (funcall status '(mergeable . "CONFLICTING")) "conflicts"))
+     ;; Not of commits the pull request lacks, or might.
+     (dolist (unpushed '(2 nil))
+       (should (equal (roost--display-status
+                       (roost--cache-task "dev" (append `((unpushed . ,unpushed))
+                                                        (roost-test--turn-task '(mergeable . "CONFLICTING")))))
+                      "ready")))
      (should (equal (funcall step '(mergeable . "CONFLICTING"))
+                    "#12 conflicts with the branch it merges into: e tells its agent, P opens it"))
+     (should (equal (funcall step '(mergeable . "CONFLICTING") '(checks . ((passing . 0) (failing . 0) (pending . 1))))
                     "#12 conflicts with the branch it merges into: e tells its agent, P opens it"))
      (should (equal (funcall status '(state . "MERGED")) "ready"))
      (should (equal (funcall status '(state . "CLOSED")) "ready")))

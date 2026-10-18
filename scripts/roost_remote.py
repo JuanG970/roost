@@ -9,6 +9,7 @@ import contextlib
 import datetime
 import errno
 import fcntl
+import functools
 import hashlib
 import heapq
 import json
@@ -43,7 +44,7 @@ ACTIVE = ("starting", "running", "permission", "background")
 ENDED = ("stopped", "exited", "failed", "crashed")
 # Computed per request and never persisted in a task record.
 TRANSIENT = ("live", "diff", "dirty", "files", "ahead", "behind", "update", "worktreeMissing",
-             "prStatus", "unpushed", "lastMessage", "gitStamp", "agentWork", "merging", "landed")
+             "prStatus", "unpushed", "lastMessage", "gitStamp", "agentWork", "merging", "landed", "conflicts")
 LAST_MESSAGE_TAIL = 256 * 1024
 LAST_MESSAGE_LIMIT = 2000
 INTERRUPT_TAIL = 64 * 1024
@@ -1445,6 +1446,36 @@ def changed_files(worktree, base, uncommitted=frozenset(), limit=50):
     return files[:limit]
 
 
+@functools.lru_cache(maxsize=None)
+def merges_without_checkout():
+    """Whether this host's Git merges without a working tree."""
+    # As every Git call in a measurement, though this one takes no lock.
+    return (version_of(execute(["git", "--no-optional-locks", "--version"], check=False).stdout)
+            or (0, 0)) >= MERGE_TREE_GIT
+
+
+def merge_conflicts(task, tip, integration):
+    """The files in which merging the task's branch, at TIP, into
+    INTEGRATION would conflict, as `m` would find them, its commits only;
+    empty when none would. None when Git can't tell without a working
+    tree, before 2.38, or either branch is gone. Measured whenever either
+    tip moves, since that moves the task's Git stamp."""
+    if not tip or not merges_without_checkout():
+        return None
+    repo = task["repo"]
+    into = read_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + integration + "^{commit}")
+    if into.returncode:
+        return None
+    into = into.stdout.strip()
+    if is_ancestor(repo, tip, into) or is_ancestor(repo, into, tip):
+        return []  # Merged, or nothing to merge it with.
+    result = read_git(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", into, tip)
+    if result.returncode == 1:
+        # The new tree, then each file in conflict.
+        return [path for path in result.stdout.split("\0")[1:] if path]
+    return [] if result.returncode == 0 else None
+
+
 def git_stamp(task):
     """When the task's Git state last moved, from file times alone: commits,
     staging, resets and checkouts in its worktree, and moves of its
@@ -1519,6 +1550,10 @@ def add_git_stats(tasks):
                              "refs/heads/" + integration + "..HEAD", "--")
             if behind.returncode == 0 and ahead.returncode == 0:
                 task["behind"], task["ahead"] = int(behind.stdout), int(ahead.stdout)
+        # GitHub says whether an open pull request conflicts, and work
+        # merged already has nothing left to conflict.
+        task["conflicts"] = (None if not integration or pr.get("state") == "OPEN"
+                             else [] if task["landed"] else merge_conflicts(task, tip, integration))
 
 
 def stop(store, task, inventory=None):
@@ -3253,15 +3288,19 @@ def rpc(request):
             # a merge, leave no trace here.
             full = request.get("full")
             measured = result if full is True else [t for t in result if isinstance(full, list) and t["id"] in full]
+            was_open = {t["id"] for t in result if recorded_pull_request(t).get("state") == "OPEN"}
             checked = check_pull_requests(store, result) if full is True or request.get("pullRequests") else []
             add_git_stats(measured)
             for task in checked:
                 # Merged since, or with its pull request open, it is
                 # measured whole, or its cleanliness would be older than the
                 # news that it can be retired, or merged: an edit not yet
-                # staged moves no Git stamp.
+                # staged moves no Git stamp. One whose pull request closed
+                # is too, as GitHub no longer says whether it conflicts.
                 if "landed" not in task:
-                    if landed(task, branch_tip(task)) or (task.get("prStatus") or {}).get("state") == "OPEN":
+                    state = (task.get("prStatus") or {}).get("state")
+                    if (landed(task, branch_tip(task)) or state == "OPEN"
+                            or (task["id"] in was_open and state not in (None, "OPEN"))):
                         add_git_stats([task])
                     else:
                         task["landed"] = False
