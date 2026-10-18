@@ -22,11 +22,10 @@ Magit.
 
 Small, and probably worth the most.
 
-- **0.9, and MELPA.** Release what has landed since 0.8.1 as 0.9, with a
-  short list of what to do when upgrading, then send tmux-control to MELPA,
-  and Roost after it; see [the recipes](melpa.md). This comes before the
-  features below: a release on MELPA is how other people's feedback
-  arrives.
+- **Ready for MELPA.** Keep tmux-control and Roost passing MELPA's checks,
+  with [the recipes and their status](melpa.md) current, and send them,
+  tmux-control first, once people ask for them there. Features don't wait
+  for it.
 - **[When a merge is your turn](#when-a-merge-is-your-turn)**, its first
   three parts: a pull request waiting on you counts as waiting, conflicts
   before merge time, and what changed since you last looked.
