@@ -21,15 +21,33 @@ happened in a section below:
    back its terminal and panel.
 5. Take a host away: the dashboard says it is unreachable and shows its last
    known state, and catches up once it is back.
-6. Two tasks that change the same lines: merge one, then `u` in the other
-   brings the conflict into its worktree for its agent to resolve, and `m`
-   merges it.
+6. Two tasks that change the same lines: each panel names the other task.
+   Merge one, and the other says `conflicts`, naming the file, before you
+   press `m`; on a remote host too. `u` in it brings the conflict into its
+   worktree for its agent to resolve, and `m` merges it.
 7. `P` opens a pull request; while its checks run and Copilot reviews it, the
    panel says so, and once they pass, the sidebar says `to merge` and `n`
    reaches it. Once it merges on GitHub, `x` retires the task. So does one
    the agent opens itself, and the sidebar then says `merged`.
 8. Narrow and widen the frame, and open a second one: the sidebar and panel
    follow.
+
+## Conflicts before merge time — 2026-10-17
+
+- **`make qa`.** 147 steps, none with problems, with Git 2.54. The new
+  journey: two tasks commit one file and each panel names the other; once
+  one merges, the other says `conflicts` in the sidebar and "Conflicts with
+  main in SHARED.md" in its panel, with main untouched; `u` brings the
+  conflict into its worktree, aborting it brings the warning back, and
+  resolving it clears it.
+- **`n` beside a blocked task.** The first full run left that journey's task
+  in `conflicts`, and the pull request journey's `n` then never reached its
+  `to merge` task: with one task asking for permission, `n` goes back and
+  forth between it and the next waiting task only. The journey now resolves
+  its conflict; `n` itself is a separate fix.
+- **Not checked live:** a pull request GitHub finds conflicting. Its
+  `mergeable` comes from the query #60 checked live; only the status word
+  is new.
 
 ## A pull request waiting on you — 2026-10-16
 

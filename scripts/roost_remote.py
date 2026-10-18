@@ -9,6 +9,7 @@ import contextlib
 import datetime
 import errno
 import fcntl
+import functools
 import hashlib
 import heapq
 import json
@@ -43,7 +44,7 @@ ACTIVE = ("starting", "running", "permission", "background")
 ENDED = ("stopped", "exited", "failed", "crashed")
 # Computed per request and never persisted in a task record.
 TRANSIENT = ("live", "diff", "dirty", "files", "ahead", "behind", "update", "worktreeMissing",
-             "prStatus", "unpushed", "lastMessage", "gitStamp", "agentWork", "merging", "landed")
+             "prStatus", "unpushed", "lastMessage", "gitStamp", "agentWork", "merging", "landed", "conflicts")
 LAST_MESSAGE_TAIL = 256 * 1024
 LAST_MESSAGE_LIMIT = 2000
 INTERRUPT_TAIL = 64 * 1024
@@ -1445,6 +1446,34 @@ def changed_files(worktree, base, uncommitted=frozenset(), limit=50):
     return files[:limit]
 
 
+@functools.lru_cache(maxsize=None)
+def merges_without_checkout():
+    """Whether this host's Git merges without a working tree."""
+    return (version_of(execute(["git", "--version"], check=False).stdout) or (0, 0)) >= MERGE_TREE_GIT
+
+
+def merge_conflicts(task, tip, integration):
+    """The files in which merging the task's branch, at TIP, into
+    INTEGRATION would conflict, as `m` would find them, its commits only;
+    empty when none would. None when Git can't tell without a working
+    tree, before 2.38, or either branch is gone. Measured whenever either
+    tip moves, since that moves the task's Git stamp."""
+    if not tip or not merges_without_checkout():
+        return None
+    repo = task["repo"]
+    into = read_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + integration + "^{commit}")
+    if into.returncode:
+        return None
+    into = into.stdout.strip()
+    if is_ancestor(repo, tip, into) or is_ancestor(repo, into, tip):
+        return []  # Merged, or nothing to merge it with.
+    result = read_git(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", into, tip)
+    if result.returncode == 1:
+        # The new tree, then each file in conflict.
+        return [path for path in result.stdout.split("\0")[1:] if path]
+    return [] if result.returncode == 0 else None
+
+
 def git_stamp(task):
     """When the task's Git state last moved, from file times alone: commits,
     staging, resets and checkouts in its worktree, and moves of its
@@ -1519,6 +1548,9 @@ def add_git_stats(tasks):
                              "refs/heads/" + integration + "..HEAD", "--")
             if behind.returncode == 0 and ahead.returncode == 0:
                 task["behind"], task["ahead"] = int(behind.stdout), int(ahead.stdout)
+        # GitHub says whether an open pull request conflicts.
+        task["conflicts"] = (merge_conflicts(task, tip, integration)
+                             if integration and pr.get("state") != "OPEN" else None)
 
 
 def stop(store, task, inventory=None):
