@@ -1449,7 +1449,9 @@ def changed_files(worktree, base, uncommitted=frozenset(), limit=50):
 @functools.lru_cache(maxsize=None)
 def merges_without_checkout():
     """Whether this host's Git merges without a working tree."""
-    return (version_of(execute(["git", "--version"], check=False).stdout) or (0, 0)) >= MERGE_TREE_GIT
+    # As every Git call in a measurement, though this one takes no lock.
+    return (version_of(execute(["git", "--no-optional-locks", "--version"], check=False).stdout)
+            or (0, 0)) >= MERGE_TREE_GIT
 
 
 def merge_conflicts(task, tip, integration):
