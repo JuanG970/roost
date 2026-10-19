@@ -244,7 +244,7 @@ class Store:
             task = json.loads(self.path(task_id).read_text())
         except FileNotFoundError:
             raise RoostError("Task no longer exists: " + task_id)
-        # Every action reads the branch an older helper's record merges into as merges do.
+        # An older helper's record may name its integration branch heads/X.
         recorded_integration(task)
         return task
 
@@ -904,7 +904,7 @@ def integration_for(store, repo, directory, base, current):
                        if task.get("repo") == repo and task.get("branch") == branch), None)
         if source:
             # Empty when that task started with the primary checkout detached.
-            recorded = recorded_integration(source)
+            recorded = source.get("integrationBranch")
             return current if recorded is None else recorded
         return branch
     # Remote names may hold slashes, so take the longest that fits.
@@ -1772,10 +1772,10 @@ MERGE_TREE_GIT = (2, 38)  # `git merge-tree --write-tree`
 
 
 def recorded_integration(task):
-    """The task's integration branch. Records without integrationRef come
-    from older helpers, which wrote heads/X when a tag was also named X:
-    that reads as X while a branch and a tag X exist and no branch heads/X
-    does, for this and the checks that follow."""
+    """The task's integration branch, as the store reads every record.
+    Records without integrationRef come from older helpers, which wrote
+    heads/X when a tag was also named X: that reads as X while a branch and
+    a tag X exist and no branch heads/X does."""
     branch = task.get("integrationBranch")
     if (isinstance(branch, str) and branch.startswith("heads/") and "integrationRef" not in task
             and isinstance(task.get("repo"), str)):
@@ -1790,7 +1790,7 @@ def integration_branch(task):
     """The task's integration branch, and whether the primary checkout has it
     checked out. Otherwise Git merges into it without a working tree, which
     needs Git 2.38, as long as no other worktree has it checked out."""
-    branch = recorded_integration(task)
+    branch = task.get("integrationBranch")
     repo = task["repo"]
     if not branch:
         raise RoostError("The task has no integration branch (it was created from a detached HEAD); merge it manually, then retire")
@@ -2052,7 +2052,7 @@ def push_pull_request(store, task):
 def pull_request(store, task, request):
     """Push the task branch and open a pull request. Runs without the registry
     lock, because pushing and talking to GitHub are slow."""
-    integration = recorded_integration(task)
+    integration = task.get("integrationBranch")
     if not integration:
         raise RoostError("The task has no integration branch (it was created from a detached HEAD) to open a pull request against")
     title = text(request.get("title"))
@@ -2090,7 +2090,7 @@ def update(store, task):
     """Merge the integration branch into the task's worktree, so the task can
     be brought up to date and its conflicts resolved there, not in the
     primary checkout. Conflicts leave the merge in progress in the worktree."""
-    integration = recorded_integration(task)
+    integration = task.get("integrationBranch")
     if not integration:
         raise RoostError("The task has no integration branch to update from")
     require_finished(task, owned_pane(task, inventory_for(task)))

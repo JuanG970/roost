@@ -10,9 +10,10 @@ Since 0.9.0:
   the `↑`/`↓` counts use it, and the new task draft says "merges into
   release" next to the starting ref, as does `m`'s question. A
   remote-tracking branch such as `origin/release` gives the local
-  `release`, made to track it if there is none. Before, every task merged into the branch the primary checkout had
-  checked out, whatever it started from. Tasks you already have keep the
-  branch they recorded; nothing to do when upgrading.
+  `release`, made to track it if there is none. Before, every task merged
+  into the branch the primary checkout had checked out, whatever it
+  started from. Tasks you already have keep the branch they recorded;
+  nothing to do when upgrading.
 - `n` reaches every waiting task while one asks for permission or is
   stuck at a startup prompt, going back to that one between each of the
   others. Before, it went back and forth between that task and one
