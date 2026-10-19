@@ -807,10 +807,10 @@ export const RoostObserver = async () => {
     waiting.set(id, [session, { child: children.has(session), ...extra }]);
     return report("asked", session, waiting.get(id)[1]);
   };
-  // OpenCode can say a session idles twice as a turn ends; one is its end.
-  const busy = new Set();
-  let reply = { message: undefined, parts: new Map() };
-  let failure, declined;
+  // Each session's turn, as several can run at once: its reply, and
+  // whether it failed or you declined what it asked. OpenCode can say a
+  // session idles twice as a turn ends; one is its end.
+  const turns = new Map();
   report("start");
   return {
     event: async ({ event }) => {
@@ -825,33 +825,30 @@ export const RoostObserver = async () => {
           return;
         case "message.part.updated": {
           const part = p.part || {};
-          if (part.type !== "text" || part.synthetic || part.ignored || children.has(part.sessionID)
-              || !assistant.has(part.messageID)) return;
-          if (reply.message !== part.messageID) reply = { message: part.messageID, parts: new Map() };
-          reply.parts.set(part.id, part.text);
+          const turn = turns.get(part.sessionID);
+          if (part.type !== "text" || part.synthetic || part.ignored || !turn || !assistant.has(part.messageID)) return;
+          if (turn.message !== part.messageID) Object.assign(turn, { message: part.messageID, parts: new Map() });
+          turn.parts.set(part.id, part.text);
           // It replied after all, as OpenCode can be set to when you decline.
-          declined = false;
+          turn.declined = false;
           return;
         }
         case "session.error":
-          if (!children.has(p.sessionID) && p.error) failure = p.error;
+          if (turns.has(p.sessionID) && p.error) turns.get(p.sessionID).failure = p.error;
           return;
         case "session.status": {
           if (children.has(p.sessionID) || !p.status) return;
+          const turn = turns.get(p.sessionID);
           if (p.status.type !== "idle") {
-            if (!busy.has(p.sessionID)) {
-              // A new turn: what the last one said and how it ended are past.
-              reply = { message: undefined, parts: new Map() };
-              failure = declined = undefined;
-            }
-            busy.add(p.sessionID);
+            if (!turn) turns.set(p.sessionID, { parts: new Map() });
             return report("status", p.sessionID, { status: p.status.type });
           }
-          if (!busy.delete(p.sessionID)) return;
-          const ended = { status: "idle", reply: [...reply.parts.values()].join("\n\n"), declined,
-                          error: failure && { name: failure.name, message: failure.data && failure.data.message } };
-          failure = declined = undefined;
-          return report("status", p.sessionID, ended);
+          if (!turn) return;
+          turns.delete(p.sessionID);
+          const failure = turn.failure;
+          return report("status", p.sessionID, { status: "idle", reply: [...turn.parts.values()].join("\n\n"),
+            declined: turn.declined,
+            error: failure && { name: failure.name, message: failure.data && failure.data.message } });
         }
         case "permission.asked":
           return ask(p.id, p.sessionID, { permission: p.permission, patterns: p.patterns, metadata: {
@@ -863,8 +860,8 @@ export const RoostObserver = async () => {
         case "question.replied":
         case "question.rejected": {
           waiting.delete(p.requestID);
-          if ((event.type === "question.rejected" || p.reply === "reject") && !children.has(p.sessionID)) {
-            declined = true;
+          if ((event.type === "question.rejected" || p.reply === "reject") && turns.has(p.sessionID)) {
+            turns.get(p.sessionID).declined = true;
           }
           // Answered one of several, what still waits is the newest of the rest.
           const rest = [...waiting.values()].pop();

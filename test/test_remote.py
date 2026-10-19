@@ -3851,7 +3851,15 @@ class ProgramStatus(unittest.TestCase):
                 ("permission.asked", dict(id="r1", sessionID="ses_a", permission="bash", patterns=["date"],
                                           metadata=dict(command="date"))),
                 ("permission.replied", dict(requestID="r1", sessionID="ses_a", reply="reject")),
-                status("ses_a", "idle")]
+                status("ses_a", "idle"),
+                # Turns in two sessions at once keep what each said and how it ended.
+                status("ses_a", "busy"),
+                ("message.updated", dict(info=dict(id="msg_x", role="assistant"))),
+                text("p9", "msg_x", "A is done."),
+                status("ses_b", "busy"),
+                ("session.error", dict(sessionID="ses_b", error=dict(name="APIError", data=dict(message="B failed")))),
+                status("ses_a", "idle"),
+                status("ses_b", "idle")]
             driver = root / "driver.mjs"
             driver.write_text(
                 "const { RoostObserver } = await import(%s);\n"
@@ -3867,7 +3875,11 @@ class ProgramStatus(unittest.TestCase):
                               ("replied", "ses_c", None), ("status", "ses_a", "idle"),
                               ("status", "ses_a", "busy"), ("status", "ses_a", "idle"),
                               ("status", "ses_a", "busy"), ("asked", "ses_a", None), ("replied", "ses_a", None),
-                              ("status", "ses_a", "idle")])
+                              ("status", "ses_a", "idle"),
+                              ("status", "ses_a", "busy"), ("status", "ses_b", "busy"),
+                              ("status", "ses_a", "idle"), ("status", "ses_b", "idle")])
+            self.assertEqual((reports[15]["reply"], reports[15].get("error")), ("A is done.", None))
+            self.assertEqual((reports[16]["reply"], reports[16]["error"]), ("", dict(name="APIError", message="B failed")))
             self.assertEqual((reports[2]["child"], reports[2]["questions"]), (True, [dict(question="Which?")]))
             self.assertEqual(reports[4], reports[2])
             self.assertEqual(reports[6]["reply"], "Done.\n\nAll done.")
