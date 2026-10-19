@@ -12,6 +12,14 @@ Since 0.9.0:
   inline config, beside your own config. Roost also looks for agents in
   `~/.opencode/bin`, where OpenCode's installer puts it. If you set
   `roost-agent-commands` yourself, add `("opencode" "opencode")` to use it.
+- A task started from a branch merges into that branch: `m`, `u`, `P` and
+  the `↑`/`↓` counts use it, and the new task draft says "merges into
+  release" next to the starting ref, as does `m`'s question. A
+  remote-tracking branch such as `origin/release` gives the local
+  `release`, made to track it if there is none. Before, every task merged
+  into the branch the primary checkout had checked out, whatever it
+  started from. Tasks you already have keep the branch they recorded;
+  nothing to do when upgrading.
 - `n` reaches every waiting task while one asks for permission or is
   stuck at a startup prompt, going back to that one between each of the
   others. Before, it went back and forth between that task and one
