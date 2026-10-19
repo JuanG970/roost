@@ -1243,7 +1243,9 @@ class Lifecycle(unittest.TestCase):
                              ("opencode", ["run", "x"]), ("opencode", ["--fork"]), ("opencode", ["--pure"]),
                              # A project folder would take the agent out of the task's worktree.
                              ("opencode", [str(self.repo)]),
-                             ("opencode", ["--model", "lmstudio/qwen", "--port=0", str(self.repo)])):
+                             ("opencode", ["--model", "lmstudio/qwen", "--port=0", str(self.repo)]),
+                             # Roost's options, after it, would be no options.
+                             ("opencode", ["--"]), ("opencode", ["--port", "4096", "--", "anything"])):
             with self.subTest(agent=agent, flags=flags):
                 reply = self.request("create", directory=str(self.repo), name="bad", socket=self.socket,
                                      agent=agent, command=[agent, *flags])
@@ -1251,13 +1253,16 @@ class Lifecycle(unittest.TestCase):
                 self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
         # Options' values are no project folder.
         for flags in (["--model", "lmstudio/qwen", "--agent", "plan"], ["-m", "x", "--cors", "a", "b", "--mini"],
-                      ["--port", "4096", "--", "anything"], ["--log-level=DEBUG", "--hostname", "localhost"]):
+                      ["--log-level=DEBUG", "--hostname", "localhost"]):
             with self.subTest(flags=flags):
                 roost.OpenCodeAgent().validate(["opencode", *flags])
-        # Its arguments follow its name, as when a wrapper starts it.
+        # Its arguments follow its name, as when a wrapper starts it, and a
+        # project folder named like it is still a project folder.
         roost.OpenCodeAgent().validate(["npx", "opencode-ai", "--model", "x"])
-        with self.assertRaises(roost.RoostError):
-            roost.OpenCodeAgent().validate(["npx", "opencode-ai", str(self.repo)])
+        for command in (["npx", "opencode-ai", str(self.repo)], ["opencode", "/tmp/opencode-project"],
+                        ["npx", "opencode-ai", "/tmp/opencode-project"]):
+            with self.subTest(command=command), self.assertRaises(roost.RoostError):
+                roost.OpenCodeAgent().validate(command)
 
     def test_pi_queued_work_is_background_and_codex_interrupt_is_ready(self):
         self.assertEqual(roost.PiAgent().observe(dict(event="agent_end", pending=True))["status"], "background")

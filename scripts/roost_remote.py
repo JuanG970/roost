@@ -897,11 +897,12 @@ class OpenCodeAgent:
         # Anything else that isn't an option's value is a subcommand, or a
         # project folder in place of the task's worktree. OpenCode's own
         # arguments follow its name, as in npx opencode-ai or env X=1 opencode.
-        named = [i for i, arg in enumerate(command) if os.path.basename(arg).startswith("opencode")]
+        named = next((i for i, arg in enumerate(command) if os.path.basename(arg).startswith("opencode")), 0)
         taking = None
-        for arg in command[(named[-1] if named else 0) + 1:]:
+        for arg in command[named + 1:]:
             if arg == "--":
-                break
+                # Roost's own options, added after these, would be no options.
+                raise RoostError("Roost adds options after OpenCode's command; remove --")
             if arg.startswith("-"):
                 name = arg.split("=", 1)[0]
                 taking = None if "=" in arg else "one" if name in self.valued else "all" if name in self.listed else None
