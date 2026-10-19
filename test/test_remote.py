@@ -1990,6 +1990,24 @@ elif args[:2] == ["auth", "status"]:
         self.assertEqual(again["result"]["pr"]["number"], 3)
         self.assertFalse([call for call in self.gh_calls()[before:] if call[:2] == ["pr", "create"]])
 
+    def test_pr_from_an_older_helpers_task_targets_the_branch_it_lists(self):
+        # Older helpers recorded heads/release, when a tag was also named release.
+        self.github()
+        self.git("branch", "release")
+        self.git("tag", "release")
+        task = self.create(name="on release", base="heads/release")
+        self.commit_in(task)
+        store = roost.Store(str(self.state))
+        record = store.read(task["id"])
+        record["integrationBranch"] = "heads/release"
+        del record["integrationRef"]
+        store.save(record)
+        listed = next(t for t in self.request("list")["result"] if t["id"] == task["id"])
+        self.assertEqual(listed["integrationBranch"], "release")
+        reply = self.request("pr", id=task["id"], title="Fix it")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.gh_calls()[-1][:4], ["pr", "create", "--base", "release"])
+
     def test_pr_without_draft_and_refusals(self):
         self.github()
         task = self.create()

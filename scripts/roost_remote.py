@@ -2048,7 +2048,7 @@ def push_pull_request(store, task):
 def pull_request(store, task, request):
     """Push the task branch and open a pull request. Runs without the registry
     lock, because pushing and talking to GitHub are slow."""
-    integration = task.get("integrationBranch")
+    integration = recorded_integration(task)
     if not integration:
         raise RoostError("The task has no integration branch (it was created from a detached HEAD) to open a pull request against")
     title = text(request.get("title"))
