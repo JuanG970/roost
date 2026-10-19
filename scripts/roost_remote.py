@@ -774,12 +774,218 @@ class PiAgent:
         return last_assistant_text(transcript_tail(session), extract)
 
 
+OPENCODE_PLUGIN = r'''import { spawn } from "node:child_process";
+export const RoostObserver = async () => {
+  const send = payload => new Promise(resolve => {
+    const child = spawn(process.env.ROOST_PYTHON, [process.env.ROOST_HELPER, "hook-env"],
+      { stdio: ["pipe", "ignore", "ignore"] });
+    const timer = setTimeout(() => { child.kill(); resolve(); }, 3000);
+    const done = () => { clearTimeout(timer); resolve(); };
+    child.on("error", done);
+    child.on("close", done);
+    child.stdin.on("error", () => {});
+    child.stdin.end(payload);
+  });
+  // Each report waits for the one before, so the helper reads them in order.
+  let reported = Promise.resolve();
+  const report = (event, session, extra = {}) => {
+    const payload = JSON.stringify({ event, session, ...extra });
+    return reported = reported.then(() => send(payload));
+  };
+  // Subagents run in sessions of their own: their questions wait on you
+  // too, but their turns are not the task's.
+  const children = new Set();
+  const assistant = new Set();
+  const waiting = new Set();
+  // OpenCode can say a session idles twice as a turn ends; one is its end.
+  const busy = new Set();
+  let reply = { message: undefined, parts: new Map() };
+  let failure, declined;
+  report("start");
+  return {
+    event: async ({ event }) => {
+      const p = event.properties || {};
+      switch (event.type) {
+        case "session.created":
+        case "session.updated":
+          if (p.info && p.info.parentID) children.add(p.info.id);
+          return;
+        case "message.updated":
+          if (p.info && p.info.role === "assistant") assistant.add(p.info.id);
+          return;
+        case "message.part.updated": {
+          const part = p.part || {};
+          if (part.type !== "text" || part.synthetic || part.ignored || children.has(part.sessionID)
+              || !assistant.has(part.messageID)) return;
+          if (reply.message !== part.messageID) reply = { message: part.messageID, parts: new Map() };
+          reply.parts.set(part.id, part.text);
+          // It replied after all, as OpenCode can be set to when you decline.
+          declined = false;
+          return;
+        }
+        case "session.error":
+          if (!children.has(p.sessionID) && p.error) failure = p.error;
+          return;
+        case "session.status": {
+          if (children.has(p.sessionID) || !p.status) return;
+          if (p.status.type !== "idle") {
+            if (!busy.has(p.sessionID)) {
+              // A new turn: what the last one said and how it ended are past.
+              reply = { message: undefined, parts: new Map() };
+              failure = declined = undefined;
+            }
+            busy.add(p.sessionID);
+            return report("status", p.sessionID, { status: p.status.type });
+          }
+          if (!busy.delete(p.sessionID)) return;
+          const ended = { status: "idle", reply: [...reply.parts.values()].join("\n\n"), declined,
+                          error: failure && { name: failure.name, message: failure.data && failure.data.message } };
+          failure = declined = undefined;
+          return report("status", p.sessionID, ended);
+        }
+        case "permission.asked":
+          waiting.add(p.id);
+          return report("asked", p.sessionID, { child: children.has(p.sessionID),
+            permission: p.permission, patterns: p.patterns, metadata: {
+              command: p.metadata && p.metadata.command, filepath: p.metadata && p.metadata.filepath,
+              url: p.metadata && p.metadata.url } });
+        case "question.asked":
+          waiting.add(p.id);
+          return report("asked", p.sessionID, { child: children.has(p.sessionID),
+            questions: (p.questions || []).map(q => ({ question: q.question })) });
+        case "permission.replied":
+        case "question.replied":
+        case "question.rejected":
+          waiting.delete(p.requestID);
+          if ((event.type === "question.rejected" || p.reply === "reject") && !children.has(p.sessionID)) {
+            declined = true;
+          }
+          return report("replied", p.sessionID, { child: children.has(p.sessionID), waiting: waiting.size });
+      }
+    },
+  };
+};
+'''
+
+
+class OpenCodeAgent:
+    """Observe OpenCode through a plugin named in its inline config, leaving
+    the user's own config, plugins and permissions as they are."""
+
+    default_command = ["opencode"]
+    # Its sessions say when they work and when they idle, and what ended a turn.
+    reports_turns = True
+    subcommands = {"acp", "agent", "attach", "auth", "console", "db", "debug", "export", "generate",
+                   "github", "import", "mcp", "models", "plugin", "pr", "providers", "run", "serve",
+                   "session", "stats", "uninstall", "upgrade", "web"}
+
+    def validate(self, command):
+        validate_command(command, "OpenCode")
+        reserved = {"--session", "-s", "--continue", "-c", "--fork", "--prompt"}
+        if ((len(command) > 1 and command[1] in self.subcommands)
+                or any(arg.split("=", 1)[0] in reserved for arg in command[1:])):
+            raise RoostError("Roost owns OpenCode's session and first prompt; use interactive TUI options only")
+
+    def plugin(self, store):
+        path = store.root / ("opencode-observer-" + hashlib.sha256(OPENCODE_PLUGIN.encode()).hexdigest()[:16] + ".js")
+        if not path.exists():
+            atomic_text(path, OPENCODE_PLUGIN)
+        return path
+
+    def launch(self, store, task, resume_conversation):
+        self.plugin(store)
+        argv = list(task["command"])
+        if resume_conversation and task.get("agentSession"):
+            argv += ["--session", task["agentSession"]]
+        elif text(task.get("prompt")):
+            # Joined to its flag, a prompt starting with - stays a prompt.
+            argv.append("--prompt=" + task["prompt"])
+        return argv
+
+    def environment(self, store, env):
+        """The inline config that loads the plugin, added to any the user set:
+        OpenCode merges it over their files rather than in place of them."""
+        config = {}
+        if env.get("OPENCODE_CONFIG_CONTENT"):
+            try:
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+            except ValueError:
+                config = None
+            if not isinstance(config, dict):
+                raise RoostError("Roost adds its observer to OPENCODE_CONFIG_CONTENT, which must be a JSON object")
+        plugins = config.get("plugin") if isinstance(config.get("plugin"), list) else []
+        config["plugin"] = plugins + [self.plugin(store).as_uri()]
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+
+    def request(self, payload):
+        """What a question or permission request asks, in Roost's words."""
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        patterns = [p for p in payload.get("patterns") or [] if isinstance(p, str) and p]
+        permission = payload.get("permission") if isinstance(payload.get("permission"), str) else None
+        if isinstance(payload.get("questions"), list):
+            return permission_request(dict(tool_name="AskUserQuestion", tool_input=payload))
+        # Its patterns are a command's, or paths in the worktree.
+        tool, field, value = {
+            "bash": ("Bash", "command", metadata.get("command") or " ".join(patterns)),
+            "edit": ("Edit", "file_path", patterns[0] if patterns else None),
+            "read": ("Read", "file_path", patterns[0] if patterns else None),
+            "webfetch": ("WebFetch", "url", metadata.get("url")),
+        }.get(permission, (None, None, None))
+        if tool:
+            return permission_request(dict(tool_name=tool, tool_input={field: value}))
+        return one_line("Asks to use " + (permission.replace("_", " ") if permission else "a tool")
+                        + (" for " + patterns[0] if patterns else ""))
+
+    def observe(self, payload, current=None):
+        event = payload.get("event")
+        updates = dict(updatedAt=now())
+        if event == "start":
+            updates.update(status="ready", lastEvent="SessionStart")
+        elif event == "status" and payload.get("status") in ("busy", "retry"):
+            updates.update(status="running", lastEvent="Busy", error=None)
+            if current not in ("running", "permission"):
+                updates["lastReply"] = None
+        elif event == "status" and payload.get("status") == "idle":
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            reply = payload.get("reply")
+            if isinstance(reply, str) and reply.strip():
+                updates["lastReply"] = reply.strip()[:LAST_MESSAGE_LIMIT + 1]
+            name = error.get("name")
+            if name == "MessageAbortedError" or (payload.get("declined") is True and not name):
+                # You stopped the turn with Esc, or declined what it asked.
+                updates.update(status="ready", lastEvent="Interrupt", error=None)
+            elif isinstance(name, str) and name:
+                message = one_line(error["message"]) if isinstance(error.get("message"), str) else None
+                updates.update(status="failed", lastEvent="StopFailure",
+                               error="Its turn ended on an error (%s)" % name
+                               + (": " + message[:REQUEST_LIMIT] if message else ""))
+            else:
+                updates.update(status="ready", lastEvent="Stop", error=None)
+        elif event == "asked":
+            updates.update(status="permission", lastEvent="PermissionRequest" if current in ("running", "permission")
+                           else "Dialog", request=self.request(payload))
+        elif event == "replied" and current == "permission":
+            if payload.get("waiting"):
+                return None
+            # The turn goes on; if you declined, its end says so.
+            updates.update(status="running", lastEvent="Answered")
+        else:
+            return None
+        if isinstance(payload.get("session"), str) and payload["session"] and not payload.get("child"):
+            updates["agentSession"] = payload["session"]
+        return updates
+
+    def last_message(self, task):
+        # Its plugin reports each reply as the turn ends.
+        return None
+
+
 def validate_command(command, label):
     if not isinstance(command, list) or not command or not all(isinstance(x, str) and x for x in command):
         raise RoostError(label + " command must be a nonempty argument list")
 
 
-AGENTS = {"claude": ClaudeAgent(), "codex": CodexAgent(), "pi": PiAgent()}
+AGENTS = {"claude": ClaudeAgent(), "codex": CodexAgent(), "pi": PiAgent(), "opencode": OpenCodeAgent()}
 
 
 def agent_for(task):
@@ -2375,7 +2581,7 @@ def doctor(store, request):
     check("State directory", os.access(store.root, os.W_OK), str(store.root),
           None if os.access(store.root, os.W_OK) else "Make the directory writable")
     for agent, command in sorted((request.get("commands") or {}).items()):
-        label = agent.capitalize() if agent != "pi" else "Pi"
+        label = {"pi": "Pi", "opencode": "OpenCode"}.get(agent, agent.capitalize())
         if not isinstance(command, list) or not command or not isinstance(command[0], str):
             check(label, False, "no command configured", "Set roost-agent-commands")
             continue
@@ -2736,7 +2942,7 @@ def agent_path(inherited):
     inherited order means the agent sees the same tools as the task shell."""
     nvm_bins = sorted((Path.home() / ".nvm/versions/node").glob("*/bin"),
                       key=lambda p: tuple(int(n) for n in re.findall(r"\d+", p.parent.name)), reverse=True)
-    fallbacks = [str(Path.home() / ".local/bin"), str(Path.home() / "bin"),
+    fallbacks = [str(Path.home() / ".local/bin"), str(Path.home() / "bin"), str(Path.home() / ".opencode/bin"),
                  "/opt/homebrew/bin", "/usr/local/bin", *(str(path) for path in nvm_bins)]
     entries = [entry for entry in inherited.split(os.pathsep) if entry]
     return os.pathsep.join(entries + [entry for entry in fallbacks if entry not in entries])
@@ -3142,7 +3348,10 @@ def runner(root, task_id, run_id, resume_conversation=False):
             task = store.read(task_id)
             if task.get("runId") != run_id or task["status"] in ("stopped", "retired"):
                 return 0
-            argv = agent_for(task).launch(store, task, resume_conversation)
+            agent = agent_for(task)
+            argv = agent.launch(store, task, resume_conversation)
+            # What the agent alone needs in its environment, as to load an observer.
+            agent_env = dict(env, **(agent.environment(store, env) if hasattr(agent, "environment") else {}))
         setup = text(task.get("setup"))
         # Resume reruns setup only when the first run never finished it.
         if setup and (not resume_conversation or task.get("setupComplete") is False):
@@ -3155,11 +3364,11 @@ def runner(root, task_id, run_id, resume_conversation=False):
         if task.get("programStatus") and os.isatty(0):
             report, finish = program_status_recorder(store, task_id, run_id)
             try:
-                code = relay(argv, task["worktree"], env, report)
+                code = relay(argv, task["worktree"], agent_env, report)
             finally:
                 finish()
         else:
-            code = subprocess.call(argv, cwd=task["worktree"], env=env)
+            code = subprocess.call(argv, cwd=task["worktree"], env=agent_env)
     except (OSError, RoostError, subprocess.CalledProcessError) as exc:
         error = str(exc)
         print("Roost: " + error, file=sys.stderr)
