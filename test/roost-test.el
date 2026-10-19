@@ -6923,6 +6923,9 @@ With INITIAL, the box must start out holding it."
   ;; and the work an agent committed had no place in the status.
   (roost-test--with-magit-task
     (call-process "git" nil nil nil "branch" "-M" "main")
+    ;; An older tag of the branch's name, which Git would take for it.
+    (call-process "git" nil nil nil "tag" "main")
+    (call-process "git" nil nil nil "commit" "-q" "--allow-empty" "-m" "Already on main")
     (call-process "git" nil nil nil "checkout" "-qb" "task")
     (magit-status-setup-buffer dir)
     (with-current-buffer (magit-get-mode-buffer 'magit-status-mode)
@@ -6935,10 +6938,12 @@ With INITIAL, the box must start out holding it."
       (re-search-forward "^Unmerged into main")
       (let ((section (magit-current-section)))
         (should (eq (eieio-oref section 'type) 'unpushed))
-        (should (equal (eieio-oref section 'value) "main.."))
+        (should (equal (eieio-oref section 'value) "refs/heads/main.."))
         (should (= (length (eieio-oref section 'children)) 1))
+        (should-not (string-match-p "Already on main"
+                                    (buffer-substring (eieio-oref section 'start) (eieio-oref section 'end))))
         ;; RET on the heading shows the task's changes since it left main.
-        (should (equal (magit-diff--dwim) "main...")))
+        (should (equal (magit-diff--dwim) "refs/heads/main...")))
       (should (string-match-p "Add a line" (buffer-string))))
     (let ((roost-magit-status-sections nil))
       (with-current-buffer (magit-get-mode-buffer 'magit-status-mode)

@@ -2982,8 +2982,10 @@ their changes together.  See `roost-magit-status-sections'."
               ((stringp integration))
               ;; Magit shows the commits itself then.
               ((not (equal (magit-get-upstream-branch) integration)))
-              ((magit-rev-verify integration)))
-    (let ((range (concat integration "..")))
+              ;; The branch, not a tag of its name.
+              (ref (concat "refs/heads/" integration))
+              ((magit-rev-verify ref)))
+    (let ((range (concat ref "..")))
       (roost--magit-insert-section
        'unpushed range nil
        (lambda ()
