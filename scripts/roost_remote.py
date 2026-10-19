@@ -879,6 +879,30 @@ def task_name(value):
     return name
 
 
+def integration_for(store, repo, directory, base, current):
+    """The branch a task started at BASE merges into: the branch BASE
+    names, or for a remote-tracking branch the local one of its name, made
+    to track it as `git switch` would if there is none. A task's branch, as
+    HEAD in its worktree is, gives that task's. A tag, a commit or a
+    detached HEAD gives CURRENT, the primary checkout's branch."""
+    full = git(directory, "rev-parse", "--symbolic-full-name", base, check=False).stdout.strip()
+    if full.startswith("refs/heads/"):
+        branch = full[len("refs/heads/"):]
+        source = next((task for task in store.all()
+                       if task.get("repo") == repo and task.get("branch") == branch), None)
+        return (source.get("integrationBranch") or current) if source else branch
+    parts = full.split("/", 3)
+    if full.startswith("refs/remotes/") and len(parts) == 4 and parts[3] != "HEAD":
+        branch = parts[3]
+        if not ref_exists(repo, branch):
+            made = git(repo, "branch", "--track", branch, full, check=False)
+            if made.returncode:
+                raise RoostError("Could not make a local branch %s to merge into: %s"
+                                 % (branch, made.stderr.strip()))
+        return branch
+    return current
+
+
 def create(store, request):
     """Create a worktree and agent window. Preparation and `git worktree add`
     run without the registry lock; only the tmux spawn is serialized."""
@@ -897,11 +921,11 @@ def create(store, request):
     agent = agent_for(dict(agent=agent_name))
     command = request.get("command", agent.default_command)
     agent.validate(command)
-    integration = git(repo, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip()
+    current = git(repo, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip()
     # Independent tasks start at the primary checkout. HEAD only forks the
     # source worktree when explicitly requested, rather than accidentally.
     explicit_base = text(request.get("base"))
-    base = explicit_base or integration or "HEAD"
+    base = explicit_base or current or "HEAD"
     resolved = git(directory if explicit_base else repo, "rev-parse", "--verify", "--quiet", base + "^{commit}",
                    check=False)
     if resolved.returncode:
@@ -911,6 +935,8 @@ def create(store, request):
                              "(git commit --allow-empty -m 'Start' will do)" % repo)
         raise RoostError("No branch, tag or commit named %r to start from" % base)
     commit = resolved.stdout.strip()
+    integration = (integration_for(store, repo, directory, explicit_base, current) if explicit_base
+                   else current)
     task_id = uuid.uuid4().hex[:16]
     prefix = text(request.get("branchPrefix")) or DEFAULT_BRANCH_PREFIX
     branch = prefix + slug + "-" + task_id[:6]

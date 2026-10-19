@@ -69,7 +69,7 @@ class Lifecycle(unittest.TestCase):
         return roost.rpc(dict(root=str(self.state), action=action, **args))
 
     def create(self, **args):
-        reply = self.request("create", directory=str(self.repo), name=args.pop("name", "task"),
+        reply = self.request("create", directory=args.pop("directory", str(self.repo)), name=args.pop("name", "task"),
                              socket=self.socket, command=args.pop("command", [sys.executable, str(FAKE)]), **args)
         self.assertTrue(reply["ok"], reply)
         task = reply["result"]
@@ -888,6 +888,40 @@ class Lifecycle(unittest.TestCase):
         # The old session stays, with whatever else it holds.
         sessions = roost.tmux(self.socket, "list-sessions", "-F", "#{session_name}").stdout.split()
         self.assertEqual(sorted(sessions), sorted([shared, resumed["session"]]))
+
+    def test_a_task_merges_into_the_branch_it_starts_from(self):
+        self.git("branch", "release")
+        self.git("commit", "--allow-empty", "-m", "newer main")
+        release = self.create(name="on release", base="release")
+        self.assertEqual((release["integrationBranch"], release["baseRef"]), ("release", "release"))
+        self.assertEqual(release["baseCommit"], self.git("rev-parse", "release"))
+        # A fork, or a task started from another's branch, merges where that one does.
+        fork = self.create(name="fork", directory=release["worktree"], base="HEAD")
+        self.assertEqual(fork["integrationBranch"], "release")
+        stacked = self.create(name="stacked", base=release["branch"])
+        self.assertEqual(stacked["integrationBranch"], "release")
+        # A tag or commit merges into the primary checkout's branch.
+        self.git("tag", "v1", "release")
+        self.assertEqual(self.create(name="tagged", base="v1")["integrationBranch"], "main")
+        self.assertEqual(self.create(name="commit", base=self.git("rev-parse", "release"))["integrationBranch"],
+                         "main")
+
+    def test_a_remote_tracking_start_merges_into_its_local_branch(self):
+        remote = self.root / "remote.git"
+        roost.git(self.root, "clone", "-q", "--bare", str(self.repo), str(remote))
+        self.git("remote", "add", "origin", str(remote))
+        self.git("commit", "--allow-empty", "-m", "pushed")
+        self.git("push", "-q", "origin", "main:main", "main:release")
+        self.git("fetch", "-q", "origin")
+        self.git("reset", "-q", "--hard", "HEAD~1")
+        # Local main lags origin/main; the task starts from origin's and merges into main.
+        lagging = self.create(name="lagging", base="origin/main")
+        self.assertEqual(lagging["integrationBranch"], "main")
+        self.assertEqual(lagging["baseCommit"], self.git("rev-parse", "origin/main"))
+        # With no local release, Roost makes one that tracks origin's.
+        released = self.create(name="released", base="origin/release")
+        self.assertEqual(released["integrationBranch"], "release")
+        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "release@{upstream}"), "origin/release")
 
     def test_new_tasks_default_to_primary_branch_and_explicit_head_forks(self):
         first = self.create()

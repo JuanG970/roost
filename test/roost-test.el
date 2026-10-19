@@ -1394,7 +1394,8 @@
 
 (ert-deftest roost-new-task-defaults-to-primary-checkout-and-prefix-forks ()
   (roost-test--isolated
-   (roost--cache-task "dev" (append '((repo . "/home/user/repo")) (roost-test--task)))
+   (roost--cache-task "dev" (append '((repo . "/home/user/repo") (integrationBranch . "release"))
+                                    (roost-test--task)))
    (setq roost--current-task '("dev" "0123456789abcdef"))
    (let ((default-directory "/tmp/"))
      (save-window-excursion
@@ -1409,7 +1410,41 @@
              (with-current-buffer roost--compose-buffer
                (should (string-suffix-p ":/home/user/work/fix auth/" (plist-get roost--compose-fields :directory)))
                (should (equal (plist-get roost--compose-fields :base) "HEAD"))
-               (should (string-match-p "HEAD of fix auth  C-c C-b · fork: includes its commits" (buffer-string)))))
+               (should (string-match-p "HEAD of fix auth  C-c C-b · fork: includes its commits; merges into release"
+                                       (buffer-string)))))
+         (when (get-buffer roost--compose-buffer) (kill-buffer roost--compose-buffer)))))))
+
+(ert-deftest roost-compose-says-which-branch-a-start-merges-into ()
+  (roost-test--isolated
+   (roost--cache-task "dev" (append '((repo . "/repo") (integrationBranch . "release")) (roost-test--task)))
+   (let ((default-directory "/tmp/") answer)
+     (save-window-excursion
+       (unwind-protect
+           (cl-letf (((symbol-function 'process-file)
+                      (lambda (&rest _)
+                        (insert "refs/heads/main\nrefs/heads/codex/roost/fix-auth-123456\n"
+                                "refs/remotes/origin/HEAD\nrefs/remotes/origin/release/1.2\n")
+                        0))
+                     ((symbol-function 'completing-read) (lambda (&rest _) answer)))
+             (roost--compose)
+             (with-current-buffer roost--compose-buffer
+               (setq roost--compose-fields (plist-put roost--compose-fields :directory "/ssh:dev:/repo/"))
+               (dolist (case '(("main" . "main")
+                               ;; A remote-tracking branch merges into its local one.
+                               ("origin/release/1.2" . "release/1.2")
+                               ;; A task's branch merges where that task does.
+                               ("codex/roost/fix-auth-123456" . "release")
+                               ("v1.0" . "the primary checkout's branch")
+                               ("origin/HEAD" . "the primary checkout's branch")))
+                 (setq answer (car case))
+                 (roost-compose-set-base)
+                 (should (string-match-p (concat "Start    " (regexp-quote (car case))
+                                                 "  C-c C-b · merges into " (regexp-quote (cdr case)) "$")
+                                         (buffer-string))))
+               (setq answer "")
+               (roost-compose-set-base)
+               (should (string-match-p "Start    primary checkout's current branch  C-c C-b$"
+                                       (buffer-string)))))
          (when (get-buffer roost--compose-buffer) (kill-buffer roost--compose-buffer)))))))
 
 (ert-deftest roost-compose-derives-a-name-and-submits-the-draft ()
@@ -5905,7 +5940,8 @@ ssh: connect to host dev port 22: Operation timed out"
 
 (ert-deftest roost-merge-style-squashes-unless-asked-to-merge ()
   (roost-test--isolated
-   (let ((task (roost--cache-task "dev" (roost-test--task))) params question)
+   (let ((task (roost--cache-task "dev" (append '((integrationBranch . "release")) (roost-test--task))))
+         params question)
      (cl-letf (((symbol-function 'roost--request)
                 (lambda (_host action request &rest _)
                   (when (equal action "merge") (setq params request))))
@@ -5913,12 +5949,12 @@ ssh: connect to host dev port 22: Operation timed out"
                ((symbol-function 'roost--release-terminal) #'ignore))
        (roost-merge-retire task)
        (should (equal (alist-get 'style params) "squash"))
-       (should (string-prefix-p "Squash committed work from fix auth into one commit" question))
+       (should (string-prefix-p "Squash committed work from fix auth into one commit on release" question))
        (let ((roost-merge-style 'merge))
          (roost-merge-retire task))
        (should (assq 'id params))
        (should-not (assq 'style params))
-       (should (string-prefix-p "Merge committed work from fix auth" question))))))
+       (should (string-prefix-p "Merge committed work from fix auth into release" question))))))
 
 (ert-deftest roost-task-commands-are-greyed-out-with-no-tasks ()
   (roost-test--isolated

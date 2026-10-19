@@ -1937,7 +1937,7 @@ worktree; explicit HEAD uses DIRECTORY.  Nil AGENT uses
 (defconst roost--compose-buffer "*roost new task*")
 
 (defvar-local roost--compose-fields nil
-  "Plist of the draft task: :directory :agent :base :name :source.")
+  "Plist of the draft task: :directory :agent :base :integration :name :source.")
 (defvar-local roost--compose-body nil
   "Marker at the start of the prompt text.")
 (defvar-local roost--compose-timer nil)
@@ -2102,6 +2102,7 @@ Planning lines and drawers are left out."
               (list :directory directory
                     :agent roost-default-agent
                     :base (when fork "HEAD")
+                    :integration (when fork (roost--field task 'integrationBranch))
                     :source (when fork (roost--field task 'name)))))
       (roost--compose-render)
       (goto-char (point-max))
@@ -2198,7 +2199,11 @@ A task started from a GitHub issue leads with the issue's number."
                                            (base)
                                            (t "primary checkout's current branch"))
                               #'roost-compose-set-base
-                              (when (plist-get fields :source) "fork: includes its commits"))
+                              (when base
+                                (concat (when (plist-get fields :source) "fork: includes its commits; ")
+                                        "merges into "
+                                        (or (plist-get fields :integration)
+                                            "the primary checkout's branch"))))
         (roost--compose-field "Issue" (if-let* ((issue (plist-get fields :issue)))
                                           (format "#%s %s" (alist-get 'number issue)
                                                   (or (alist-get 'title issue) ""))
@@ -2271,24 +2276,51 @@ The checkouts are those Roost has used, then those project.el knows."
     (setq roost--compose-fields (plist-put roost--compose-fields :agent agent))
     (roost--compose-render)))
 
+(defun roost--compose-integration (directory ref full)
+  "The branch a task in DIRECTORY started at REF merges into, as the
+helper decides it, or nil for the primary checkout's.  FULL is REF's
+full name, such as refs/remotes/origin/main, if REF is a branch."
+  (cond ((null full) nil)
+        ((string-prefix-p "refs/heads/" full)
+         (let* ((host (roost--directory-host directory))
+                (source (seq-find (lambda (task)
+                                    (and (equal (roost--field task 'host) host)
+                                         (equal (roost--field task 'branch) ref)))
+                                  (roost-tasks))))
+           (if source (roost--field source 'integrationBranch) ref)))
+        ((string-match "\\`refs/remotes/[^/]+/\\(.+\\)" full)
+         (let ((branch (match-string 1 full)))
+           (unless (equal branch "HEAD") branch)))))
+
 (defun roost-compose-set-base ()
-  "Choose the draft's starting Git ref; empty means the primary branch."
+  "Choose the draft's starting Git ref; empty means the primary branch.
+A branch is also the one the task merges into."
   (interactive)
   (let* ((directory (plist-get roost--compose-fields :directory))
+         ;; (SHORT . FULL) for each branch, local and remote-tracking.
          (refs (when directory
                  (ignore-errors
                    (let ((default-directory directory))
                      ;; `process-file' runs Git on the project's host.
                      (with-temp-buffer
                        (when (zerop (process-file "git" nil t nil "for-each-ref"
-                                                  "--format=%(refname:short)"
+                                                  "--format=%(refname)"
                                                   "refs/heads" "refs/remotes"))
-                         (split-string (buffer-string) "\n" t)))))))
+                         (mapcar (lambda (full)
+                                   (cons (replace-regexp-in-string
+                                          "\\`refs/\\(heads\\|remotes\\)/" "" full)
+                                         full))
+                                 (split-string (buffer-string) "\n" t))))))))
          (ref (string-trim (completing-read "Start from ref (empty = primary checkout's branch): "
-                                            (cons "HEAD" refs) nil nil))))
+                                            (cons "HEAD" (mapcar #'car refs)) nil nil)))
+         (base (unless (string-empty-p ref) ref)))
     (setq roost--compose-fields
-          (plist-put (plist-put roost--compose-fields :base (unless (string-empty-p ref) ref))
-                     :source nil))
+          (thread-first roost--compose-fields
+                        (plist-put :base base)
+                        (plist-put :integration
+                                   (and base (roost--compose-integration
+                                              directory ref (cdr (assoc ref refs)))))
+                        (plist-put :source nil)))
     (roost--compose-render)))
 
 (defun roost-compose-set-name ()
@@ -4696,9 +4728,10 @@ comes in as one squashed commit, or a merge commit; see `roost-merge-style'."
                             (roost--field task 'name)))
       (roost-review task)))
    ((y-or-n-p (format (if (eq roost-merge-style 'squash)
-                             "Squash committed work from %s into one commit and retire it? "
-                           "Merge committed work from %s and retire it? ")
-                         (roost--field task 'name)))
+                             "Squash committed work from %s into one commit on %s and retire it? "
+                           "Merge committed work from %s into %s and retire it? ")
+                         (roost--field task 'name)
+                         (or (roost--field task 'integrationBranch) "its branch")))
     (roost--act task "merge" (when (eq roost-merge-style 'squash) '((style . "squash")))
                 (lambda (merged)
                   (roost--retired-workspace merged)
