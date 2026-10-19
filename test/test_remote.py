@@ -2007,6 +2007,11 @@ elif args[:2] == ["auth", "status"]:
         reply = self.request("pr", id=task["id"], title="Fix it")
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(self.gh_calls()[-1][:4], ["pr", "create", "--base", "release"])
+        # Every action reads it so: merged into release by hand, it retires.
+        self.git("update-ref", "refs/heads/release", task["branch"])
+        self.request("stop", id=task["id"])
+        reply = self.request("retire", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
 
     def test_pr_without_draft_and_refusals(self):
         self.github()

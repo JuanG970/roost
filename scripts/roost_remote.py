@@ -241,9 +241,12 @@ class Store:
 
     def read(self, task_id):
         try:
-            return json.loads(self.path(task_id).read_text())
+            task = json.loads(self.path(task_id).read_text())
         except FileNotFoundError:
             raise RoostError("Task no longer exists: " + task_id)
+        # Every action reads the branch an older helper's record merges into as merges do.
+        recorded_integration(task)
+        return task
 
     def save(self, task):
         atomic_json(self.path(task["id"]),
@@ -268,6 +271,8 @@ class Store:
             # One unreadable record must not hide every other task.
             with contextlib.suppress(OSError, ValueError):
                 tasks.append(json.loads(path.read_text()))
+        for task in tasks:
+            recorded_integration(task)
         return tasks
 
 
@@ -1085,8 +1090,6 @@ def list_tasks(store, request):
             # Retirement now deletes records; clear out ones left by older helpers.
             store.remove(task["id"])
         else:
-            # Emacs shows and counts from the branch merges use.
-            recorded_integration(task)
             tasks.append(task)
     inventories = {}
     table = None  # The process table, read only when a request may have been approved.
@@ -1774,7 +1777,8 @@ def recorded_integration(task):
     that reads as X while a branch and a tag X exist and no branch heads/X
     does, for this and the checks that follow."""
     branch = task.get("integrationBranch")
-    if branch and branch.startswith("heads/") and "integrationRef" not in task:
+    if (isinstance(branch, str) and branch.startswith("heads/") and "integrationRef" not in task
+            and isinstance(task.get("repo"), str)):
         repo, short = task["repo"], branch[len("heads/"):]
         if (not ref_exists(repo, branch) and ref_exists(repo, short)
                 and git(repo, "show-ref", "--verify", "--quiet", "refs/tags/" + short, check=False).returncode == 0):
