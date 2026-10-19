@@ -921,7 +921,10 @@ class Lifecycle(unittest.TestCase):
         # With the primary checkout on it, the tag hides neither it nor that it is checked out there.
         self.request("stop", id=task["id"])
         self.git("switch", "-q", "release")
-        self.assertEqual(self.create(name="default")["integrationBranch"], "release")
+        self.git("commit", "--allow-empty", "-qm", "past the tag")
+        default = self.create(name="default")
+        self.assertEqual(default["integrationBranch"], "release")
+        self.assertEqual(default["baseCommit"], self.git("rev-parse", "HEAD"))
         wt = Path(task["worktree"])
         (wt / "work").write_text("work\n")
         self.git("add", ".", cwd=wt)

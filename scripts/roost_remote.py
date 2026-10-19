@@ -940,7 +940,10 @@ def create(store, request):
     # source worktree when explicitly requested, rather than accidentally.
     explicit_base = text(request.get("base"))
     base = explicit_base or current or "HEAD"
-    resolved = git(directory if explicit_base else repo, "rev-parse", "--verify", "--quiet", base + "^{commit}",
+    # The primary checkout's branch by its full name, which a tag of the
+    # same name would otherwise shadow.
+    resolved = git(directory if explicit_base else repo, "rev-parse", "--verify", "--quiet",
+                   (explicit_base or ("refs/heads/" + current if current else "HEAD")) + "^{commit}",
                    check=False)
     if resolved.returncode:
         # Git says only "Needed a single revision".
