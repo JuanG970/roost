@@ -932,6 +932,18 @@ class Lifecycle(unittest.TestCase):
         merge = self.request("merge", id=task["id"])
         self.assertTrue(merge["ok"], merge)
         self.assertEqual((self.repo / "work").read_text(), "work\n")
+        # Older helpers recorded heads/release; such a task still merges here.
+        store = roost.Store(str(self.state))
+        record = store.read(default["id"])
+        record["integrationBranch"] = "heads/release"
+        store.save(record)
+        self.request("stop", id=default["id"])
+        (Path(default["worktree"]) / "older").write_text("older\n")
+        self.git("add", ".", cwd=default["worktree"])
+        self.git("commit", "-qm", "older", cwd=default["worktree"])
+        merge = self.request("merge", id=default["id"])
+        self.assertTrue(merge["ok"], merge)
+        self.assertEqual((self.repo / "older").read_text(), "older\n")
 
     def test_a_remote_tracking_start_merges_into_its_local_branch(self):
         remote = self.root / "remote.git"

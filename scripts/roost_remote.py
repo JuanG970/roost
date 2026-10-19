@@ -1772,6 +1772,9 @@ def integration_branch(task):
     repo = task["repo"]
     if not branch:
         raise RoostError("The task has no integration branch (it was created from a detached HEAD); merge it manually, then retire")
+    # Older helpers recorded heads/X when a tag was also named X.
+    if branch.startswith("heads/") and not ref_exists(repo, branch) and ref_exists(repo, branch[len("heads/"):]):
+        branch = task["integrationBranch"] = branch[len("heads/"):]
     if current_branch(repo) == branch:
         if git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0:
             raise RoostError("The primary repository already has a merge in progress")
