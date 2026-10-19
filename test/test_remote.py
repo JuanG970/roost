@@ -766,6 +766,8 @@ class Lifecycle(unittest.TestCase):
         (wt / "hello").write_text("main and task\n")
         self.git("add", "hello", cwd=wt)
         self.git("commit", "-q", "--no-edit", cwd=wt)
+        # The message a merge of the branch's short name has.
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=wt), "Merge branch 'main' into " + task["branch"])
         self.assertTrue(self.request("merge", id=task["id"])["ok"])
         self.assertEqual((self.repo / "hello").read_text(), "main and task\n")
 
@@ -905,6 +907,17 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.create(name="tagged", base="v1")["integrationBranch"], "main")
         self.assertEqual(self.create(name="commit", base=self.git("rev-parse", "release"))["integrationBranch"],
                          "main")
+
+    def test_an_update_takes_the_branch_and_not_a_tag_of_its_name(self):
+        self.git("branch", "release")
+        self.git("tag", "release")
+        task = self.create(name="on release", base="heads/release")
+        self.assertEqual(task["integrationBranch"], "release")
+        self.git("commit", "--allow-empty", "-qm", "release moved")
+        roost.git(self.repo, "update-ref", "refs/heads/release", self.git("rev-parse", "HEAD"))
+        reply = self.request("update", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=task["worktree"]), "release moved")
 
     def test_a_remote_tracking_start_merges_into_its_local_branch(self):
         remote = self.root / "remote.git"
@@ -1428,6 +1441,13 @@ class Lifecycle(unittest.TestCase):
         self.git("checkout", "-q", "--detach")
         empty = self.create(name="empty")
         self.assertEqual(empty["integrationBranch"], "")
+        # A fork has no branch to merge into either, though the primary has one now.
+        self.git("checkout", "-q", "main")
+        fork = self.create(name="fork", directory=empty["worktree"], base="HEAD")
+        self.assertEqual(fork["integrationBranch"], "")
+        self.request("stop", id=fork["id"])
+        self.assertTrue(self.request("retire", id=fork["id"])["ok"])
+        self.git("checkout", "-q", "--detach")
         self.request("stop", id=empty["id"])
         self.assertTrue(self.request("retire", id=empty["id"])["ok"])
         worked = self.create(name="worked")

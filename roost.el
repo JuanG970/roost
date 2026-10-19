@@ -2102,7 +2102,7 @@ Planning lines and drawers are left out."
               (list :directory directory
                     :agent roost-default-agent
                     :base (when fork "HEAD")
-                    :integration (when fork (roost--field task 'integrationBranch))
+                    :integration (when fork (roost--compose-integration directory "HEAD"))
                     :source (when fork (roost--field task 'name)))))
       (roost--compose-render)
       (goto-char (point-max))
@@ -2201,9 +2201,10 @@ A task started from a GitHub issue leads with the issue's number."
                               #'roost-compose-set-base
                               (when base
                                 (concat (when (plist-get fields :source) "fork: includes its commits; ")
-                                        "merges into "
-                                        (or (plist-get fields :integration)
-                                            "the primary checkout's branch"))))
+                                        (pcase (plist-get fields :integration)
+                                          ('nil "merges into the primary checkout's branch")
+                                          ("" "no branch to merge into")
+                                          (branch (concat "merges into " branch))))))
         (roost--compose-field "Issue" (if-let* ((issue (plist-get fields :issue)))
                                           (format "#%s %s" (alist-get 'number issue)
                                                   (or (alist-get 'title issue) ""))
@@ -2263,8 +2264,14 @@ The checkouts are those Roost has used, then those project.el knows."
       (setq choice (read-directory-name "Project checkout (local or TRAMP): "
                                         (plist-get roost--compose-fields :directory) nil t)))
     (when choice
-      (setq roost--compose-fields (plist-put roost--compose-fields :directory
-                                             (file-name-as-directory (expand-file-name choice))))
+      (let* ((directory (file-name-as-directory (expand-file-name choice)))
+             (base (plist-get roost--compose-fields :base)))
+        ;; The starting ref now names a ref of this project, not the task's.
+        (setq roost--compose-fields
+              (thread-first roost--compose-fields
+                            (plist-put :directory directory)
+                            (plist-put :integration (and base (roost--compose-integration directory base)))
+                            (plist-put :source nil))))
       (roost--compose-render))))
 
 (defun roost-compose-set-agent ()
@@ -2291,6 +2298,7 @@ helper decides it, or nil for the primary checkout's."
                                            (equal (roost--field task 'repo) repo)
                                            (equal (roost--field task 'branch) branch)))
                                     (roost-tasks))))
+             ;; Empty when that task started with the primary checkout detached.
              (if source (roost--field source 'integrationBranch) branch)))
           ((string-match "\\`refs/remotes/[^/]+/\\(.+\\)" full)
            (let ((branch (match-string 1 full)))

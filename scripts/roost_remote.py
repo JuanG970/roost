@@ -883,14 +883,18 @@ def integration_for(store, repo, directory, base, current):
     """The branch a task started at BASE merges into: the branch BASE
     names, or for a remote-tracking branch the local one of its name, made
     to track it as `git switch` would if there is none. A task's branch, as
-    HEAD in its worktree is, gives that task's. A tag, a commit or a
+    HEAD in its worktree is, gives that task's, even none. A tag, a commit or a
     detached HEAD gives CURRENT, the primary checkout's branch."""
     full = git(directory, "rev-parse", "--symbolic-full-name", base, check=False).stdout.strip()
     if full.startswith("refs/heads/"):
         branch = full[len("refs/heads/"):]
         source = next((task for task in store.all()
                        if task.get("repo") == repo and task.get("branch") == branch), None)
-        return (source.get("integrationBranch") or current) if source else branch
+        if source:
+            # Empty when that task started with the primary checkout detached.
+            recorded = source.get("integrationBranch")
+            return current if recorded is None else recorded
+        return branch
     parts = full.split("/", 3)
     if full.startswith("refs/remotes/") and len(parts) == 4 and parts[3] != "HEAD":
         branch = parts[3]
@@ -2065,7 +2069,10 @@ def update(store, task):
     if git(worktree, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         raise RoostError("Commit the task's changes before updating it from " + integration)
     before = git(worktree, "rev-parse", "HEAD").stdout.strip()
-    result = git(worktree, "merge", "--no-edit", integration, check=False)
+    # The full name, which a tag of the same name would otherwise shadow,
+    # and the message a merge of the short one has.
+    result = git(worktree, "merge", "--no-edit", "-m", "Merge branch '%s' into %s" % (integration, task["branch"]),
+                 "refs/heads/" + integration, check=False)
     conflicts = conflicted_files(worktree)
     if result.returncode and not conflicts:
         if git(worktree, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0:

@@ -1400,7 +1400,14 @@
    (let ((default-directory "/tmp/"))
      (save-window-excursion
        (unwind-protect
-           (progn
+           (cl-letf (((symbol-function 'roost--git-in)
+                      (lambda (directory &rest args)
+                        (pcase args
+                          ;; The task's HEAD, in its worktree.
+                          (`("rev-parse" "--symbolic-full-name" "HEAD")
+                           (should (string-suffix-p "/work/fix auth/" directory))
+                           "refs/heads/codex/roost/fix-auth-123456\n")
+                          (`("worktree" "list" "--porcelain") "worktree /home/user/repo\n")))))
              (roost--compose)
              (with-current-buffer roost--compose-buffer
                (should (string-suffix-p ":/home/user/repo/" (plist-get roost--compose-fields :directory)))
@@ -1460,6 +1467,15 @@
                (setq primary "/other" answer "codex/roost/fix-auth-123456")
                (roost-compose-set-base)
                (should (string-match-p "merges into codex/roost/fix-auth-123456$" (buffer-string)))
+               ;; Another project's HEAD is on its own branch, not a fork.
+               (setq refs '(("HEAD" . "refs/heads/trunk")))
+               (setq roost--compose-fields (thread-first roost--compose-fields
+                                                         (plist-put :base "HEAD")
+                                                         (plist-put :source "fix auth")))
+               (cl-letf (((symbol-function 'roost--choose-from) (lambda (&rest _) "/ssh:dev:/other/")))
+                 (roost-compose-set-project))
+               (should-not (plist-get roost--compose-fields :source))
+               (should (string-match-p "Start    HEAD  C-c C-b · merges into trunk$" (buffer-string)))
                (setq answer "")
                (roost-compose-set-base)
                (should (string-match-p "Start    primary checkout's current branch  C-c C-b$"
