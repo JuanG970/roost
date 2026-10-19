@@ -475,7 +475,9 @@ Things to know:
   with older Pi a task shows `running` through a dialog and `ready` after Esc.
 - OpenCode loads Roost's plugin from `OPENCODE_CONFIG_CONTENT`, which it
   merges over your own config; Roost adds its plugin to any you set there,
-  which must then be plain JSON. OpenCode asks before a tool only where your
+  which must then be plain JSON. Its command can't hold `--pure`, which
+  leaves plugins out, or a project folder, which would take OpenCode out of
+  the task's worktree. OpenCode asks before a tool only where your
   `permission` config says `ask`, and by default runs most without asking.
   Its questions, and a subagent's, show as `permission`; Esc, or declining a
   request, shows `interrupted`. OpenCode starts a conversation at its first

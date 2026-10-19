@@ -37,12 +37,12 @@ if agent == "opencode":
         if line == "permission":
             report("asked", permission="bash", patterns=["make deploy"], metadata=dict(command="make deploy"))
             sys.stdin.readline()
-            report("replied", waiting=0)
+            report("replied")
         elif line == "subagent":
             # A subagent's question waits on you; its session is not the task's.
             report("asked", "ses_child", child=True, questions=[dict(question="Which branch?")])
             sys.stdin.readline()
-            report("replied", "ses_child", child=True, waiting=0)
+            report("replied", "ses_child", child=True)
         if line == "interrupt":
             report("status", status="idle", reply="", error=dict(name="MessageAbortedError"))
         elif line == "fail":

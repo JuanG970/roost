@@ -1240,12 +1240,24 @@ class Lifecycle(unittest.TestCase):
         for agent, flags in (("codex", ["resume", "last"]), ("codex", ["--cd=/other"]),
                              ("pi", ["--session=other"]), ("pi", ["--mode", "rpc"]), ("pi", ["--print"]),
                              ("opencode", ["-s", "ses_other"]), ("opencode", ["--prompt=x"]),
-                             ("opencode", ["run", "x"]), ("opencode", ["--fork"])):
+                             ("opencode", ["run", "x"]), ("opencode", ["--fork"]), ("opencode", ["--pure"]),
+                             # A project folder would take the agent out of the task's worktree.
+                             ("opencode", [str(self.repo)]),
+                             ("opencode", ["--model", "lmstudio/qwen", "--port=0", str(self.repo)])):
             with self.subTest(agent=agent, flags=flags):
                 reply = self.request("create", directory=str(self.repo), name="bad", socket=self.socket,
                                      agent=agent, command=[agent, *flags])
                 self.assertFalse(reply["ok"], reply)
                 self.assertEqual(self.git("worktree", "list", "--porcelain"), before)
+        # Options' values are no project folder.
+        for flags in (["--model", "lmstudio/qwen", "--agent", "plan"], ["-m", "x", "--cors", "a", "b", "--mini"],
+                      ["--port", "4096", "--", "anything"], ["--log-level=DEBUG", "--hostname", "localhost"]):
+            with self.subTest(flags=flags):
+                roost.OpenCodeAgent().validate(["opencode", *flags])
+        # Its arguments follow its name, as when a wrapper starts it.
+        roost.OpenCodeAgent().validate(["npx", "opencode-ai", "--model", "x"])
+        with self.assertRaises(roost.RoostError):
+            roost.OpenCodeAgent().validate(["npx", "opencode-ai", str(self.repo)])
 
     def test_pi_queued_work_is_background_and_codex_interrupt_is_ready(self):
         self.assertEqual(roost.PiAgent().observe(dict(event="agent_end", pending=True))["status"], "background")
@@ -3722,9 +3734,8 @@ class ProgramStatus(unittest.TestCase):
         self.assertEqual(ask(), "Asks to use a tool")
         # Between turns it holds up no turn.
         self.assertEqual(agent.observe(dict(event="asked", questions=[]), "ready")["lastEvent"], "Dialog")
-        # One of several answered leaves the others waiting.
-        self.assertIsNone(agent.observe(dict(event="replied", waiting=1), "permission"))
-        self.assertIsNone(agent.observe(dict(event="replied", waiting=0), "ready"))
+        self.assertEqual(agent.observe(dict(event="replied"), "permission")["status"], "running")
+        self.assertIsNone(agent.observe(dict(event="replied"), "ready"))
         self.assertIsNone(agent.observe(dict(event="unknown")))
         retry = agent.observe(dict(event="status", status="retry", session="ses_a"), "running")
         self.assertEqual((retry["status"], retry["agentSession"]), ("running", "ses_a"))
@@ -3819,6 +3830,9 @@ class ProgramStatus(unittest.TestCase):
                 ("session.created", dict(info=dict(id="ses_c", parentID="ses_a"))),
                 status("ses_c", "busy"),
                 ("question.asked", dict(id="q1", sessionID="ses_c", questions=[dict(question="Which?", header="h")])),
+                ("question.asked", dict(id="q2", sessionID="ses_a", questions=[dict(question="And?", header="h")])),
+                # Answered first, the newer one leaves the older waiting.
+                ("question.replied", dict(requestID="q2", sessionID="ses_a", answers=[["y"]])),
                 ("question.replied", dict(requestID="q1", sessionID="ses_c", answers=[["x"]])),
                 status("ses_c", "idle"),
                 text("p2", "msg_a", "All done."),
@@ -3844,19 +3858,20 @@ class ProgramStatus(unittest.TestCase):
             reports = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual([(r["event"], r.get("session"), r.get("status")) for r in reports],
                              [("start", None, None), ("status", "ses_a", "busy"), ("asked", "ses_c", None),
+                              ("asked", "ses_a", None), ("asked", "ses_c", None),
                               ("replied", "ses_c", None), ("status", "ses_a", "idle"),
                               ("status", "ses_a", "busy"), ("status", "ses_a", "idle"),
                               ("status", "ses_a", "busy"), ("asked", "ses_a", None), ("replied", "ses_a", None),
                               ("status", "ses_a", "idle")])
             self.assertEqual((reports[2]["child"], reports[2]["questions"]), (True, [dict(question="Which?")]))
-            self.assertEqual(reports[3]["waiting"], 0)
-            self.assertEqual(reports[4]["reply"], "Done.\n\nAll done.")
-            self.assertNotIn("error", reports[4])
-            self.assertEqual(reports[6]["error"]["name"], "MessageAbortedError")
+            self.assertEqual(reports[4], reports[2])
+            self.assertEqual(reports[6]["reply"], "Done.\n\nAll done.")
+            self.assertNotIn("error", reports[6])
+            self.assertEqual(reports[8]["error"]["name"], "MessageAbortedError")
             # A new turn forgets the last one's reply.
-            self.assertEqual((reports[6]["reply"], reports[8]["metadata"]["command"]), ("", "date"))
-            self.assertIs(reports[10]["declined"], True)
-            self.assertEqual(roost.OpenCodeAgent().observe(reports[10], "running")["lastEvent"], "Interrupt")
+            self.assertEqual((reports[8]["reply"], reports[10]["metadata"]["command"]), ("", "date"))
+            self.assertIs(reports[12]["declined"], True)
+            self.assertEqual(roost.OpenCodeAgent().observe(reports[12], "running")["lastEvent"], "Interrupt")
 
 
 

@@ -801,7 +801,12 @@ export const RoostObserver = async () => {
   // too, but their turns are not the task's.
   const children = new Set();
   const assistant = new Set();
-  const waiting = new Set();
+  // What waits on you, by request, in the order it asked.
+  const waiting = new Map();
+  const ask = (id, session, extra) => {
+    waiting.set(id, [session, { child: children.has(session), ...extra }]);
+    return report("asked", session, waiting.get(id)[1]);
+  };
   // OpenCode can say a session idles twice as a turn ends; one is its end.
   const busy = new Set();
   let reply = { message: undefined, parts: new Map() };
@@ -849,23 +854,22 @@ export const RoostObserver = async () => {
           return report("status", p.sessionID, ended);
         }
         case "permission.asked":
-          waiting.add(p.id);
-          return report("asked", p.sessionID, { child: children.has(p.sessionID),
-            permission: p.permission, patterns: p.patterns, metadata: {
-              command: p.metadata && p.metadata.command, filepath: p.metadata && p.metadata.filepath,
-              url: p.metadata && p.metadata.url } });
+          return ask(p.id, p.sessionID, { permission: p.permission, patterns: p.patterns, metadata: {
+            command: p.metadata && p.metadata.command, filepath: p.metadata && p.metadata.filepath,
+            url: p.metadata && p.metadata.url } });
         case "question.asked":
-          waiting.add(p.id);
-          return report("asked", p.sessionID, { child: children.has(p.sessionID),
-            questions: (p.questions || []).map(q => ({ question: q.question })) });
+          return ask(p.id, p.sessionID, { questions: (p.questions || []).map(q => ({ question: q.question })) });
         case "permission.replied":
         case "question.replied":
-        case "question.rejected":
+        case "question.rejected": {
           waiting.delete(p.requestID);
           if ((event.type === "question.rejected" || p.reply === "reject") && !children.has(p.sessionID)) {
             declined = true;
           }
-          return report("replied", p.sessionID, { child: children.has(p.sessionID), waiting: waiting.size });
+          // Answered one of several, what still waits is the newest of the rest.
+          const rest = [...waiting.values()].pop();
+          return rest ? report("asked", ...rest) : report("replied", p.sessionID, { child: children.has(p.sessionID) });
+        }
       }
     },
   };
@@ -880,16 +884,32 @@ class OpenCodeAgent:
     default_command = ["opencode"]
     # Its sessions say when they work and when they idle, and what ended a turn.
     reports_turns = True
-    subcommands = {"acp", "agent", "attach", "auth", "console", "db", "debug", "export", "generate",
-                   "github", "import", "mcp", "models", "plugin", "pr", "providers", "run", "serve",
-                   "session", "stats", "uninstall", "upgrade", "web"}
+    # Its TUI's options that take a value, and one that takes several.
+    valued = {"--model", "-m", "--agent", "--log-level", "--replay-limit", "--port", "--hostname", "--mdns-domain"}
+    listed = {"--cors"}
 
     def validate(self, command):
         validate_command(command, "OpenCode")
-        reserved = {"--session", "-s", "--continue", "-c", "--fork", "--prompt"}
-        if ((len(command) > 1 and command[1] in self.subcommands)
-                or any(arg.split("=", 1)[0] in reserved for arg in command[1:])):
-            raise RoostError("Roost owns OpenCode's session and first prompt; use interactive TUI options only")
+        # --pure leaves out every plugin, Roost's observer too.
+        reserved = {"--session", "-s", "--continue", "-c", "--fork", "--prompt", "--pure"}
+        if any(arg.split("=", 1)[0] in reserved for arg in command[1:]):
+            raise RoostError("Roost owns OpenCode's session, first prompt and plugins; remove conflicting options")
+        # Anything else that isn't an option's value is a subcommand, or a
+        # project folder in place of the task's worktree. OpenCode's own
+        # arguments follow its name, as in npx opencode-ai or env X=1 opencode.
+        named = [i for i, arg in enumerate(command) if os.path.basename(arg).startswith("opencode")]
+        taking = None
+        for arg in command[(named[-1] if named else 0) + 1:]:
+            if arg == "--":
+                break
+            if arg.startswith("-"):
+                name = arg.split("=", 1)[0]
+                taking = None if "=" in arg else "one" if name in self.valued else "all" if name in self.listed else None
+            elif taking:
+                taking = None if taking == "one" else taking
+            else:
+                raise RoostError("Roost runs OpenCode's TUI in the task's worktree; remove %s, "
+                                 "or join an option's value to it with =" % arg)
 
     def plugin(self, store):
         path = store.root / ("opencode-observer-" + hashlib.sha256(OPENCODE_PLUGIN.encode()).hexdigest()[:16] + ".js")
@@ -970,8 +990,6 @@ class OpenCodeAgent:
             updates.update(status="permission", lastEvent="PermissionRequest" if current in ("running", "permission")
                            else "Dialog", request=self.request(payload))
         elif event == "replied" and current == "permission":
-            if payload.get("waiting"):
-                return None
             # The turn goes on; if you declined, its end says so.
             updates.update(status="running", lastEvent="Answered")
         else:
