@@ -974,6 +974,8 @@ def create(store, request):
     task = dict(id=task_id, name=name, task=prompt or name, repo=repo,
                 worktree=str(worktree), branch=branch, baseRef=base, baseCommit=commit,
                 integrationBranch=integration, socket=socket,
+                # Its full name, which also tells this record from an older helper's.
+                integrationRef="refs/heads/" + integration if integration else None,
                 session=session_name(repo, task_id),
                 agent=agent_name, command=command, setup=setup, prompt=prompt,
                 status="starting", startedAt=now(), updatedAt=now(), claudeSession=None)
@@ -1764,17 +1766,28 @@ def require_removable(worktree):
 MERGE_TREE_GIT = (2, 38)  # `git merge-tree --write-tree`
 
 
+def recorded_integration(task):
+    """The task's integration branch. Records without integrationRef come
+    from older helpers, which wrote heads/X when a tag was also named X:
+    that reads as X while a branch and a tag X exist and no branch heads/X
+    does, for this and the checks that follow."""
+    branch = task.get("integrationBranch")
+    if branch and branch.startswith("heads/") and "integrationRef" not in task:
+        repo, short = task["repo"], branch[len("heads/"):]
+        if (not ref_exists(repo, branch) and ref_exists(repo, short)
+                and git(repo, "show-ref", "--verify", "--quiet", "refs/tags/" + short, check=False).returncode == 0):
+            task["integrationBranch"] = branch = short
+    return branch
+
+
 def integration_branch(task):
     """The task's integration branch, and whether the primary checkout has it
     checked out. Otherwise Git merges into it without a working tree, which
     needs Git 2.38, as long as no other worktree has it checked out."""
-    branch = task.get("integrationBranch")
+    branch = recorded_integration(task)
     repo = task["repo"]
     if not branch:
         raise RoostError("The task has no integration branch (it was created from a detached HEAD); merge it manually, then retire")
-    # Older helpers recorded heads/X when a tag was also named X.
-    if branch.startswith("heads/") and not ref_exists(repo, branch) and ref_exists(repo, branch[len("heads/"):]):
-        branch = task["integrationBranch"] = branch[len("heads/"):]
     if current_branch(repo) == branch:
         if git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0:
             raise RoostError("The primary repository already has a merge in progress")
@@ -2071,7 +2084,7 @@ def update(store, task):
     """Merge the integration branch into the task's worktree, so the task can
     be brought up to date and its conflicts resolved there, not in the
     primary checkout. Conflicts leave the merge in progress in the worktree."""
-    integration = task.get("integrationBranch")
+    integration = recorded_integration(task)
     if not integration:
         raise RoostError("The task has no integration branch to update from")
     require_finished(task, owned_pane(task, inventory_for(task)))

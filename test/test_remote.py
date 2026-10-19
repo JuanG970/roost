@@ -932,18 +932,33 @@ class Lifecycle(unittest.TestCase):
         merge = self.request("merge", id=task["id"])
         self.assertTrue(merge["ok"], merge)
         self.assertEqual((self.repo / "work").read_text(), "work\n")
-        # Older helpers recorded heads/release; such a task still merges here.
+        self.assertEqual(default["integrationRef"], "refs/heads/release")
+        # Older helpers recorded heads/release, and no integrationRef; such
+        # a task still updates from release and merges into it.
         store = roost.Store(str(self.state))
         record = store.read(default["id"])
         record["integrationBranch"] = "heads/release"
+        del record["integrationRef"]
         store.save(record)
         self.request("stop", id=default["id"])
+        self.git("commit", "--allow-empty", "-qm", "release moved on")
+        reply = self.request("update", id=default["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=default["worktree"]), "release moved on")
         (Path(default["worktree"]) / "older").write_text("older\n")
         self.git("add", ".", cwd=default["worktree"])
         self.git("commit", "-qm", "older", cwd=default["worktree"])
         merge = self.request("merge", id=default["id"])
         self.assertTrue(merge["ok"], merge)
         self.assertEqual((self.repo / "older").read_text(), "older\n")
+        # A branch that is named heads/release is not taken for release once it is gone.
+        roost.git(self.repo, "update-ref", "refs/heads/heads/release", "HEAD")
+        literal = self.create(name="literal", base="refs/heads/heads/release")
+        self.assertEqual(literal["integrationBranch"], "heads/release")
+        self.request("stop", id=literal["id"])
+        self.commit_in(literal, "literal")
+        roost.git(self.repo, "update-ref", "-d", "refs/heads/heads/release")
+        self.assertIn("heads/release no longer exists", self.request("merge", id=literal["id"])["error"])
 
     def test_a_remote_tracking_start_merges_into_its_local_branch(self):
         remote = self.root / "remote.git"
