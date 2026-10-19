@@ -1616,11 +1616,14 @@ def other_branch(qa, repo):
     qa.step("A draft from release", expect=[
         ("it says the task merges into release",
          lambda s: re.search(r"Start +release .*merges into release", qa.window(s, "roost-compose-mode")["text"]))])
-    before = {t["name"] for t in qa.screen()["tasks"]}
+    # Named, as another journey's task may have the name its prompt gives.
+    name = "for-the-release"
+    qa.keys("C-c C-n")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type(name + "\r")
     qa.type("ask sh -c \"printf 'x\\n' > RELEASE.md && git add RELEASE.md && git commit -qm 'For the release'\"")
     qa.keys("C-c C-c")
-    screen = qa.wait("the task", lambda s: {t["name"] for t in s["tasks"]} - before)
-    name = next(t["name"] for t in screen["tasks"] if t["name"] not in before)
+    qa.wait("the task", lambda s: qa.task(s, name))
     answer_yes(qa, name)
     qa.wait("its commit", lambda s: "Committed" in panel_text(qa, s))
     qa.keys("C-c r m")

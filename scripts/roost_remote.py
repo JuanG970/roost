@@ -1085,6 +1085,8 @@ def list_tasks(store, request):
             # Retirement now deletes records; clear out ones left by older helpers.
             store.remove(task["id"])
         else:
+            # Emacs shows and counts from the branch merges use.
+            recorded_integration(task)
             tasks.append(task)
     inventories = {}
     table = None  # The process table, read only when a request may have been approved.

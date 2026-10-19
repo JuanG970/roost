@@ -941,6 +941,8 @@ class Lifecycle(unittest.TestCase):
         del record["integrationRef"]
         store.save(record)
         self.request("stop", id=default["id"])
+        listed = next(t for t in self.request("list")["result"] if t["id"] == default["id"])
+        self.assertEqual(listed["integrationBranch"], "release")
         # A fork of it merges into release, as it does.
         fork = self.create(name="legacy fork", directory=default["worktree"], base="HEAD")
         self.assertEqual((fork["integrationBranch"], fork["integrationRef"]), ("release", "refs/heads/release"))
