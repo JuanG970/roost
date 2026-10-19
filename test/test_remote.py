@@ -922,6 +922,10 @@ class Lifecycle(unittest.TestCase):
         released = self.create(name="released", base="origin/release")
         self.assertEqual(released["integrationBranch"], "release")
         self.assertEqual(self.git("rev-parse", "--abbrev-ref", "release@{upstream}"), "origin/release")
+        # Made meanwhile by another task's start, as tasks prepare unlocked.
+        with patch.object(roost, "ref_exists", side_effect=[False, True]):
+            self.assertEqual(roost.integration_for(roost.Store(str(self.state)), str(self.repo.resolve()),
+                                                   str(self.repo), "origin/release", "main"), "release")
 
     def test_new_tasks_default_to_primary_branch_and_explicit_head_forks(self):
         first = self.create()

@@ -896,7 +896,8 @@ def integration_for(store, repo, directory, base, current):
         branch = parts[3]
         if not ref_exists(repo, branch):
             made = git(repo, "branch", "--track", branch, full, check=False)
-            if made.returncode:
+            # Another task starting from it at the same moment may have made it.
+            if made.returncode and not ref_exists(repo, branch):
                 raise RoostError("Could not make a local branch %s to merge into: %s"
                                  % (branch, made.stderr.strip()))
         return branch

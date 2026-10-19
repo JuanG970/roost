@@ -1417,14 +1417,27 @@
 (ert-deftest roost-compose-says-which-branch-a-start-merges-into ()
   (roost-test--isolated
    (roost--cache-task "dev" (append '((repo . "/repo") (integrationBranch . "release")) (roost-test--task)))
-   (let ((default-directory "/tmp/") answer)
+   (let ((default-directory "/tmp/") answer (primary "/repo")
+         ;; What Git resolves each ref to, as `rev-parse --symbolic-full-name' does.
+         (refs '(("main" . "refs/heads/main")
+                 ("origin/release/1.2" . "refs/remotes/origin/release/1.2")
+                 ("codex/roost/fix-auth-123456" . "refs/heads/codex/roost/fix-auth-123456")
+                 ;; HEAD in the task's worktree, as in a fork.
+                 ("HEAD" . "refs/heads/codex/roost/fix-auth-123456")
+                 ;; A tag of the same name as a branch wins, as in Git.
+                 ("release" . "refs/tags/release")
+                 ("origin/HEAD" . "refs/remotes/origin/HEAD"))))
      (save-window-excursion
        (unwind-protect
            (cl-letf (((symbol-function 'process-file)
-                      (lambda (&rest _)
-                        (insert "refs/heads/main\nrefs/heads/codex/roost/fix-auth-123456\n"
-                                "refs/remotes/origin/HEAD\nrefs/remotes/origin/release/1.2\n")
-                        0))
+                      (lambda (_program _infile _buffer _display &rest args)
+                        (pcase args
+                          (`("for-each-ref" . ,_) (insert "main\norigin/release/1.2\n") 0)
+                          (`("worktree" "list" "--porcelain")
+                           (insert "worktree " primary "\nHEAD 0123\nbranch refs/heads/main\n\n") 0)
+                          (`("rev-parse" "--symbolic-full-name" ,ref)
+                           (insert (or (cdr (assoc ref refs)) "")) 0)
+                          (_ 1))))
                      ((symbol-function 'completing-read) (lambda (&rest _) answer)))
              (roost--compose)
              (with-current-buffer roost--compose-buffer
@@ -1434,6 +1447,8 @@
                                ("origin/release/1.2" . "release/1.2")
                                ;; A task's branch merges where that task does.
                                ("codex/roost/fix-auth-123456" . "release")
+                               ("HEAD" . "release")
+                               ("release" . "the primary checkout's branch")
                                ("v1.0" . "the primary checkout's branch")
                                ("origin/HEAD" . "the primary checkout's branch")))
                  (setq answer (car case))
@@ -1441,6 +1456,10 @@
                  (should (string-match-p (concat "Start    " (regexp-quote (car case))
                                                  "  C-c C-b · merges into " (regexp-quote (cdr case)) "$")
                                          (buffer-string))))
+               ;; The same branch in another repository is not the task's.
+               (setq primary "/other" answer "codex/roost/fix-auth-123456")
+               (roost-compose-set-base)
+               (should (string-match-p "merges into codex/roost/fix-auth-123456$" (buffer-string)))
                (setq answer "")
                (roost-compose-set-base)
                (should (string-match-p "Start    primary checkout's current branch  C-c C-b$"

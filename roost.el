@@ -2276,50 +2276,45 @@ The checkouts are those Roost has used, then those project.el knows."
     (setq roost--compose-fields (plist-put roost--compose-fields :agent agent))
     (roost--compose-render)))
 
-(defun roost--compose-integration (directory ref full)
+(defun roost--compose-integration (directory ref)
   "The branch a task in DIRECTORY started at REF merges into, as the
-helper decides it, or nil for the primary checkout's.  FULL is REF's
-full name, such as refs/remotes/origin/main, if REF is a branch."
-  (cond ((null full) nil)
-        ((string-prefix-p "refs/heads/" full)
-         (let* ((host (roost--directory-host directory))
-                (source (seq-find (lambda (task)
-                                    (and (equal (roost--field task 'host) host)
-                                         (equal (roost--field task 'branch) ref)))
-                                  (roost-tasks))))
-           (if source (roost--field source 'integrationBranch) ref)))
-        ((string-match "\\`refs/remotes/[^/]+/\\(.+\\)" full)
-         (let ((branch (match-string 1 full)))
-           (unless (equal branch "HEAD") branch)))))
+helper decides it, or nil for the primary checkout's."
+  (let ((full (string-trim (or (roost--git-in directory "rev-parse" "--symbolic-full-name" ref) ""))))
+    (cond ((string-prefix-p "refs/heads/" full)
+           (let* ((branch (substring full (length "refs/heads/")))
+                  (host (roost--directory-host directory))
+                  ;; The primary checkout, which the helper records as the repo.
+                  (repo (when-let* ((list (roost--git-in directory "worktree" "list" "--porcelain")))
+                          (string-remove-prefix "worktree " (car (split-string list "\n")))))
+                  (source (seq-find (lambda (task)
+                                      (and (equal (roost--field task 'host) host)
+                                           (equal (roost--field task 'repo) repo)
+                                           (equal (roost--field task 'branch) branch)))
+                                    (roost-tasks))))
+             (if source (roost--field source 'integrationBranch) branch)))
+          ((string-match "\\`refs/remotes/[^/]+/\\(.+\\)" full)
+           (let ((branch (match-string 1 full)))
+             (unless (equal branch "HEAD") branch))))))
 
 (defun roost-compose-set-base ()
   "Choose the draft's starting Git ref; empty means the primary branch.
 A branch is also the one the task merges into."
   (interactive)
   (let* ((directory (plist-get roost--compose-fields :directory))
-         ;; (SHORT . FULL) for each branch, local and remote-tracking.
+         ;; Git runs on the project's host.
          (refs (when directory
-                 (ignore-errors
-                   (let ((default-directory directory))
-                     ;; `process-file' runs Git on the project's host.
-                     (with-temp-buffer
-                       (when (zerop (process-file "git" nil t nil "for-each-ref"
-                                                  "--format=%(refname)"
-                                                  "refs/heads" "refs/remotes"))
-                         (mapcar (lambda (full)
-                                   (cons (replace-regexp-in-string
-                                          "\\`refs/\\(heads\\|remotes\\)/" "" full)
-                                         full))
-                                 (split-string (buffer-string) "\n" t))))))))
+                 (split-string (or (roost--git-in directory "for-each-ref" "--format=%(refname:short)"
+                                                  "refs/heads" "refs/remotes")
+                                   "")
+                               "\n" t)))
          (ref (string-trim (completing-read "Start from ref (empty = primary checkout's branch): "
-                                            (cons "HEAD" (mapcar #'car refs)) nil nil)))
+                                            (cons "HEAD" refs) nil nil)))
          (base (unless (string-empty-p ref) ref)))
     (setq roost--compose-fields
           (thread-first roost--compose-fields
                         (plist-put :base base)
-                        (plist-put :integration
-                                   (and base (roost--compose-integration
-                                              directory ref (cdr (assoc ref refs)))))
+                        (plist-put :integration (and base directory
+                                                     (roost--compose-integration directory ref)))
                         (plist-put :source nil)))
     (roost--compose-render)))
 
@@ -4186,7 +4181,11 @@ agent do it."
 (defun roost--git-output (task &rest args)
   "Output of Git ARGS in TASK's worktree (over TRAMP for remote tasks).
 Nil when Git fails."
-  (let ((default-directory (roost--remote-directory task)))
+  (apply #'roost--git-in (roost--remote-directory task) args))
+
+(defun roost--git-in (directory &rest args)
+  "Output of Git ARGS in DIRECTORY, on its host.  Nil when Git fails."
+  (let ((default-directory directory))
     (ignore-errors
       (with-temp-buffer
         (when (zerop (apply #'process-file "git" nil t nil args))
