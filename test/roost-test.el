@@ -1428,6 +1428,7 @@
          ;; What Git resolves each ref to, as `rev-parse --symbolic-full-name' does.
          (refs '(("main" . "refs/heads/main")
                  ("origin/release/1.2" . "refs/remotes/origin/release/1.2")
+                 ("team/origin/main" . "refs/remotes/team/origin/main")
                  ("codex/roost/fix-auth-123456" . "refs/heads/codex/roost/fix-auth-123456")
                  ;; HEAD in the task's worktree, as in a fork.
                  ("HEAD" . "refs/heads/codex/roost/fix-auth-123456")
@@ -1440,6 +1441,7 @@
                       (lambda (_program _infile _buffer _display &rest args)
                         (pcase args
                           (`("for-each-ref" . ,_) (insert "main\norigin/release/1.2\n") 0)
+                          (`("remote") (insert "origin\nteam\nteam/origin\n") 0)
                           (`("worktree" "list" "--porcelain")
                            (insert "worktree " primary "\nHEAD 0123\nbranch refs/heads/main\n\n") 0)
                           (`("rev-parse" "--symbolic-full-name" ,ref)
@@ -1452,6 +1454,8 @@
                (dolist (case '(("main" . "main")
                                ;; A remote-tracking branch merges into its local one.
                                ("origin/release/1.2" . "release/1.2")
+                               ;; A remote's name may hold a slash.
+                               ("team/origin/main" . "main")
                                ;; A task's branch merges where that task does.
                                ("codex/roost/fix-auth-123456" . "release")
                                ("HEAD" . "release")

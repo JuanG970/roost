@@ -879,6 +879,13 @@ def task_name(value):
     return name
 
 
+def current_branch(repo):
+    """The branch REPO has checked out, or "" if HEAD is detached. Not
+    `--short`, which gives heads/X when a tag is also named X."""
+    ref = git(repo, "symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ""
+
+
 def integration_for(store, repo, directory, base, current):
     """The branch a task started at BASE merges into: the branch BASE
     names, or for a remote-tracking branch the local one of its name, made
@@ -895,9 +902,11 @@ def integration_for(store, repo, directory, base, current):
             recorded = source.get("integrationBranch")
             return current if recorded is None else recorded
         return branch
-    parts = full.split("/", 3)
-    if full.startswith("refs/remotes/") and len(parts) == 4 and parts[3] != "HEAD":
-        branch = parts[3]
+    # Remote names may hold slashes, so take the longest that fits.
+    remotes = sorted(git(repo, "remote", check=False).stdout.split(), key=len, reverse=True)
+    branch = next((full[len("refs/remotes/%s/" % remote):] for remote in remotes
+                   if full.startswith("refs/remotes/%s/" % remote)), None)
+    if branch and branch != "HEAD":
         if not ref_exists(repo, branch):
             made = git(repo, "branch", "--track", branch, full, check=False)
             # Another task starting from it at the same moment may have made it.
@@ -926,7 +935,7 @@ def create(store, request):
     agent = agent_for(dict(agent=agent_name))
     command = request.get("command", agent.default_command)
     agent.validate(command)
-    current = git(repo, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip()
+    current = current_branch(repo)
     # Independent tasks start at the primary checkout. HEAD only forks the
     # source worktree when explicitly requested, rather than accidentally.
     explicit_base = text(request.get("base"))
@@ -1760,7 +1769,7 @@ def integration_branch(task):
     repo = task["repo"]
     if not branch:
         raise RoostError("The task has no integration branch (it was created from a detached HEAD); merge it manually, then retire")
-    if git(repo, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip() == branch:
+    if current_branch(repo) == branch:
         if git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0:
             raise RoostError("The primary repository already has a merge in progress")
         return branch, True

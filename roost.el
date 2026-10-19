@@ -2300,9 +2300,15 @@ helper decides it, or nil for the primary checkout's."
                                     (roost-tasks))))
              ;; Empty when that task started with the primary checkout detached.
              (if source (roost--field source 'integrationBranch) branch)))
-          ((string-match "\\`refs/remotes/[^/]+/\\(.+\\)" full)
-           (let ((branch (match-string 1 full)))
-             (unless (equal branch "HEAD") branch))))))
+          ((string-prefix-p "refs/remotes/" full)
+           ;; Remote names may hold slashes, so take the longest that fits.
+           (let* ((remotes (split-string (or (roost--git-in directory "remote") "") "\n" t))
+                  (remote (car (sort (seq-filter (lambda (remote)
+                                                   (string-prefix-p (concat "refs/remotes/" remote "/") full))
+                                                 remotes)
+                                     (lambda (a b) (> (length a) (length b))))))
+                  (branch (and remote (substring full (length (concat "refs/remotes/" remote "/"))))))
+             (unless (member branch '(nil "HEAD")) branch))))))
 
 (defun roost-compose-set-base ()
   "Choose the draft's starting Git ref; empty means the primary branch.

@@ -918,6 +918,17 @@ class Lifecycle(unittest.TestCase):
         reply = self.request("update", id=task["id"])
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(self.git("log", "-1", "--format=%s", cwd=task["worktree"]), "release moved")
+        # With the primary checkout on it, the tag hides neither it nor that it is checked out there.
+        self.request("stop", id=task["id"])
+        self.git("switch", "-q", "release")
+        self.assertEqual(self.create(name="default")["integrationBranch"], "release")
+        wt = Path(task["worktree"])
+        (wt / "work").write_text("work\n")
+        self.git("add", ".", cwd=wt)
+        self.git("commit", "-qm", "work", cwd=wt)
+        merge = self.request("merge", id=task["id"])
+        self.assertTrue(merge["ok"], merge)
+        self.assertEqual((self.repo / "work").read_text(), "work\n")
 
     def test_a_remote_tracking_start_merges_into_its_local_branch(self):
         remote = self.root / "remote.git"
@@ -935,6 +946,12 @@ class Lifecycle(unittest.TestCase):
         released = self.create(name="released", base="origin/release")
         self.assertEqual(released["integrationBranch"], "release")
         self.assertEqual(self.git("rev-parse", "--abbrev-ref", "release@{upstream}"), "origin/release")
+        # A remote's name may hold a slash.
+        self.git("remote", "add", "team/origin", str(remote))
+        self.git("fetch", "-q", "team/origin")
+        slashed = self.create(name="slashed", base="team/origin/release")
+        self.assertEqual(slashed["integrationBranch"], "release")
+        self.assertFalse(roost.ref_exists(self.repo, "origin/release"))
         # Made meanwhile by another task's start, as tasks prepare unlocked.
         with patch.object(roost, "ref_exists", side_effect=[False, True]):
             self.assertEqual(roost.integration_for(roost.Store(str(self.state)), str(self.repo.resolve()),
