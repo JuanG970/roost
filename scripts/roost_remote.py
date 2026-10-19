@@ -899,7 +899,7 @@ def integration_for(store, repo, directory, base, current):
                        if task.get("repo") == repo and task.get("branch") == branch), None)
         if source:
             # Empty when that task started with the primary checkout detached.
-            recorded = source.get("integrationBranch")
+            recorded = recorded_integration(source)
             return current if recorded is None else recorded
         return branch
     # Remote names may hold slashes, so take the longest that fits.

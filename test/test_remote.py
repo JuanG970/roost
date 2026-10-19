@@ -941,6 +941,11 @@ class Lifecycle(unittest.TestCase):
         del record["integrationRef"]
         store.save(record)
         self.request("stop", id=default["id"])
+        # A fork of it merges into release, as it does.
+        fork = self.create(name="legacy fork", directory=default["worktree"], base="HEAD")
+        self.assertEqual((fork["integrationBranch"], fork["integrationRef"]), ("release", "refs/heads/release"))
+        self.request("stop", id=fork["id"])
+        self.assertTrue(self.request("retire", id=fork["id"])["ok"])
         self.git("commit", "--allow-empty", "-qm", "release moved on")
         reply = self.request("update", id=default["id"])
         self.assertTrue(reply["ok"], reply)
