@@ -686,6 +686,13 @@ class CodexAgent:
         updates = dict(status=status, updatedAt=now(), lastEvent=event)
         if payload.get("session_id"):
             updates["agentSession"] = payload["session_id"]
+        # Codex 0.163.0 and later end a turn with its reply; older Codex, and
+        # tasks recorded before, leave the rollout to say what is newest.
+        reply = payload.get("last_assistant_message")
+        if event == "Stop" and isinstance(reply, str) and reply.strip():
+            updates["lastReply"] = reply.strip()[:LAST_MESSAGE_LIMIT + 1]
+        elif event == "UserPromptSubmit" or (event == "SessionStart" and payload.get("source") == "clear"):
+            updates["lastReply"] = None
         return updates
 
     def last_message(self, task):

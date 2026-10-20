@@ -15,6 +15,10 @@ Since 0.9.0:
   memory agent as a session of its own beside the task's, and Roost took its
   events for the task's; it now counts only sessions in the task's worktree.
   Nothing to do when upgrading.
+- A Codex task's reply shows in its notification and the task panel as soon
+  as the turn ends. Codex 0.163.0 and later report it when a turn stops;
+  Roost used to find it in Codex's session files, and still does for older
+  Codex. Nothing to do when upgrading.
 - Start a task from more places. `roost-new-task` on an error in a
   compilation buffer, or a match in a grep buffer, quotes that line. With
   Embark, `roost-new-task-from-region`, `-from-file`, `-from-url` and
