@@ -945,12 +945,16 @@ bringing back the old name, which the task's tab and panel no longer have."
   "Where TASK's pull request merged, as (HEAD . BRANCH), or nil.
 Nil while it has none, or one GitHub has not merged.  HEAD is nil when
 not known, and BRANCH the pull request's base, which an agent's own can
-choose, or else TASK's integration branch."
-  (when (eq (roost--pr-state task) 'merged)
-    (let ((status (roost--field task 'prStatus))
-          (pr (roost--field task 'pr)))
-      (cons (or (alist-get 'head status) (alist-get 'head pr))
-            (or (alist-get 'base status) (alist-get 'base pr) (roost--field task 'integrationBranch))))))
+choose, or else TASK's integration branch.  One that merged at the
+task's tip counts while another, open, is the one shown."
+  (let ((status (roost--field task 'prStatus))
+        (pr (roost--field task 'pr)))
+    (cond ((eq (roost--pr-state task) 'merged)
+           (cons (or (alist-get 'head status) (alist-get 'head pr))
+                 (or (alist-get 'base status) (alist-get 'base pr) (roost--field task 'integrationBranch))))
+          ((alist-get 'mergedHead pr)
+           (cons (alist-get 'mergedHead pr)
+                 (or (alist-get 'mergedBase pr) (roost--field task 'integrationBranch)))))))
 
 (defvar roost--merges-reported (make-hash-table :test 'equal)
   "The merges reported for each task, by task key, as (COMMIT . BRANCH).")

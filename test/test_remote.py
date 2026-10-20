@@ -2762,10 +2762,13 @@ elif args[:2] == ["auth", "status"]:
         task = self.create()
         tip = self.commit_in(task)
         self.push(task)
-        (self.gh_dir / "list.json").write_text(json.dumps([dict(number=11, state="OPEN", headRefOid=tip),
-                                                           dict(number=10, state="MERGED", headRefOid=tip)]))
+        (self.gh_dir / "list.json").write_text(json.dumps([
+            dict(number=11, state="OPEN", headRefOid=tip, baseRefName="main"),
+            dict(number=10, state="MERGED", headRefOid=tip, baseRefName="release")]))
         listed = self.request("list", full=True)["result"][0]
         self.assertEqual((listed["pr"]["number"], listed["pr"]["mergedHead"], listed["landed"]), (11, tip, True))
+        # Where it merged, though the one shown goes elsewhere.
+        self.assertEqual((listed["pr"]["base"], listed["pr"]["mergedBase"]), ("main", "release"))
         # Retiring trusts it too when gh can't say.
         (self.gh_dir / "gh").unlink()
         with patch.object(roost, "agent_path", lambda inherited: str(self.gh_dir)):
