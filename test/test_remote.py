@@ -2967,6 +2967,12 @@ elif args[:2] == ["auth", "status"]:
                           task["runId"])
         reply = self.request("list", full=True)["result"][0]["lastMessage"]
         self.assertEqual((reply[:2000], reply[2000:]), ("y" * 2000, "…"))
+        # Cut where a space follows, it still says it was cut.
+        roost.update_hook(store, task["id"], dict(hook_event_name="Stop",
+                                                  last_assistant_message="y" * 2000 + " " + "z" * 100),
+                          task["runId"])
+        reply = self.request("list", full=True)["result"][0]["lastMessage"]
+        self.assertEqual((reply[:2000], reply[2000:]), ("y" * 2000, "…"))
 
     def test_what_you_last_said_is_kept_for_the_panel_but_not_the_first_prompt(self):
         # Claude's UserPromptSubmit carries the prompt. The first is the
@@ -3618,6 +3624,9 @@ class LastMessage(unittest.TestCase):
         self.assertIsNone(roost.later_prompt(dict(prompt="Fix it"), None))
         self.assertIsNone(roost.later_prompt(dict(prompt="Fix it"), " Fix it\n"))
         self.assertEqual(roost.later_prompt(dict(prompt=None), "Fix it"), "Fix it")
+        # One that starts as the first did, beyond what the panel shows, is another.
+        said = roost.later_prompt(dict(prompt="x" * 2500 + " and then a"), "x" * 2500 + " and then b")
+        self.assertEqual(said, "x" * 2000 + "…")
 
     def test_missing_or_malformed_transcripts_give_none(self):
         for agent in ("claude", "codex", "pi", "opencode"):

@@ -6757,9 +6757,13 @@ Windows showing the panel keep their scroll position, and the mark stays."
           (roost--insert-heading "Prompt")
           (roost--insert-prompt prompt 'prompt 'roost--show-full-prompt))
         ;; Where you left off, which the terminal may have scrolled away.
-        (when-let* ((prompt (roost--latest-prompt task)))
-          (roost--insert-heading "Your latest prompt")
-          (roost--insert-prompt prompt 'latest-prompt 'roost--show-full-latest-prompt))
+        (let ((prompt (roost--latest-prompt task)))
+          ;; Another one, or none, leaves the next to come folded.
+          (unless (equal prompt roost--show-full-latest-prompt)
+            (setq roost--show-full-latest-prompt nil))
+          (when prompt
+            (roost--insert-heading "Your latest prompt")
+            (roost--insert-prompt prompt 'latest-prompt 'roost--show-full-latest-prompt)))
         (when-let* (((not beside))
                     (reply (roost--last-message task))
                     (reply (roost--prose reply)))
