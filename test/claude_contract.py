@@ -32,6 +32,8 @@ SOURCE = Path(__file__).resolve().parents[1] / "scripts/roost_remote.py"
 spec = importlib.util.spec_from_file_location("roost_remote", SOURCE)
 roost = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(roost)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_captures  # noqa: E402
 
 # Hook events Roost does not listen to, and why each changes nothing.
 IGNORED_EVENTS = {
@@ -86,6 +88,9 @@ def claude_program():
 def static_check():
     """Report what the installed Claude Code defines that Roost has not seen,
     or no longer defines what it relies on. Return the number of problems."""
+    if not shutil.which("claude"):
+        print("claude is not installed; skipped")
+        return 0
     path, version = claude_program()
     data = path.read_bytes()
     print("Claude Code %s, %s" % (version, path))
@@ -155,15 +160,23 @@ def static_check():
 
 
 class Session:
-    """A Roost task with real Claude Code, driven through the helper."""
+    """A Roost task with real Claude Code, driven through the helper. What
+    the agent reports is kept in test/captures (see agent_captures.py)."""
 
-    def __init__(self):
+    agent = "claude"
+    # Manual mode, so it asks before commands: for many accounts Claude now
+    # starts in auto mode, which approves most commands by itself.
+    command = ["claude", "--model", "haiku", "--permission-mode", "manual"]
+
+    def __init__(self, program_status=False):
         self.base = Path.home() / ".local/share/roost-contract"
         self.root = self.base / "state"
         self.repo = self.base / "repo"
         self.socket = "roost-contract"
+        self.program_status = program_status
         shutil.rmtree(self.root, ignore_errors=True)
         self.store = roost.Store(self.root)
+        (self.root / "captures").mkdir()
         if not (self.repo / ".git").is_dir():
             # A lasting repository, so Claude asks to trust it only once.
             self.repo.mkdir(parents=True, exist_ok=True)
@@ -210,6 +223,11 @@ class Session:
         raise RuntimeError("timed out after %ds waiting for %s; the agent's screen ends:\n%s"
                            % (seconds, what, self.screen()))
 
+    def when(self, condition, seconds, what):
+        """The task's record once CONDITION holds of it, tested and returned
+        as one read: with the relay, one status can pass through another."""
+        return self.until(lambda: (lambda task: condition(task) and task)(self.record()), seconds, what)
+
     def screen(self):
         lines = [line for line in self.pane().splitlines() if line.strip()]
         return "\n".join("        " + line[:100] for line in lines[-8:])
@@ -221,17 +239,33 @@ class Session:
     def send(self, text):
         self.rpc("send", id=self.task["id"], text=text)
 
+    def step(self, name):
+        """Note in the capture that the run does NAME next."""
+        agent_captures.mark(self.store, self.task, name)
+
+    def version(self):
+        out = subprocess.run([self.command[0], "--version"], text=True, capture_output=True).stdout
+        found = re.search(r"\d+\.\d+\.\d+", out)
+        return found.group(0) if found else "unknown"
+
     def run(self):
-        print("Live session in %s" % self.repo)
-        # Manual mode, so it asks before commands: for many accounts Claude now
-        # starts in auto mode, which approves most commands by itself.
-        self.task = self.rpc("create", directory=str(self.repo), name="contract", socket=self.socket,
-                             prompt="Reply with the single word PONG.",
-                             command=["claude", "--model", "haiku", "--permission-mode", "manual"])
+        print("Live session of %s in %s" % (self.agent, self.repo))
+        # However it ends, Ctrl-C too, the agent and its tmux server go.
         try:
-            self.steps()
-        except Exception as error:  # A failed step ends the session; clean up after it.
-            self.check(False, "%s: %s" % (type(error).__name__, error))
+            self.task = self.rpc("create", directory=str(self.repo), name="contract", socket=self.socket,
+                                 agent=self.agent, prompt="Reply with the single word PONG.",
+                                 command=self.command, programStatus=self.program_status)
+            self.step("a first turn, from the task's prompt")
+            try:
+                self.steps()
+            except Exception as error:  # A failed step ends the session.
+                self.check(False, "%s: %s" % (type(error).__name__, error))
+            # Only a run that went as it should replaces the capture.
+            if not self.failures:
+                path = agent_captures.save(self.store, self.store.read(self.task["id"]),
+                                           dict(version=self.version(), programStatus=self.program_status),
+                                           self.agent + ("-relayed" if self.program_status else ""))
+                print("  --    kept what it reported in test/captures/%s" % path.name)
         finally:
             self.clean_up()
         return self.failures
@@ -256,10 +290,17 @@ class Session:
         self.check("PONG" in (listed.get("lastMessage") or ""), "the listing shows the reply", listed.get("lastMessage"))
 
         ask = "Run `python3 contract_check.py` once with your Bash tool, in the foreground, and reply with its output."
+        self.step("approve a command")
         self.send(ask)
-        record = self.until(lambda: self.record()["status"] == "permission" and self.record(), 60, "a permission request")
-        self.check(record.get("request") == "Asks to run python3 contract_check.py", "the request says what it asks",
-                   record.get("request"))
+        # With the relay, its report says it waits, in its own words, before
+        # the hook says what for.
+        asks = "Asks to run python3 contract_check.py"
+        try:
+            record = self.when(lambda task: task["status"] == "permission" and task.get("request") == asks,
+                               60, "a permission request")
+        except RuntimeError:
+            record = self.record()
+        self.check(record.get("request") == asks, "the request says what it asks", record.get("request"))
         self.until(lambda: "Do you want to proceed" in self.pane(), 20, "the permission dialog")
         self.keys("Enter")
         listed = self.until(lambda: (lambda task: task.get("lastEvent") == "Approved" and task)(self.listed()), 6,
@@ -269,15 +310,17 @@ class Session:
         self.check("contract check passed" in (record.get("lastReply") or ""), "the reply quotes the command's output",
                    record.get("lastReply"))
 
+        self.step("decline a command with Esc")
         self.send(ask)
         self.until(lambda: self.record()["status"] == "permission", 60, "the second permission request")
         self.until(lambda: "Do you want to proceed" in self.pane(), 20, "the permission dialog")
         self.keys("Escape")
-        listed = self.until(lambda: (lambda task: task["status"] != "permission" and task)(self.listed()), 8,
+        listed = self.until(lambda: (lambda task: task["status"] == "ready" and task)(self.listed()), 8,
                             "the declined request to be noticed")
         self.check((listed["status"], listed.get("lastEvent")) == ("ready", "Interrupt"),
                    "a declined request shows ready", (listed["status"], listed.get("lastEvent")))
 
+        self.step("stop a turn with Esc")
         self.send("Write the numbers from 1 to 400, one per line, with no other text.")
         self.until(lambda: self.record()["status"] == "running", 30, "the counting turn")
         time.sleep(2)
@@ -292,11 +335,13 @@ class Session:
         before = self.record()
         if "--skip-idle" not in sys.argv:
             # Claude's idle reminder comes a minute after the turn.
+            self.step("wait a minute")
             time.sleep(70)
             after = self.record()
             self.check(after == before, "a minute idle changes nothing",
                        {key: after.get(key) for key in ("status", "lastEvent", "updatedAt")})
 
+        self.step("/clear")
         self.keys("/clear", "Enter")
         record = self.until(lambda: (lambda task: task.get("agentSession") != before.get("agentSession") and task)(
             self.record()), 20, "a new conversation after /clear")

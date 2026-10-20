@@ -624,6 +624,12 @@ def hook_shim(store):
     return str(path)
 
 
+# The Codex hook events Roost listens to; test/agent_contract.py checks
+# them, and the rest, against the installed Codex.
+CODEX_HOOK_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+                     "PostToolUse", "PermissionRequest", "Stop", "Interrupt")
+
+
 class CodexAgent:
     """Native Codex TUI with per-invocation, normally reviewed lifecycle hooks."""
 
@@ -646,8 +652,7 @@ class CodexAgent:
         # reviewed hook command stays the same across tasks and upgrades.
         command = shlex.join([sys.executable, hook_shim(store)])
         argv = list(task["command"])
-        for event in ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
-                      "PostToolUse", "PermissionRequest", "Stop", "Interrupt"):
+        for event in CODEX_HOOK_EVENTS:
             handler = '{ hooks = [{ type = "command", command = ' + json.dumps(command) + ', timeout = 3 }] }'
             argv += ["-c", "hooks." + event + "=[" + handler + "]"]
         session = task.get("agentSession")
@@ -656,6 +661,19 @@ class CodexAgent:
         elif text(task.get("prompt")):
             argv += ["--", task["prompt"]]
         return argv
+
+    def concerns(self, task, payload):
+        """Whether hook PAYLOAD is about TASK's conversation. Codex runs other
+        sessions of its own in the same process, as its memory agent in
+        ~/.codex/memories, and Roost's hooks report them too; the task's,
+        and its subagents', work in its worktree."""
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not cwd or not isinstance(task.get("worktree"), str):
+            return True
+        try:
+            return Path(cwd).resolve().is_relative_to(Path(task["worktree"]).resolve())
+        except (OSError, ValueError):
+            return True
 
     def observe(self, payload, current=None):
         event = payload.get("hook_event_name")
@@ -3170,6 +3188,16 @@ def beside_program_status(updates, before, reports_turns=True):
             if key not in ("status", "updatedAt", "lastEvent", "error")}
 
 
+def capture(store, task_id, entry, at=None):
+    """Note ENTRY, what TASK_ID's agent reported, read AT or now, in the
+    store's captures folder if it has one: test/agent_contract.py makes
+    one, to record a real session for test/captures."""
+    folder = store.root / "captures"
+    if folder.is_dir():
+        with contextlib.suppress(OSError), (folder / (task_id + ".jsonl")).open("a") as file:
+            file.write(json.dumps(dict(entry, at=time.time() if at is None else at), ensure_ascii=False) + "\n")
+
+
 def update_hook(store, task_id, payload, run_id=None):
     with store.locked():
         task = store.read(task_id)
@@ -3178,19 +3206,23 @@ def update_hook(store, task_id, payload, run_id=None):
         if task["status"] in ("stopped", "retired"):
             return
         before = task["status"]
+        # Status reports read before hookAt are older news than this hook;
+        # its capture keeps that time, so a replay weighs them alike.
+        read_at = None
         made = agent_worktree(task, payload.get("cwd"))
         if made and made not in (task.get("agentWorktrees") or []):
             task["agentWorktrees"] = (task.get("agentWorktrees") or []) + [made]
             store.save(task)
         agent = agent_for(task)
-        updates = agent.observe(payload, before)
+        concerns = getattr(agent, "concerns", None)
+        updates = agent.observe(payload, before) if not concerns or concerns(task, payload) else None
         if updates:
             asks = updates.get("status", before) == "permission"
             relayed = task.get("programStatusRun") == task.get("runId")
             if relayed:
                 updates = beside_program_status(updates, before, agent.reports_turns)
             if not agent.reports_turns and "status" in updates:
-                task["hookAt"] = time.time()
+                task["hookAt"] = read_at = time.time()
             # What the agent asks, if its adapter can say better than its payload.
             named = updates.pop("request", None)
             task.update(updates)
@@ -3214,6 +3246,7 @@ def update_hook(store, task_id, payload, run_id=None):
                 task.pop("request", None)
                 task.pop("requestCommand", None)
             store.save(task)
+        capture(store, task_id, {"hook": payload}, read_at)
 
 
 def agent_path(inherited):
@@ -3448,6 +3481,8 @@ def program_status_recorder(store, task_id, run_id):
             with contextlib.suppress(OSError, ValueError, RoostError), store.locked():
                 task = store.read(task_id)
                 if task.get("runId") == run_id and task["status"] not in ("stopped", "retired"):
+                    for fields in batch:
+                        capture(store, task_id, {"report": fields})
                     if any([apply_program_status(task, fields, run_id) for fields in batch]):
                         store.save(task)
 

@@ -28,11 +28,16 @@ compile:
 	  -f batch-byte-compile roost.el
 	@rm -f roost.elc
 
-# Roost's reading of the installed Claude Code (see test/claude_contract.py):
-# a free scan, and with contract-live a real session of a few Haiku turns.
+# Roost's reading of the installed agents (see test/agent_contract.py): a
+# free scan of each, and with contract-live a real session of a few turns,
+# kept in test/captures. Claude Code by default; for others, as in
+#   make contract-live CONTRACT_AGENTS="codex pi" CONTRACT_FLAGS=--program-status
+CONTRACT_AGENTS ?= claude
+CONTRACT_FLAGS ?=
+
 .PHONY: contract contract-live
 contract:
-	python3 test/claude_contract.py
+	python3 test/agent_contract.py
 
 contract-live:
-	python3 test/claude_contract.py --live
+	python3 test/agent_contract.py --live $(CONTRACT_FLAGS) $(CONTRACT_AGENTS)

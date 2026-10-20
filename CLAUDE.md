@@ -24,10 +24,12 @@ The [manual](docs/manual.md#how-it-works) says how it fits together.
   Python: `python3 -m unittest discover -s test -p 'test_remote.py' -k PATTERN`.
 - The tests of Roost in Magit and its Evil keys are skipped unless Magit,
   Evil and evil-collection are on `TEST_LOAD_PATH`.
-- After Claude Code updates, or when changing what Roost reads from it:
-  `make contract` (a free scan of the installed binary), then
-  `make contract-live` (a real session of a few Haiku turns, about three
-  minutes).
+- After an agent updates, or when changing what Roost reads from it:
+  `make contract` (a free scan of each installed agent), then
+  `make contract-live` (a real Claude session of a few Haiku turns, about
+  three minutes; `CONTRACT_AGENTS="codex pi"` for others). A live run that
+  passes records what the agent sent in `test/captures`, which `make test`
+  replays: commit a new capture, and read the diff of a changed one.
 
 ## Rules
 
