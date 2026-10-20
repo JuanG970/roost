@@ -1893,6 +1893,9 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(changes, sorted(changes, key=lambda change: change["at"]))
         self.assertEqual(reply["result"]["tasks"], [])
         self.assertGreaterEqual(reply["result"]["now"], changes[-1]["at"])
+        # It begins with the first change noted, and so for any start asked for.
+        self.assertEqual(reply["result"]["begun"], changes[0]["at"])
+        self.assertEqual(self.request("history", since=0)["result"]["begun"], changes[0]["at"])
         # Asked from later on, it has none of them.
         self.assertEqual(self.request("history", since=time.time() + 1)["result"]["changes"], [])
         self.assertIn("start", self.request("history")["error"])
@@ -3095,6 +3098,14 @@ class History(unittest.TestCase):
         Path(self.temp.name, "history").write_text("a file where the folder goes")
         self.history.note("t1", None, dict(status="starting"))
         self.assertEqual(self.history.read(0), [])
+        self.assertIsNone(self.history.begun())
+
+    def test_it_begins_with_the_oldest_change_kept(self):
+        self.assertIsNone(self.history.begun())
+        self.folder.mkdir()
+        (self.folder / "2026-10-01.jsonl").write_text('{"at": 1\n' + json.dumps(dict(at=5.0, id="t0")) + "\n")
+        (self.folder / "2026-10-02.jsonl").write_text(json.dumps(dict(at=9.0, id="t0")) + "\n")
+        self.assertEqual(self.history.begun(), 5.0)
 
 
 class RemoteGit(unittest.TestCase):

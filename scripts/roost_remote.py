@@ -257,21 +257,29 @@ class History:
                 with contextlib.suppress(OSError):
                     path.unlink()
 
+    def entries(self, path):
+        """The changes noted in PATH, a day's file, as written."""
+        with contextlib.suppress(OSError):
+            for line in path.read_text(errors="replace").splitlines():
+                # A line cut short, as by a full disk, is left out.
+                with contextlib.suppress(ValueError):
+                    entry = json.loads(line)
+                    if isinstance(entry, dict) and isinstance(entry.get("at"), (int, float)):
+                        yield entry
+
+    def begun(self):
+        """When the history kept begins, in seconds since the epoch, or None
+        without one: before then, nothing was noted, as before this helper."""
+        for _, path in self.days():
+            for entry in self.entries(path):
+                return entry["at"]
+        return None
+
     def read(self, since):
         """The changes noted since SINCE, in seconds since the epoch, oldest first."""
         first = time.strftime("%Y-%m-%d", time.gmtime(since))
-        changes = []
-        for day, path in self.days():
-            if day < first:
-                continue
-            with contextlib.suppress(OSError):
-                for line in path.read_text(errors="replace").splitlines():
-                    # A line cut short, as by a full disk, is left out.
-                    with contextlib.suppress(ValueError):
-                        entry = json.loads(line)
-                        if (isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
-                                and entry["at"] >= since):
-                            changes.append(entry)
+        changes = [entry for day, path in self.days() if day >= first
+                   for entry in self.entries(path) if entry["at"] >= since]
         changes.sort(key=lambda entry: entry["at"])
         return changes
 
@@ -2090,14 +2098,17 @@ def turn(store, task, value):
 
 def history(store, request):
     """How tasks' statuses changed since SINCE, in seconds since the epoch,
-    and each task as it is now, for Emacs to measure how long agents
-    worked and waited on you."""
+    each task as it is now, and when the history begins, for Emacs to
+    measure how long agents worked and waited on you. Read under the lock,
+    as records and the history change together: a task that changed
+    between the two would seem to have been as it is now all along."""
     since = request.get("since")
     if not isinstance(since, (int, float)) or isinstance(since, bool):
         raise RoostError("A history starts at a time")
-    return dict(now=time.time(), changes=store.history.read(since),
-                tasks=[dict(id=task["id"], **history_state(task)) for task in store.all()
-                       if isinstance(task.get("id"), str) and task.get("status") != "retired"])
+    with store.locked():
+        return dict(now=time.time(), begun=store.history.begun(), changes=store.history.read(since),
+                    tasks=[dict(id=task["id"], **history_state(task)) for task in store.all()
+                           if isinstance(task.get("id"), str) and task.get("status") != "retired"])
 
 
 def rename(store, task, name):
@@ -3849,7 +3860,6 @@ def rpc(request):
         if action == "issues":
             return {"ok": True, "result": issues(request)}
         if action == "history":
-            # Appended to whole lines at a time, so read without the lock.
             return {"ok": True, "result": history(store, request)}
         if action == "search":
             # Records are written whole, and reading transcripts takes a

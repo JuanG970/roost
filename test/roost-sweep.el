@@ -292,7 +292,7 @@ It ran for most of an hour, until ten minutes ago, and is as it is since."
     (setq roost--workload
           (list :since (roost--day-start now (- 1 roost--workload-days)) :now now
                 :replies `((,(roost--field task 'host)
-                            (now . ,now)
+                            (now . ,now) (begun . ,(- now 7200))
                             (changes ((at . ,(- now 3600)) (id . ,id) ,@running (was))
                                      ((at . ,(- now 600)) (id . ,id) ,@since (was . ,running)))
                             (tasks ((id . ,id) ,@since))))))

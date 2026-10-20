@@ -8199,6 +8199,9 @@ Beside a terminal, that turns off `roost-task-panel-mode'."
 Agents waited then on nobody, as overnight, so `roost-workload' leaves
 such stretches out of the time they waited on you.")
 
+(defvar roost--workload-generation 0
+  "Counts `roost-workload's requests, so replies to earlier ones are ignored.")
+
 (defvar roost--workload nil
   "What `roost-workload' shows, as a plist.
 :since and :now bound it, in seconds since the epoch; :replies has
@@ -8236,8 +8239,10 @@ waits on you after `roost-startup-grace' seconds: see
 A list of (KIND START END), in seconds since the epoch: KIND is `work'
 while its agent worked and `wait' while it waited on you, a task's
 spans of one kind that follow each other being one.  A task's first
-change says what it was before; one that didn't change was as it is now."
+change says what it was before; one that didn't change was as it is now.
+None start before the host's history begins: nothing was noted then."
   (let ((now (alist-get 'now reply))
+        (since (max since (or (alist-get 'begun reply) (alist-get 'now reply))))
         (changes (make-hash-table :test 'equal))
         spans)
     (dolist (change (alist-get 'changes reply))
@@ -8254,7 +8259,8 @@ change says what it was before; one that didn't change was as it is now."
          (dolist (change (append list '(nil)))
            (let* ((end (if change (alist-get 'at change) now))
                   (status (alist-get 'status state)))
-             (dolist (span (cond ((member status '("running" "background")) `((work ,start ,end)))
+             (dolist (span (cond ((>= start end) nil)
+                                 ((member status '("running" "background")) `((work ,start ,end)))
                                  ((equal status "starting")
                                   (let ((waits (max start (+ began roost-startup-grace))))
                                     (when (< waits end) `((wait ,waits ,end)))))
@@ -8411,9 +8417,11 @@ longest any waited on you at a time while you were here."
             (fill-region start (point)))))
         (goto-char (point-min))))))
 
-(defun roost--workload-reply (host reply)
-  "Take in HOST's REPLY to `roost-workload', and redraw once all have come."
-  (when-let* ((entry (assoc host (plist-get roost--workload :replies))))
+(defun roost--workload-reply (generation host reply)
+  "Take in HOST's REPLY to `roost-workload', and redraw once all have come.
+Unless GENERATION, of `roost--workload-generation', is past: `g' asked again."
+  (when-let* (((= generation roost--workload-generation))
+              (entry (assoc host (plist-get roost--workload :replies))))
     (setcdr entry reply)
     (unless (seq-some (lambda (entry) (eq (cdr entry) 'pending)) (plist-get roost--workload :replies))
       (roost--workload-compute))
@@ -8430,7 +8438,8 @@ here: see `roost--away'."
   (interactive)
   (let* ((hosts (roost--hosts))
          (now (float-time))
-         (since (roost--day-start now (- 1 roost--workload-days))))
+         (since (roost--day-start now (- 1 roost--workload-days)))
+         (generation (cl-incf roost--workload-generation)))
     (setq roost--workload (list :since since :now now
                                 :replies (mapcar (lambda (host) (cons host 'pending)) hosts)))
     (with-current-buffer (get-buffer-create "*roost workload*")
@@ -8440,8 +8449,8 @@ here: see `roost--away'."
     (pop-to-buffer "*roost workload*")
     (dolist (host hosts)
       (roost--request host "history" `((since . ,since))
-                      (lambda (reply) (roost--workload-reply host reply))
-                      (lambda (err) (roost--workload-reply host (cons 'error err)))))))
+                      (lambda (reply) (roost--workload-reply generation host reply))
+                      (lambda (err) (roost--workload-reply generation host (cons 'error err)))))))
 
 ;;;; Setup check
 

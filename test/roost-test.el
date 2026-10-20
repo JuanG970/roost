@@ -7581,6 +7581,7 @@ Each change is (AT ID STATUS SEEN TURN); its `was' is the change before
 it of the same ID's, or nil for the first."
   (let (last)
     `((now . ,now)
+      (begun . ,since)
       (changes
        ,@(mapcar (pcase-lambda (`(,at ,id ,status ,seen ,turn))
                    (let ((change `((at . ,at) (id . ,id) (status . ,status) (seen . ,seen) (turn . ,turn)
@@ -7631,7 +7632,19 @@ it of the same ID's, or nil for the first."
                      (wait 3800 3900) (wait 3950 4400))))
     ;; Without a start in sight, waiting starts where the history does.
     (should (equal (roost--history-spans (roost-test--history 1000 1100 nil '("s" "starting" nil nil)) 1000)
-                   '((wait 1015 1100))))))
+                   '((wait 1015 1100))))
+    ;; Nor before the host's history begins, as when its helper was updated
+    ;; today: an agent at work then is counted from then.
+    (let ((today (roost-test--history 1000 5000 '((4000 "r" "ready" nil nil)) '("w" "running" nil nil))))
+      (setf (alist-get 'begun today) 3000
+            (alist-get 'was (car (alist-get 'changes today))) '((status . "running") (seen) (turn)))
+      (should (equal (sort (roost--history-spans today 1000)
+                           (lambda (a b) (or (< (nth 1 a) (nth 1 b))
+                                             (and (= (nth 1 a) (nth 1 b)) (< (nth 2 a) (nth 2 b))))))
+                     '((work 3000 4000) (work 3000 5000) (wait 4000 5000))))
+      ;; With no history at all, nothing.
+      (setf (alist-get 'begun today) nil (alist-get 'changes today) nil)
+      (should-not (roost--history-spans today 1000)))))
 
 (ert-deftest roost-history-waits-on-you-as-roost-waiting-p-has-it ()
   (roost-test--isolated
@@ -7709,6 +7722,26 @@ it of the same ID's, or nil for the first."
            (should (equal (mapcar #'cadr asked) '("history" "history")))
            (should (= (nth 2 (car asked)) (roost--day-start now -6)))
            (kill-buffer)))))))
+
+(ert-deftest roost-workload-takes-only-the-replies-to-its-latest-request ()
+  ;; `g' while hosts are answering asks again: an earlier answer, coming
+  ;; late, must not replace a later one.
+  (roost-test--isolated
+   (let ((roost--workload-generation 0) replies)
+     (cl-letf (((symbol-function 'roost--hosts) (lambda () '(nil)))
+               ((symbol-function 'roost--request)
+                (lambda (_host _action parameters success failure)
+                  (push (list success failure (alist-get 'since parameters)) replies))))
+       (save-window-excursion
+         (roost-workload)
+         (roost-workload)
+         (pcase-let ((`((,_ ,latest-failure ,_) (,early ,_ ,since)) replies))
+           (funcall latest-failure "ssh: gone")
+           (funcall early (roost-test--history since (+ since 60) nil '("a" "running" nil nil)))
+           (should (eq (car (cdr (assoc nil (plist-get roost--workload :replies)))) 'error))
+           ;; The earlier answer's minute of work isn't counted.
+           (should (= (plist-get (plist-get roost--workload :week) :work) 0)))
+         (kill-buffer "*roost workload*"))))))
 
 (ert-deftest roost-what-waits-on-you-of-a-pull-request-is-told-its-host ()
   (roost-test--isolated
