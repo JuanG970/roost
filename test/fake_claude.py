@@ -110,7 +110,7 @@ for line in lines():
     # what is typed.
     line = re.sub(r"\x1b\[<\d+;\d+;\d+[Mm]", "", line)
     record("user", line.strip())
-    event("UserPromptSubmit")
+    event("UserPromptSubmit", prompt=line.strip())
     status("working", "Thinking")
     if line.strip() == "permission":
         event("PermissionRequest")

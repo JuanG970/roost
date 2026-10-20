@@ -189,7 +189,9 @@ none once you've seen an agent that waits for nothing. A click opens the task,
 quitting any question you left open in the minibuffer, which would hold it back,
 and closing a menu left open. `I` docks a panel at the right of an open task's terminal,
 kept current as the agent works: what to do next, the task's prompt, and the
-files it changed, those not yet committed first. A click or `RET` on a file
+files it changed, those not yet committed first. Once you have sent a Claude or
+Codex agent more, your latest prompt shows under the task's, a reminder of
+where you left off that the terminal may have scrolled away. A click or `RET` on a file
 opens its diff in Magit, where `;` writes a note for the agent (more under
 Review in Magit, below). The terminal shows the agent's replies, so the panel leaves them out
 while the terminal is on screen; `i` shows the same panel in the main area,
@@ -289,7 +291,7 @@ keep it from saying so.
 | `r` | `roost-review` | Magit in the worktree |
 | `D` | `roost-diff` | Diff the task's own changes, including uncommitted ones |
 | `e` | `roost-send` | Paste a prompt into the agent and press Enter |
-| `i` | `roost-task-info` | The task's next step, prompt, latest reply, changes and details |
+| `i` | `roost-task-info` | The task's next step, prompt, your latest prompt, the agent's latest reply, changes and details |
 | `R` | `roost-rename` | Rename the task, in Roost, its tab or perspective, and its agent's tmux window; its branch and worktree keep the name it started with |
 | `l` | `roost-switch-task` | Choose a task by name, waiting tasks first |
 | `/` | `roost-search` | Find messages in your tasks' conversations, retired tasks' too; `RET` opens a live task, `TAB` shows more of a message (its first 1,500 characters) |
