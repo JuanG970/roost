@@ -115,21 +115,21 @@ counts as waiting, and conflicts show before merge time.
   and lapse when unreviewed ones land. Rewinding stays the agent's
   (`/rewind`).
 - **Evidence beside the files in the task panel.** Show what a decision can
-  rest on without opening the diff, as facts in the order they're easiest
-  to check: the pull request's checks, or a local check command's (in
-  [Worth trying](#worth-trying)), with "no checks ran" looking different
-  from "passed"; the reviewer's findings still open, with file and line;
-  and the agent's latest reply, labelled as its own account. With the size
-  of the change, which the panel gives already, and any paths marked as
-  risky (below), that's enough to finish a small change that passed
-  everything, or to pick the one worth reading closely; the file list and
-  Magit stay as they are. No badge, score or "ready to merge" line: "no
-  checks ran" beside a reply that says the tests pass shows the
-  contradiction without Roost judging either. Before a pull request, the
-  agent's own test output stays in its terminal. From the Claude Code
-  team's review, where people judge a change by its evidence more than by
-  its lines, and from studies in which an explanation made people accept
-  advice whether or not it was right
+  rest on without opening the diff, as facts in the order they're easiest to
+  check: the pull request's checks, or a local check command's
+  (in [Worth trying](#worth-trying)), saying which, with "no CI results"
+  looking different from "passed"; the reviewer's findings still open, with
+  file and line; and the agent's latest reply, labelled as its own account.
+  With the size of the change, which the panel gives already, and any paths
+  marked as risky (below), that's enough to finish a small change that
+  passed everything, or to pick the one worth reading closely; the file list
+  and Magit stay as they are. No badge, score or "ready to merge" line: "no
+  CI results" beside a reply that says the tests pass shows that only the
+  agent vouches for them, without Roost judging either. Before a pull
+  request, the agent's own test output stays in its terminal. From the
+  Claude Code team's review, where people judge a change by its evidence
+  more than by its lines, and from studies in which an explanation made
+  people accept advice whether or not it was right
   ([Bansal et al.](https://arxiv.org/abs/2006.14779)).
 - **Marks for risky changes.** Large changes have theirs: a dim `±` on the
   row once a task's changes reach 400 lines, 10 files or 3 top-level

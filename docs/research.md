@@ -434,10 +434,11 @@ Two candidates in the roadmap's "Worth trying" and "Exploring" lists also cut
 against the review ceiling: several attempts at one prompt, and agents that
 start Roost tasks, both multiply output without making it cheaper to judge.
 The evidence fits them only where comparing attempts is cheap or a person
-confirms the split before agents start; ParallelPilot's planner raised output
-only because a person reviewed its plan. The roadmap also still lists pull
-requests that wait on you and conflicts before merge time as ideas, though the
-manual and changelog describe both as working.
+confirms the split before agents start, as in ParallelPilot, where reviewing
+the planner's split before any agent started was part of the workflow the
+trial tested. The roadmap also still lists pull requests that wait on you and
+conflicts before merge time as ideas, though the manual and changelog describe
+both as working.
 
 ## The best-supported changes shorten review, not the walk to it
 
@@ -483,7 +484,7 @@ measurement ([METR RCT](https://arxiv.org/abs/2507.09089)).
 | Rank | Change | Where it stands | Evidence | Expected effect |
 | --- | --- | --- | --- | --- |
 | 1 | Since you last looked, by content, the agent's own changes included, on the row, the panel, `r`, `m` and `P` | Roadmap, "most likely first" | Moderate | High: cuts re-review, the most discussed cost |
-| 2 | Evidence beside the files as facts: checks with missing ones shown as missing, findings with file and line, the reply labelled as the agent's account; no badge or score | Roadmap, refined | Moderate to strong | High on judgment; modest on speed |
+| 2 | Evidence beside the files as facts: checks by where they ran, with none reported shown apart from passed, findings with file and line, the reply labelled as the agent's account; no badge or score | Roadmap, refined | Moderate to strong | High on judgment; modest on speed |
 | 3 | Size and spread in the panel, and a dim mark on the row past about 400 lines, 10 files or several top-level directories, beside risky paths | Roadmap, threshold changed | Strong in direction, weak for the exact numbers | Medium to high |
 | 4 | Notifications by urgency: blocking requests alone and at once; finished, failed and pull-request turns grouped across tasks after a short delay | New | Moderate | Small at two or three agents, large at five or more |
 | 5 | At task start, name running tasks that already change the files the draft points at | New, beside the roadmap's file-buffer header line | Moderate | Medium: keeps agents independent |
@@ -517,18 +518,20 @@ when the evidence they judged has gone stale.
 
 **Evidence beside the files** should be facts, ordered by how easily they can
 be checked: first the pull request's checks or a local check command's result,
-with "no checks ran" looking different from "passed"; then open reviewer
-findings with file and line; then the agent's latest reply, labelled as its
-account. A single badge, score or "ready to merge" line would move Roost from
-informing to recommending, where wrong aids cost most ([Onnasch et al.
+each saying which it is, with "no CI results" looking different from "passed";
+then open reviewer findings with file and line; then the agent's latest reply,
+labelled as its account. A single badge, score or "ready to merge" line would
+move Roost from informing to recommending, where wrong aids cost most
+([Onnasch et al.
 2014](https://depositonce.tu-berlin.de/items/7df9879f-d77b-4f2b-8760-f0e3d174ca67/full);
 [Goddard et al. 2012](https://pmc.ncbi.nlm.nih.gov/articles/PMC3240751)).
-Roost need not parse an agent's claims to expose a contradiction: "no checks
-ran" placed beside a reply saying the tests pass lets the reader see it.
-Findings should point people at hunks worth reading rather than replace the
-file list, since automated review comments narrowed where reviewers looked and
-turned up more minor issues but no more serious ones ([Tufano et
-al.](https://arxiv.org/abs/2411.11401v1)).
+Roost need not parse an agent's claims to show which rest on its word alone:
+"no CI results" placed beside a reply saying the tests pass tells the reader
+the claim is unverified, not that it is false, since the agent may have run
+them in its terminal. Findings should point people at hunks worth reading
+rather than replace the file list, since automated review comments narrowed
+where reviewers looked and turned up more minor issues but no more serious
+ones ([Tufano et al.](https://arxiv.org/abs/2411.11401v1)).
 
 **Size and spread** rests on the most consistent finding in review research,
 that smaller changes are reviewed better and faster ([Sadowski et
