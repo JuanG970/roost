@@ -61,7 +61,13 @@ class Lifecycle(unittest.TestCase):
     def tearDown(self):
         roost.tmux(self.socket, "kill-server", check=False)
         tmux_socket_path(self.socket).unlink(missing_ok=True)
-        self.temp.cleanup()
+        try:
+            self.temp.cleanup()
+        except OSError:
+            # A hook the agent ran as tmux killed it may still be noting
+            # its event, as in the history.
+            time.sleep(0.5)
+            shutil.rmtree(self.temp.name, ignore_errors=True)
 
     def git(self, *args, cwd=None):
         return roost.git(cwd or self.repo, *args).stdout.strip()
@@ -3124,6 +3130,13 @@ class History(unittest.TestCase):
         self.assertTrue((self.folder / "notes.txt").exists())
         self.assertEqual([change["status"] for change in self.history.read(0)], ["running", "starting"])
         self.assertEqual([change["status"] for change in self.history.read(time.time() - 3600)], ["starting"])
+
+    def test_a_line_cut_short_today_takes_no_other_with_it(self):
+        self.history.note("t1", None, dict(status="starting"))
+        today = next(self.folder.glob("*.jsonl"))
+        today.write_text(today.read_text() + '{"at": 1, "id": "t1", "sta')
+        self.history.note("t1", dict(status="starting"), dict(status="running"))
+        self.assertEqual([change["status"] for change in self.history.read(0)], ["starting", "running"])
 
     def test_a_failure_to_note_fails_nothing(self):
         Path(self.temp.name, "history").write_text("a file where the folder goes")

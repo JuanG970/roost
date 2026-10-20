@@ -238,9 +238,16 @@ class History:
             self.folder.mkdir(mode=0o700, exist_ok=True)
             path = self.folder / (day + ".jsonl")
             new = not path.exists()
+            line = (json.dumps(entry, ensure_ascii=False) + "\n").encode()
             # One short line, written whole: hooks note changes at once.
-            with path.open("a") as log:
-                log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            with path.open("a+b") as log:
+                # A line cut short, as by a full disk, ends here, rather
+                # than taking this one with it.
+                if log.seek(0, os.SEEK_END):
+                    log.seek(-1, os.SEEK_END)
+                    if log.read(1) != b"\n":
+                        line = b"\n" + line
+                log.write(line)
             if new:
                 self.prune(at)
 

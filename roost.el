@@ -4995,11 +4995,21 @@ it had would seem to end."
           ((and (assq 'landed task)
                 (or (not (memq (roost--pr-state task) '(open draft))) (roost--field task 'prStatus)))
            (puthash key turn roost--turns-sent)
-           (roost--request (roost--field task 'host) "turn"
-                           (list (cons 'id (roost--field task 'id)) (cons 'turn turn))
-                           #'ignore
-                           ;; Sent again with the task's next news.
-                           (lambda (_) (remhash key roost--turns-sent)))))))
+           (let ((sent (lambda ()
+                         (when (equal (gethash key roost--turns-sent 'none) turn)
+                           (remhash key roost--turns-sent)))))
+             (roost--request (roost--field task 'host) "turn"
+                             (list (cons 'id (roost--field task 'id)) (cons 'turn turn))
+                             ;; What its record says now, which another Emacs
+                             ;; may yet change: the next poll compares again.
+                             (lambda (record)
+                               (funcall sent)
+                               (when-let* ((cached (gethash key roost--tasks)))
+                                 (puthash key (cons (cons 'turn (roost--field record 'turn))
+                                                    (assq-delete-all 'turn (copy-sequence cached)))
+                                          roost--tasks)))
+                             ;; Sent again with the task's next news.
+                             (lambda (_) (funcall sent))))))))
 
 (defun roost--reviewer-name (reviewer)
   "How to name REVIEWER, a login or team slug that a review is asked of.

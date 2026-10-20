@@ -7830,6 +7830,33 @@ it of the same ID's, or nil for the first."
        (roost--cache-task "dev" `((landed) (pr (number . 12)) ,@(roost-test--task "1111111111111111")))
        (should-not sent)))))
 
+(ert-deftest roost-a-turn-another-emacs-changed-is-told-again ()
+  ;; Its host takes the last word, as from another Emacs, or a reply out of
+  ;; order: the next poll that says otherwise is answered.
+  (roost-test--isolated
+   (let (sent replies)
+     (cl-letf (((symbol-function 'roost--report-turn) roost-test--report-turn)
+               ((symbol-function 'roost--request)
+                (lambda (_host _action parameters success _failure)
+                  (push (alist-get 'turn parameters) sent)
+                  (push success replies))))
+       (let ((conflicting `((seen . "2026-10-03T20:00:00+00:00") (integrationBranch . "main")
+                            (landed) (conflicts "ledger.py") ,@(roost-test--task))))
+         (roost--cache-task "dev" conflicting)
+         ;; Its host has it now, and the reply says so.
+         (funcall (pop replies) (cons '(turn . "conflicts") (roost-test--task)))
+         (should (equal (roost--field (car (roost-tasks)) 'turn) "conflicts"))
+         (should (zerop (hash-table-count roost--turns-sent)))
+         (roost--cache-task "dev" (cons '(turn . "conflicts") conflicting))
+         (should (equal sent '("conflicts")))
+         ;; Another Emacs, with older news, said there was none.
+         (roost--cache-task "dev" (cons '(turn) conflicting))
+         (should (equal sent '("conflicts" "conflicts")))
+         ;; A reply to an earlier request, late, leaves the later one to come.
+         (puthash (roost--key (car (roost-tasks))) nil roost--turns-sent)
+         (funcall (pop replies) (cons '(turn . "conflicts") (roost-test--task)))
+         (should (equal (gethash (roost--key (car (roost-tasks))) roost--turns-sent 'none) nil)))))))
+
 (provide 'roost-test)
 
 (ert-deftest roost-terminal-size-is-the-window-the-task-opens-in ()
