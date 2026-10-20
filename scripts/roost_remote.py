@@ -2353,7 +2353,10 @@ def look(store, task_id):
                 start = look_start(worktree, before)
                 entries, left_out = [], False
                 if start:
-                    changed = changed_between(worktree, start, commit) or []
+                    changed = changed_between(worktree, start, commit)
+                    if changed is None:
+                        # The look before stands, to compare with next time.
+                        raise RoostError("Git could not compare the task's work with where you last looked")
                     # One that grew too large since a look kept it is still there.
                     large = untracked_files(worktree)[1]
                     entries = [entry for entry in changed if entry[0] not in large]

@@ -895,7 +895,8 @@ bringing back the old name, which the task's tab and panel no longer have."
   "TASK, with OLD's record of where you last looked when that is newer.
 A reply its host read before you last looked at the task, such as a
 poll's, can arrive after the look's: it must not bring back the look
-before, which would count again what you have looked at since."
+before, which would count again what you have looked at since.  Nor
+must a reply with a newer look lose it for an older agent event."
   (let ((looked (roost--field old 'looked)))
     (if (string< (or (alist-get 'at (roost--field task 'looked)) "") (or (alist-get 'at looked) ""))
         (cons (cons 'looked looked) (assq-delete-all 'looked task))
@@ -906,7 +907,9 @@ before, which would count again what you have looked at since."
   (setf (alist-get 'host task) host)
   (setq task (assq-delete-all 'pushed task))
   (when-let* ((old (gethash (roost--key task) roost--tasks)))
-    (setq task (roost--newer-look (roost--newer-name (roost--newer-events task old) old) old)))
+    ;; Looks and the agent's events move apart: the newer of each counts.
+    (let ((looked (roost--newer-look old task)))
+      (setq task (roost--newer-look (roost--newer-name (roost--newer-events task old) old) looked))))
   (let* ((key (roost--key task))
          (old (gethash key roost--tasks))
          (had-merged (and old (roost--pr-merges old)))
@@ -4588,7 +4591,9 @@ sent once at a time."
            (message "Sent the note on %s to %s" (roost--note-location note) (roost--field task 'name)))
          (lambda (err)
            (setq roost--notes-sending (delete id roost--notes-sending))
-           (message "Roost could not send the note to %s: %s" (roost--field task 'name) err)))
+           (message "Roost could not send the note to %s: %s" (roost--field task 'name) err))
+         ;; You have looked at what it is about.
+         t)
       ;; A declined confirmation leaves the note ready to send again.
       ((quit error)
        (setq roost--notes-sending (delete id roost--notes-sending))

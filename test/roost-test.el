@@ -5665,7 +5665,14 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
      (should (equal (alist-get 'commit (roost--field task 'looked)) "new"))
      ;; Measured against the look before, its count says nothing.
      (should-not (roost--since-looked task)))
-   (should (equal (alist-get 'commit (roost--field (roost--cache-task "dev" (roost-test--task)) 'looked)) "new"))))
+   (should (equal (alist-get 'commit (roost--field (roost--cache-task "dev" (roost-test--task)) 'looked)) "new"))
+   ;; A reply with a newer look but an older agent event keeps the look.
+   (roost--cache-task "dev" (append '((updatedAt . "2026-10-03T22:00:00+00:00")) (roost-test--task)))
+   (let ((task (roost--cache-task "dev" (append '((looked (commit . "newest") (at . "2026-10-03T23:00:00+00:00"))
+                                                  (updatedAt . "2026-10-03T21:30:00+00:00"))
+                                                (roost-test--task)))))
+     (should (equal (alist-get 'commit (roost--field task 'looked)) "newest"))
+     (should (equal (roost--field task 'updatedAt) "2026-10-03T22:00:00+00:00")))))
 
 (ert-deftest roost-the-task-panel-names-other-tasks-changing-its-files ()
   (roost-test--isolated
@@ -7663,7 +7670,10 @@ With INITIAL, the box must start out holding it."
    (let ((task (roost--cache-task "dev" (roost-test--task "a"))) callbacks)
      (setq roost--notes (list (roost-test--note "1" "a" '(file . "x") '(text . "Once"))))
      (cl-letf (((symbol-function 'roost--send-text)
-                (lambda (_task _text done failed) (push (cons done failed) callbacks)))
+                (lambda (_task _text done failed &optional look)
+                  ;; A note sent alone says you looked at what it is about.
+                  (should look)
+                  (push (cons done failed) callbacks)))
                ((symbol-function 'roost--redraw) #'ignore))
        (roost-note-send (car roost--notes))
        (should-error (roost-note-send (car roost--notes)) :type 'user-error)

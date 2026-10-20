@@ -2023,6 +2023,16 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(roost.Store(str(self.state)).read(task["id"])["looked"], before)
         self.assertEqual(self.since_looked(task)["count"], 1)
 
+    def test_a_look_git_cannot_compare_leaves_the_look_before(self):
+        task = self.create()
+        self.request("look", id=task["id"])
+        self.commit_in(task, "more")
+        before = roost.Store(str(self.state)).read(task["id"])["looked"]
+        with patch.object(roost, "changed_between", lambda *args, **kw: None):
+            reply = self.request("look", id=task["id"])
+        self.assertIn("could not compare", reply["error"])
+        self.assertEqual(roost.Store(str(self.state)).read(task["id"])["looked"], before)
+
     def test_a_look_recorded_meanwhile_is_not_overwritten(self):
         task = self.create()
         store = roost.Store(str(self.state))
