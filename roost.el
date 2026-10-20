@@ -3575,9 +3575,16 @@ its own.  See `roost-magit-status-sections'."
               (looked (roost--field task 'looked))
               (since (alist-get 'since looked))
               (files (alist-get 'files since))
-              (range (concat (alist-get 'start since) ".." (alist-get 'commit looked))))
+              (start (alist-get 'start since))
+              (end (alist-get 'commit looked))
+              ;; Git prunes what a look kept of uncommitted work in time.
+              ((magit-rev-verify (concat start "^{commit}")))
+              ((magit-rev-verify (concat end "^{commit}"))))
+    ;; The files its diff is of go with the section, as the task's record
+    ;; may change before you press RET: all of them, unless some of the
+    ;; files that changed were only the integration branch's.
     (roost--magit-insert-section
-     'roost-since-looked range nil
+     'roost-since-looked (list (concat start ".." end) (alist-get 'paths since)) nil
      (lambda ()
        (roost--magit-section-keymap 'roost-since-looked-section-map)
        (magit-insert-heading
@@ -3620,17 +3627,11 @@ changes.  As in any diff of the task, \\<roost-magit-mode-map>\\[roost-note] wri
   (let* ((section (magit-current-section))
          (file (when (eq (roost--slot section 'type) 'roost-since-looked-file)
                  (prog1 (roost--slot section 'value)
-                   (setq section (roost--slot section 'parent)))))
-         (task (roost--task-in-directory default-directory))
-         (since (alist-get 'since (roost--field task 'looked)))
-         (files (mapcar (lambda (file) (alist-get 'path file)) (alist-get 'files since))))
+                   (setq section (roost--slot section 'parent))))))
     (unless (eq (roost--slot section 'type) 'roost-since-looked)
       (user-error "Put point on what changed since you last looked"))
-    (magit-diff-range (roost--slot section 'value) (car (magit-diff-arguments))
-                      (cond (file (list file))
-                            ;; All of them, as when the integration branch
-                            ;; was merged in since, which changed others.
-                            ((= (length files) (or (alist-get 'count since) 0)) files)))))
+    (pcase-let ((`(,range ,paths) (roost--slot section 'value)))
+      (magit-diff-range range (car (magit-diff-arguments)) (if file (list file) paths)))))
 
 (defun roost--magit-insert-section (type value hide insert)
   "Insert a Magit section of TYPE with VALUE, folded if HIDE, using INSERT.

@@ -2077,6 +2077,9 @@ LOOK_FILE_LIMIT = 1024 * 1024
 LOOK_ADD_BATCH = 200
 # The files changed between two looks that are listed, for Magit.
 LOOK_FILES_LIMIT = 100
+# The paths a comparison that leaves out files names, for Magit's diff
+# of it; past this many, the diff shows every file.
+LOOK_PATHS_LIMIT = 1000
 # For Git staging in a copy of an index, or reading one: a whole index of
 # its own, and none of your hooks, which Git runs on writing an index.
 SCRATCH_INDEX_GIT = ("--no-optional-locks", "-c", "core.splitIndex=false", "-c", "core.hooksPath=/dev/null")
@@ -2105,7 +2108,8 @@ def scratch_index(worktree, untracked, intent):
     """The environment for Git to stage in a copy of WORKTREE's index, so
     the one you and its agent use stays as it is, with UNTRACKED files
     added: with INTENT, as intent to add, which writes nothing in the
-    repository, or else whole. The copy is removed after."""
+    repository, or else whole, and then a file Git can't add is an error,
+    rather than a look that leaves it out. The copy is removed after."""
     index = read_git(worktree, "rev-parse", "--git-path", "index").stdout.strip()
     folder = tempfile.mkdtemp(prefix="roost-look-")
     try:
@@ -2119,7 +2123,7 @@ def scratch_index(worktree, untracked, intent):
         for start in range(0, len(untracked), LOOK_ADD_BATCH):
             git(worktree, *SCRATCH_INDEX_GIT, "--literal-pathspecs", "add",
                 *(["--intent-to-add"] if intent else []), "--", *untracked[start:start + LOOK_ADD_BATCH],
-                check=False, env=env)
+                check=not intent, env=env)
         yield env
     finally:
         shutil.rmtree(folder, ignore_errors=True)
@@ -2131,19 +2135,20 @@ def snapshot(worktree):
     and large untracked files, made in a copy of its index. No branch or
     other ref points at it, nothing you or the agent staged changes, and
     Git prunes it in time (`gc.pruneExpire`, two weeks by default). None
-    for both when WORKTREE has no commit."""
+    for both when WORKTREE has no commit. Git failing to keep what is
+    there, as with no room for it, is an error: the look before stands."""
     head = read_git(worktree, "rev-parse", "--verify", "-q", "HEAD^{commit}").stdout.strip()
     if not head:
         return None, None
     with scratch_index(worktree, untracked_files(worktree), intent=False) as env:
-        git(worktree, *SCRATCH_INDEX_GIT, "add", "--update", check=False, env=env)
-        tree = git(worktree, *SCRATCH_INDEX_GIT, "write-tree", check=False, env=env).stdout.strip()
-    if not tree or tree == read_git(worktree, "rev-parse", head + "^{tree}").stdout.strip():
+        git(worktree, *SCRATCH_INDEX_GIT, "add", "--update", env=env)
+        tree = git(worktree, *SCRATCH_INDEX_GIT, "write-tree", env=env).stdout.strip()
+    if tree == git(worktree, "--no-optional-locks", "rev-parse", head + "^{tree}").stdout.strip():
         return head, head
-    made = read_git(worktree, "-c", "commit.gpgSign=false", "commit-tree", "-p", head,
-                    "-m", "Where the task stood when you looked at it, kept by Roost", tree,
-                    env=dict(os.environ, **LOOK_IDENTITY)).stdout.strip()
-    return made or head, head
+    made = git(worktree, "--no-optional-locks", "-c", "commit.gpgSign=false", "commit-tree", "-p", head,
+               "-m", "Where the task stood when you looked at it, kept by Roost", tree,
+               env=dict(os.environ, **LOOK_IDENTITY)).stdout.strip()
+    return made, head
 
 
 def changed_between(worktree, start, end=None, env=None, names=False):
@@ -2179,14 +2184,16 @@ def own_changes(worktree, entries, looked, start, base, end=None, env=None):
     """ENTRIES, files changed since the look LOOKED, at START, without the
     files that only its integration branch changed, when that was merged
     into the task since, so its base moved to BASE: those the task changes
-    then or now, at END or else in WORKTREE as ENV stages it, stay."""
+    then or now, at END or else in WORKTREE as ENV stages it, stay. With
+    whether any were left out, as (ENTRIES, LEFT-OUT)."""
     if not isinstance(looked.get("base"), str) or looked["base"] == base:
-        return entries
+        return entries, False
     then = changed_between(worktree, looked["base"], start, names=True)
     now = changed_between(worktree, base, end, env=env, names=True)
     if then is None or now is None:
-        return entries
-    return [entry for entry in entries if entry[0] in then | now]
+        return entries, False
+    own = [entry for entry in entries if entry[0] in then | now]
+    return own, len(own) < len(entries)
 
 
 def change_count(entries):
@@ -2209,7 +2216,7 @@ def since_looked(task, worktree, base):
         entries = changed_between(worktree, start, env=env)
         if entries is None:
             return None
-        entries = own_changes(worktree, entries, looked, start, base, env=env)
+        entries, _ = own_changes(worktree, entries, looked, start, base, env=env)
     return dict(change_count(entries), at=looked.get("at"))
 
 
@@ -2327,6 +2334,7 @@ def look(store, task_id):
         worktree = Path(task["worktree"])
         if not worktree.is_dir():
             raise RoostError("Task worktree is gone; forget the task to remove it from Roost")
+        before = task.get("looked") if isinstance(task.get("looked"), dict) else {}
         with holding_worktree(store, task, fcntl.LOCK_SH,
                               "Roost is still removing this task's worktree; refresh in a moment"):
             with store.released():
@@ -2335,21 +2343,31 @@ def look(store, task_id):
                 if not commit:
                     raise RoostError("The task's worktree has no commit to look at")
                 looked = dict(commit=commit, head=head, base=base, at=now())
-                before = task.get("looked") if isinstance(task.get("looked"), dict) else {}
                 start = look_start(worktree, before)
-                entries = start and own_changes(worktree, changed_between(worktree, start, commit) or [],
-                                                before, start, base, end=commit)
+                entries, left_out = (own_changes(worktree, changed_between(worktree, start, commit) or [],
+                                                 before, start, base, end=commit)
+                                     if start else ([], False))
+                since = before.get("since")
                 if entries:
                     looked["since"] = dict(change_count(entries), start=start, at=before.get("at"),
                                            files=[dict(path=path, added=added, deleted=deleted)
                                                   for path, added, deleted in entries[:LOOK_FILES_LIMIT]])
-                elif start and isinstance(before.get("since"), dict):
-                    # Nothing of the task's changed: what changed before still did.
-                    looked["since"] = before["since"]
+                    if left_out and len(entries) <= LOOK_PATHS_LIMIT:
+                        # Magit's diff of them leaves out the same files.
+                        looked["since"]["paths"] = [path for path, _, _ in entries]
+                elif (start and isinstance(since, dict) and look_start(worktree, dict(commit=since.get("start")))):
+                    # Nothing of the task's changed: what changed before
+                    # still did, while Git still has where it changed from.
+                    looked["since"] = since
             task = store.read(task_id)
-            task["looked"] = looked
-            store.save(task)
-    task["sinceLooked"] = dict(count=0, added=0, deleted=0, at=looked["at"])
+            current = task.get("looked") if isinstance(task.get("looked"), dict) else {}
+            if current != before:
+                # Another look, as from another Emacs, was recorded meanwhile.
+                looked = current
+            else:
+                task["looked"] = looked
+                store.save(task)
+    task["sinceLooked"] = dict(count=0, added=0, deleted=0, at=looked.get("at"))
     return task
 
 

@@ -1901,12 +1901,14 @@ def large(qa, repo):
     answer_yes(qa, name)
     # Its name gives way in the sidebar to the mark and what you haven't looked at.
     row = lambda s: sidebar_row(qa, s, name[:10])
+    magit = qa.emacs.eval("(and (require 'magit nil t) t)") == "t"
     qa.wait("its size", lambda s: "In docs/, src/ and test/" in panel_text(qa, s))
     qa.step("Marked", expect=[
         ("the panel counts the lines of its new files", lambda s: "± 3 files +452 −0" in panel_text(qa, s)),
         ("its row in the sidebar has the mark", lambda s: "±" in row(s)),
-        ("and no status, once seen, but that you haven't looked at it",
-         lambda s: (qa.task(s, name) or {}).get("status") == "idle" and row(s).endswith("± not looked at"))])
+        ("and no status, once seen, but, with Magit, that you haven't looked at it",
+         lambda s: (qa.task(s, name) or {}).get("status") == "idle"
+         and row(s).endswith("± not looked at" if magit else "±"))])
     qa.keys("C-c r S")
     qa.wait("the dashboard", lambda s: (qa.window(s, "roost-dashboard-mode") or {}).get("selected"))
     qa.step("The dashboard marks it too", expect=[

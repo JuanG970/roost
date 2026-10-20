@@ -1992,6 +1992,56 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.since_looked(task)["count"], 1)
         looked = self.request("look", id=task["id"])["result"]["looked"]
         self.assertEqual([file["path"] for file in looked["since"]["files"]], ["mine"])
+        # Magit's diff of them leaves out what main changed too.
+        self.assertEqual(looked["since"]["paths"], ["mine"])
+
+    def test_a_look_git_cannot_keep_leaves_the_look_before(self):
+        task = self.create()
+        wt = Path(task["worktree"])
+        before = self.request("look", id=task["id"])["result"]["looked"]
+        (wt / "hello").write_text("edited\n")
+        objects = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=wt)) / "objects"
+        folders = [objects] + [path for path in objects.rglob("*") if path.is_dir()]
+        for folder in folders:
+            folder.chmod(0o555)
+        try:
+            reply = self.request("look", id=task["id"])
+        finally:
+            for folder in folders:
+                folder.chmod(0o755)
+        self.assertFalse(reply["ok"], reply)
+        self.assertEqual(roost.Store(str(self.state)).read(task["id"])["looked"], before)
+        self.assertEqual(self.since_looked(task)["count"], 1)
+
+    def test_a_look_recorded_meanwhile_is_not_overwritten(self):
+        task = self.create()
+        store = roost.Store(str(self.state))
+        real, meanwhile = roost.snapshot, []
+
+        def snapshot(worktree):
+            if not meanwhile:
+                # Another Emacs looks while this look is under way.
+                meanwhile.append(None)
+                meanwhile[0] = roost.look(store, task["id"])["looked"]
+            return real(worktree)
+
+        with patch.object(roost, "snapshot", snapshot):
+            reply = self.request("look", id=task["id"])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(store.read(task["id"])["looked"], meanwhile[0])
+        self.assertEqual(reply["result"]["looked"], meanwhile[0])
+
+    def test_what_changed_before_goes_once_git_has_pruned_where_from(self):
+        task = self.create()
+        wt = Path(task["worktree"])
+        self.request("look", id=task["id"])
+        self.commit_in(task, "more")
+        since = self.request("look", id=task["id"])["result"]["looked"]["since"]
+        self.assertEqual(self.request("look", id=task["id"])["result"]["looked"]["since"], since)
+        store = roost.Store(str(self.state))
+        record = store.read(task["id"])
+        store.save(dict(record, looked=dict(record["looked"], since=dict(since, start="0" * 40))))
+        self.assertNotIn("since", self.request("look", id=task["id"])["result"]["looked"])
 
     def test_notes_sent_record_a_look_before_the_agent_has_them(self):
         task = self.create()

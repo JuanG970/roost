@@ -7826,7 +7826,8 @@ With INITIAL, the box must start out holding it."
         (re-search-forward "^Changed since you last looked, [0-9]+d ago (1)$")
         (let ((section (magit-current-section)))
           (should (eq (eieio-oref section 'type) 'roost-since-looked))
-          (should (equal (eieio-oref section 'value) (concat start ".." (funcall rev))))
+          ;; With every file, as none were only the integration branch's.
+          (should (equal (eieio-oref section 'value) (list (concat start ".." (funcall rev)) nil)))
           ;; Beside the commits not yet merged.
           (should (string-match-p "\\`Changed since you last looked.*\n *a\\.txt  \\+1 −0\n\nUnmerged into main"
                                   (buffer-substring (eieio-oref section 'start) (point-max))))
@@ -7839,6 +7840,23 @@ With INITIAL, the box must start out holding it."
         (forward-line)
         (should (eq (eieio-oref (magit-current-section) 'type) 'roost-since-looked-file))
         (should (eq (key-binding (kbd "RET")) 'roost-diff-since-looked)))
+      ;; The files its diff is of are the section's, whatever the task's
+      ;; record says by the time you press RET.
+      (setf (alist-get 'paths (alist-get 'since (alist-get 'looked task))) '("a.txt"))
+      (with-current-buffer (magit-get-mode-buffer 'magit-status-mode)
+        (magit-refresh-buffer)
+        (setf (alist-get 'paths (alist-get 'since (alist-get 'looked task))) '("b.txt"))
+        (goto-char (point-min))
+        (re-search-forward "^Changed since you last looked")
+        (let (diffed)
+          (cl-letf (((symbol-function 'magit-diff-range) (lambda (_range _args files) (setq diffed files))))
+            (roost-diff-since-looked))
+          (should (equal diffed '("a.txt")))))
+      ;; Once Git has pruned where it changed from, there is nothing to show.
+      (setf (alist-get 'start (alist-get 'since (alist-get 'looked task))) (make-string 40 ?0))
+      (with-current-buffer (magit-get-mode-buffer 'magit-status-mode)
+        (magit-refresh-buffer)
+        (should-not (string-match-p "^Changed since you last looked" (buffer-string))))
       (let ((roost-magit-status-sections nil))
         (with-current-buffer (magit-get-mode-buffer 'magit-status-mode)
           (magit-refresh-buffer)
