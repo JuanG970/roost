@@ -6503,8 +6503,9 @@ ssh: connect to host dev port 22: Operation timed out"
      (roost--cache-task "dev" (funcall pr "MERGED" '(prStatus (state . "MERGED") (head . "aaa") (base . "release"))))
      (roost--cache-task "dev" (funcall pr "MERGED"))
      (should (equal merges '(("fix auth" "release"))))
-     ;; Retiring it with `m' then merges nothing new.
-     (funcall merge (funcall pr "MERGED" '(status . "retired") '(retiringCommit . "aaa")))
+     ;; Retiring it with `m' then merges nothing new there.
+     (funcall merge (append '((integrationBranch . "release"))
+                            (funcall pr "MERGED" '(status . "retired") '(retiringCommit . "aaa"))))
      (should (equal merges '(("fix auth" "release"))))
      ;; GitHub's merge seen only in `m''s reply is reported once too.
      (setq merges nil)
@@ -6521,8 +6522,8 @@ ssh: connect to host dev port 22: Operation timed out"
      (should (equal merges '(("fix auth" "main"))))
      ;; Commits made after its pull request merged, which `m' merges, are another.
      (setq merges nil)
-     (roost--cache-task "dev" (append '((id . "2222222222222222")) (funcall pr "OPEN")))
-     (roost--cache-task "dev" (append '((id . "2222222222222222")) (funcall pr "MERGED")))
+     (roost--cache-task "dev" (append '((id . "2222222222222222") (integrationBranch . "next")) (funcall pr "OPEN")))
+     (roost--cache-task "dev" (append '((id . "2222222222222222") (integrationBranch . "next")) (funcall pr "MERGED")))
      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
                ((symbol-function 'roost--release-terminal) #'ignore)
                ((symbol-function 'roost--refresh-host) #'ignore)
@@ -6532,7 +6533,7 @@ ssh: connect to host dev port 22: Operation timed out"
                                              (retiringCommit . "bbb") (integrationBranch . "next"))
                                            (funcall pr "MERGED"))))))
        (roost-merge-retire (gethash '("dev" "2222222222222222") roost--tasks)))
-     (should (equal merges '(("fix auth" "next") ("fix auth" "main"))))
+     (should (equal merges '(("fix auth" "next") ("fix auth" "next"))))
      ;; A second pull request that opens and merges between polls is another
      ;; merge, into its own base, though a quiet poll brings only its record.
      (setq merges nil)
@@ -6543,7 +6544,11 @@ ssh: connect to host dev port 22: Operation timed out"
                            (roost-test--task))))
        (roost--cache-task "dev" (copy-tree second))
        (roost--cache-task "dev" (copy-tree second)))
-     (should (equal merges '(("fix auth" "release") ("fix auth" "main")))))))
+     ;; So is a third that merges the same commit into another branch.
+     (roost--cache-task "dev" (append '((id . "3333333333333333")
+                                        (pr (number . 14) (state . "MERGED") (head . "ccc") (base . "next")))
+                                      (roost-test--task)))
+     (should (equal merges '(("fix auth" "next") ("fix auth" "release") ("fix auth" "main")))))))
 
 (ert-deftest roost-task-commands-are-greyed-out-with-no-tasks ()
   (roost-test--isolated
