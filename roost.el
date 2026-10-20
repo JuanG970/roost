@@ -266,9 +266,11 @@ still run."
   "Functions called with TASK and BRANCH once TASK's work is merged into BRANCH.
 That is when `m' merges it, or when Roost sees GitHub merge its pull
 request while Emacs runs, into the branch the pull request went to.
-Each merge is reported once, though both can see it.  TASK is an alist, as for
-`roost-task-status-functions'.  A function that fails is reported, and
-the rest still run."
+Each merge is reported once, though both can see it.  Roost asks GitHub
+every two minutes, and sees only the merges of the branch's latest
+commit: one followed by new commits before it asks goes unreported.
+TASK is an alist, as for `roost-task-status-functions'.  A function that
+fails is reported, and the rest still run."
   :type 'hook)
 
 (defcustom roost-hosts-file (locate-user-emacs-file "roost/hosts.json")
@@ -936,9 +938,11 @@ bringing back the old name, which the task's tab and panel no longer have."
       (roost--run-task-hook 'roost-task-status-functions task previous status))
     ;; Another pull request merged, as a second one on the task, is another
     ;; merge, at another head or into another branch.
-    (when-let* ((merge (and old (roost--pr-merge task)))
+    (when-let* ((merge (roost--pr-merge task))
                 ((not (equal merge had-merged))))
-      (roost--report-merge task (car merge) (cdr merge)))
+      ;; One there when Roost first saw the task is no news, nor when `m'
+      ;; then retires it.
+      (roost--report-merge task (car merge) (cdr merge) (not old)))
     task))
 
 (defun roost--pr-merge (task)
@@ -959,17 +963,19 @@ task's tip counts while another, open, is the one shown."
 (defvar roost--merges-reported (make-hash-table :test 'equal)
   "The merges reported for each task, by task key, as (COMMIT . BRANCH).")
 
-(defun roost--report-merge (task commit branch)
+(defun roost--report-merge (task commit branch &optional quietly)
   "Run `roost-task-merged-functions' for TASK, merged at COMMIT into BRANCH.
 Once for each COMMIT and BRANCH: a merge on GitHub and `m' can both see
 one, as when a poll finds its pull request merged while `m' runs.
 Commits made after a pull request merged, which `m' then merges, are
-another merge, as is the same commit merged into another branch."
+another merge, as is the same commit merged into another branch.
+QUIETLY records the merge as reported without running them."
   (let* ((key (roost--key task))
          (reported (gethash key roost--merges-reported)))
     (unless (and commit (member (cons commit branch) reported))
       (when commit (puthash key (cons (cons commit branch) reported) roost--merges-reported))
-      (roost--run-task-hook 'roost-task-merged-functions task branch))))
+      (unless quietly
+        (roost--run-task-hook 'roost-task-merged-functions task branch)))))
 
 (defun roost--run-task-hook (hook &rest arguments)
   "Call each function on HOOK with ARGUMENTS, reporting any that fails.
@@ -1019,6 +1025,7 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
                  (remhash key roost--statuses)
                  (remhash key roost--pr-verdicts)
                  (remhash key roost--seen)
+                 (remhash key roost--merges-reported)
                  (roost--remove-notes (lambda (note) (equal (roost--note-key note) key)))))
              roost--tasks)
     (mapc (lambda (task) (roost--cache-task host task)) tasks)

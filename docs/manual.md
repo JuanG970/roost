@@ -451,6 +451,9 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   They run for changes this Emacs sees, not when Roost first sees a task.
   Each merged function is called with the task and the branch its work went
   into, when `m` merges it or when Roost sees GitHub merge its pull request.
+  Roost asks GitHub every two minutes, about the branch's latest commit, so
+  a pull request merged and followed by new commits before then goes
+  unreported.
   The task is an alist; `alist-get` reads its `name`, `id`, `host` (nil on
   this machine), `agent`, `branch`, `worktree` and `integrationBranch`. A
   function that fails is reported in `*Messages*`, and the rest still run.

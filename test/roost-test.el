@@ -6494,8 +6494,10 @@ ssh: connect to host dev port 22: Operation timed out"
                               (lambda (_host _action _params success &optional _failure)
                                 (funcall success reply))))
                      (roost-merge-retire (gethash '("dev" "0123456789abcdef") roost--tasks))))))
-     ;; A pull request merged before Roost saw the task is no news.
+     ;; A pull request merged before Roost saw the task is no news, nor
+     ;; when `m' then retires it, merging nothing new.
      (roost--cache-task "dev" (funcall pr "MERGED"))
+     (funcall merge (funcall pr "MERGED" '(status . "retired") '(retiringCommit . "aaa")))
      (should-not merges)
      (roost--apply-snapshot "dev" nil)
      ;; One GitHub merges while Emacs runs is, once, into the branch it went to.
