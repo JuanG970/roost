@@ -4207,7 +4207,16 @@ Read from the layout transient keeps, whose form varies by version."
                                  (roost--dashboard-row task (roost--dashboard-layout tasks 120) 120)))
          ;; Cutting the name keeps it.
          (should (string-match-p "…" (roost--row-name task 6)))
-         (should (string-suffix-p " ±" (roost--row-name task 6)))))
+         (should (string-suffix-p " ±" (roost--row-name task 6))))
+       ;; Unless the row is too narrow for it beside a twin's ID and an
+       ;; urgent status, which it then leaves room for.
+       (let ((twin (roost--cache-task "dev" (append `((size . ,size))
+                                                    (roost-test--task "4444444444444444" "permission")))))
+         (let ((row (roost--sidebar-row twin 12)))
+           (should (<= (string-width row) 12))
+           (should (string-match-p " 444444 p…\\'" row))
+           (should-not (string-match-p "±" row)))
+         (should (string-match-p "fix auth 444444 ± +permission\\'" (roost--sidebar-row twin 30)))))
      ;; The panel says how large, and where.
      (with-temp-buffer
        (roost-task-info-mode)

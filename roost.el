@@ -7127,8 +7127,9 @@ Refreshes are asynchronous; rendering uses only cached state.
   "TASK's name in FACE for its row under its project, cut to WIDTH columns.
 When another task in the project has the same name, the start of its ID
 follows, dim, as in `roost-open-task' and tab names, and then a dim ±
-when its changes are large (`roost-large-change'); cutting the name to
-fit keeps both."
+when its changes are large (`roost-large-change').  Cutting the name to
+fit keeps the ID, and the ± while a column of the name is left beside
+them: a row that narrow keeps its room for an urgent status."
   (let* ((name (roost--field task 'name))
          (id (roost--field task 'id))
          (twin (seq-some (lambda (other)
@@ -7137,9 +7138,11 @@ fit keeps both."
                                 (equal (roost--field other 'host) (roost--field task 'host))
                                 (equal (roost--field other 'repo) (roost--field task 'repo))))
                          (roost-tasks)))
+         (suffix (if (and twin id) (concat " " (substring id 0 (min 6 (length id)))) ""))
          (mark (roost--large-change-mark task))
-         (suffix (concat (when (and twin id) (concat " " (substring id 0 (min 6 (length id)))))
-                         (when mark (concat " " mark)))))
+         (suffix (if (and mark (or (not width) (> width (+ (length suffix) 2))))
+                     (concat suffix " " mark)
+                   suffix)))
     (concat (propertize (if width
                             (truncate-string-to-width name (max 1 (- width (length suffix)))
                                                       nil nil "…")

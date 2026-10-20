@@ -1870,15 +1870,18 @@ def change_size(worktree, files, moved=()):
 def untracked_lines(path, largest=1 << 20):
     """Lines in PATH, a file Git doesn't track yet, as Git would count them
     once added: none for a binary file, or a directory, such as a
-    repository inside this one. One over LARGEST bytes isn't read, and
-    counts none."""
+    repository inside this one. One over LARGEST bytes counts none, and
+    no more than that is read, though its agent may be writing it."""
     try:
         if path.is_symlink():
             return 1  # Git keeps the path it points to.
-        if path.stat().st_size > largest:
+        if not path.is_file():
             return 0
-        data = path.read_bytes()
+        with path.open("rb") as file:
+            data = file.read(largest + 1)
     except OSError:
+        return 0
+    if len(data) > largest:
         return 0
     if b"\0" in data[:8000]:
         return 0  # Where Git looks to tell a binary file.

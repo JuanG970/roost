@@ -891,8 +891,19 @@ class Lifecycle(unittest.TestCase):
         listed = self.request("list", full=True)["result"][0]
         self.assertEqual(listed["size"], dict(added=3 + 1 + 2 + 10, deleted=1, files=6,
                                               directories=["docs", "old", "src"], topLevel=True))
-        # One too large isn't read.
-        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=8), 0)
+        # One too large isn't read, past the first byte too many.
+        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=20), 10)
+        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=19), 0)
+        reads = []
+        real_open = Path.open
+        def opened(path, *args, **kwargs):
+            file = real_open(path, *args, **kwargs)
+            read = file.read
+            file.read = lambda size=-1: reads.append(size) or read(size)
+            return file
+        with patch.object(Path, "open", opened):
+            roost.untracked_lines(wt / "src" / "long", largest=8)
+        self.assertEqual(reads, [9])
         self.assertEqual(roost.untracked_lines(wt / "src"), 0)
         # Like the other statistics, it is never saved in the record.
         store = roost.Store(str(self.state))
