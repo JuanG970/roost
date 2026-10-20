@@ -3536,6 +3536,29 @@ class LastMessage(unittest.TestCase):
                    [message("assistant", "wrong")])
         self.assertEqual(roost.last_message(task), "done")
 
+    def test_the_reply_codex_reports_is_the_latest_reply(self):
+        # Codex 0.163.0's Stop carries the turn's reply, ahead of its rollout.
+        agent = roost.CodexAgent()
+        task = dict(agent="codex", worktree="/w", agentSession="abc-123")
+        self.write(".codex/sessions/2026/08/28/rollout-2026-08-28T18-33-42-abc-123.jsonl", [
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                                  "content": [{"type": "output_text", "text": "from the rollout"}]}}])
+        observe = lambda **payload: agent.observe(dict(payload, session_id="abc-123"), "running")
+        stopped = observe(hook_event_name="Stop", last_assistant_message="  PONG\n")
+        self.assertEqual(stopped["lastReply"], "PONG")
+        self.assertEqual(roost.last_message(dict(task, **stopped)), "PONG")
+        # A new turn, or a cleared conversation, has no reply yet: the rollout says what is newest.
+        self.assertIsNone(observe(hook_event_name="UserPromptSubmit", prompt="next")["lastReply"])
+        self.assertIsNone(observe(hook_event_name="SessionStart", source="clear")["lastReply"])
+        self.assertEqual(roost.last_message(dict(task, lastReply=None)), "from the rollout")
+        # Older Codex, or a turn with no words, reports none.
+        for reply in (None, "", "  ", 5):
+            self.assertNotIn("lastReply", observe(hook_event_name="Stop", last_assistant_message=reply))
+        self.assertNotIn("lastReply", observe(hook_event_name="SessionStart", source="resume"))
+        long = observe(hook_event_name="Stop", last_assistant_message="y" * 3000)["lastReply"]
+        self.assertEqual(len(long), roost.LAST_MESSAGE_LIMIT + 1)
+        self.assertEqual(roost.last_message(dict(task, lastReply=long)), "y" * 2000 + "…")
+
     def test_pi_reads_its_session_file(self):
         path = self.write("pi/session.jsonl", [
             {"type": "session", "id": "x"},

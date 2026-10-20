@@ -41,7 +41,8 @@ CODEX_IGNORED_EVENTS = {
     "SubagentStop": "a subagent ended; the turn goes on",
 }
 # Fields of Codex's hook payloads the helper reads.
-CODEX_PAYLOAD_FIELDS = ("hook_event_name", "session_id", "cwd", "tool_name", "tool_input")
+CODEX_PAYLOAD_FIELDS = ("hook_event_name", "session_id", "cwd", "tool_name", "tool_input",
+                        "last_assistant_message")
 
 # Pi extension events Roost does not listen to, and why each changes nothing.
 PI_IGNORED_EVENTS = dict(
@@ -161,7 +162,9 @@ def scan_codex():
                      for field in ("hook_event_name", "session_id", "cwd")
                      if field not in schemas[event]["properties"]}
                     | {field for event in ("PreToolUse", "PermissionRequest") if event in schemas
-                       for field in ("tool_name", "tool_input") if field not in schemas[event]["properties"]})
+                       for field in ("tool_name", "tool_input") if field not in schemas[event]["properties"]}
+                    | {"last_assistant_message" for event in ("Stop",) if event in schemas
+                       and "last_assistant_message" not in schemas[event]["properties"]})
     if schemas:
         scan.report(not absent, "payload fields Roost reads" + (": missing " + ", ".join(absent) if absent else ""))
     # Its hooks are given on the command line, as -c hooks.EVENT=[...].
