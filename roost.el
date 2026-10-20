@@ -879,7 +879,7 @@ bringing back the old name, which the task's tab and panel no longer have."
     (setq task (roost--newer-name (roost--newer-events task old) old)))
   (let* ((key (roost--key task))
          (old (gethash key roost--tasks))
-         (had-merged (and old (eq (roost--pr-state old) 'merged)))
+         (had-merged (and old (roost--merged-head old)))
          (status (roost--field task 'status))
          (previous (gethash key roost--statuses))
          (new-stop (and (equal status "ready")
@@ -934,13 +934,23 @@ bringing back the old name, which the task's tab and panel no longer have."
                        task)))
     (when (and previous (not (equal previous status)))
       (roost--run-task-hook 'roost-task-status-functions task previous status))
-    (when (and old (not had-merged) (eq (roost--pr-state task) 'merged))
+    ;; Another pull request merged at another head, as a second one on
+    ;; the task, is another merge.
+    (when (and old (roost--merged-head task) (not (equal had-merged (roost--merged-head task))))
       (let ((status (or (roost--field task 'prStatus) (roost--field task 'pr))))
         ;; Into the branch the pull request went to, which an agent's own
         ;; can choose.
         (roost--report-merge task (alist-get 'head status)
                              (or (alist-get 'base status) (roost--field task 'integrationBranch)))))
     task))
+
+(defun roost--merged-head (task)
+  "The commit at which TASK's pull request merged, t if not known, or nil.
+Nil while it has none, or one GitHub has not merged."
+  (when (eq (roost--pr-state task) 'merged)
+    (or (alist-get 'head (roost--field task 'prStatus))
+        (alist-get 'head (roost--field task 'pr))
+        t)))
 
 (defvar roost--merges-reported (make-hash-table :test 'equal)
   "The commit at which each task's merge was last reported, by task key.")

@@ -2342,7 +2342,7 @@ elif args[:2] == ["auth", "status"]:
         self.assertNotIn("unpushed", store.read(task["id"]))
         # What it shows is recorded, for views that ask GitHub nothing.
         self.assertEqual(store.read(task["id"])["pr"], dict(number=7, url="https://github.com/octo/repo/pull/7",
-                                                            state="OPEN", head=tip))
+                                                            state="OPEN", head=tip, base="release"))
         self.assertNotIn("prStatus", self.request("list")["result"][0])
         # Refreshing an active agent's changes leaves GitHub alone.
         calls = len(self.gh_calls())

@@ -6532,7 +6532,18 @@ ssh: connect to host dev port 22: Operation timed out"
                                              (retiringCommit . "bbb") (integrationBranch . "next"))
                                            (funcall pr "MERGED"))))))
        (roost-merge-retire (gethash '("dev" "2222222222222222") roost--tasks)))
-     (should (equal merges '(("fix auth" "next") ("fix auth" "main")))))))
+     (should (equal merges '(("fix auth" "next") ("fix auth" "main"))))
+     ;; A second pull request that opens and merges between polls is another
+     ;; merge, into its own base, though a quiet poll brings only its record.
+     (setq merges nil)
+     (roost--cache-task "dev" (append '((id . "3333333333333333")) (funcall pr "OPEN")))
+     (roost--cache-task "dev" (append '((id . "3333333333333333")) (funcall pr "MERGED")))
+     (let ((second (append '((id . "3333333333333333")
+                             (pr (number . 13) (state . "MERGED") (head . "ccc") (base . "release")))
+                           (roost-test--task))))
+       (roost--cache-task "dev" (copy-tree second))
+       (roost--cache-task "dev" (copy-tree second)))
+     (should (equal merges '(("fix auth" "release") ("fix auth" "main")))))))
 
 (ert-deftest roost-task-commands-are-greyed-out-with-no-tasks ()
   (roost-test--isolated

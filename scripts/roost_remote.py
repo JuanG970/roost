@@ -1699,6 +1699,9 @@ def check_pull_requests(store, tasks):
             task["prStatus"].update(reviews.get(pr.get("url"), {}), failedAt=failed, checkedAt=checked)
             task["unpushed"] = unpushed(task, pr.get("headRefOid"), tip)
         record = dict(number=pr["number"], url=pr.get("url"), state=pr.get("state"), head=pr.get("headRefOid"))
+        # Where it merges, for views that ask GitHub nothing.
+        if pr.get("baseRefName"):
+            record["base"] = pr["baseRefName"]
         # Shown or not, as when an open one goes to another base, or listed
         # or not, as when the branch has had more than a page of them.
         if (any(other.get("state") == "MERGED" and other.get("headRefOid") == tip for other in prs)
