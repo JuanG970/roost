@@ -4664,11 +4664,17 @@ nothing to compare, opens as it is; stage it from Magit's status."
       (magit-diff-dwim (cons "-U1000000" args) (list file)))))
 
 ;;;###autoload
-(defun roost-review (&optional task)
+(defun roost-review (&optional task quit-questions)
   "Open Magit on TASK's worktree, through TRAMP for remote tasks.
 Its host first records where the task stands as where you last looked
-at it, and Magit's status shows what changed since you looked before."
-  (interactive)
+at it, and Magit's status shows what changed since you looked before.
+With QUIT-QUESTIONS, as when you give a command, first quit the
+questions you left open in the minibuffer, as `roost-open-task' does."
+  (interactive (list nil t))
+  (when (and quit-questions (roost--questions-left-open))
+    (let ((task (or task (roost--task-at-point))))
+      (roost--quit-questions-left-open
+       (lambda () (roost-review (or task (roost--read-task "Task: ")))))))
   (setq task (roost--choose task))
   (if (not (require 'magit nil t))
       (roost--magit-status task)

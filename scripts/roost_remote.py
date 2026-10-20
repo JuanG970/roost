@@ -2089,18 +2089,21 @@ LOOK_IDENTITY = dict(GIT_AUTHOR_NAME="Roost", GIT_AUTHOR_EMAIL="roost@invalid",
 
 
 def untracked_files(worktree):
-    """WORKTREE's files that Git neither tracks nor ignores, those a look
-    keeps: files no larger than LOOK_FILE_LIMIT and links, not the
-    repositories inside it."""
-    paths = []
+    """WORKTREE's files that Git neither tracks nor ignores, as (KEPT,
+    LARGE): those a look keeps, files no larger than LOOK_FILE_LIMIT and
+    links, not the repositories inside it; and those it leaves out for
+    their size, which are there, whatever a look before kept of them."""
+    kept, large = [], set()
     for path in read_git(worktree, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"):
         file = Path(worktree) / path
         try:
             if path and (file.is_symlink() or (file.is_file() and file.stat().st_size <= LOOK_FILE_LIMIT)):
-                paths.append(path)
+                kept.append(path)
+            elif path and file.is_file():
+                large.add(path)
         except OSError:
             pass  # Gone since, or a name that is not UTF-8.
-    return paths
+    return kept, large
 
 
 @contextlib.contextmanager
@@ -2140,7 +2143,7 @@ def snapshot(worktree):
     head = read_git(worktree, "rev-parse", "--verify", "-q", "HEAD^{commit}").stdout.strip()
     if not head:
         return None, None
-    with scratch_index(worktree, untracked_files(worktree), intent=False) as env:
+    with scratch_index(worktree, untracked_files(worktree)[0], intent=False) as env:
         git(worktree, *SCRATCH_INDEX_GIT, "add", "--update", env=env)
         tree = git(worktree, *SCRATCH_INDEX_GIT, "write-tree", env=env).stdout.strip()
     if tree == git(worktree, "--no-optional-locks", "rev-parse", head + "^{tree}").stdout.strip():
@@ -2213,10 +2216,13 @@ def since_looked(task, worktree, base):
     start = isinstance(looked, dict) and look_start(worktree, looked)
     if not start:
         return None
-    with scratch_index(worktree, untracked_files(worktree), intent=True) as env:
+    kept, large = untracked_files(worktree)
+    with scratch_index(worktree, kept, intent=True) as env:
         entries = changed_between(worktree, start, env=env)
         if entries is None:
             return None
+        # One that grew too large since a look kept it is still there.
+        entries = [entry for entry in entries if entry[0] not in large]
         entries, _ = own_changes(worktree, entries, looked, start, base, env=env)
     return dict(change_count(entries), at=looked.get("at"))
 
@@ -2345,9 +2351,14 @@ def look(store, task_id):
                     raise RoostError("The task's worktree has no commit to look at")
                 looked = dict(commit=commit, head=head, base=base, at=now())
                 start = look_start(worktree, before)
-                entries, left_out = (own_changes(worktree, changed_between(worktree, start, commit) or [],
-                                                 before, start, base, end=commit)
-                                     if start else ([], False))
+                entries, left_out = [], False
+                if start:
+                    changed = changed_between(worktree, start, commit) or []
+                    # One that grew too large since a look kept it is still there.
+                    large = untracked_files(worktree)[1]
+                    entries = [entry for entry in changed if entry[0] not in large]
+                    entries, left_out = own_changes(worktree, entries, before, start, base, end=commit)
+                    left_out = left_out or len(entries) < len(changed)
                 since = before.get("since")
                 if entries:
                     looked["since"] = dict(change_count(entries), start=start, end=commit, at=before.get("at"),

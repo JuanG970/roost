@@ -2077,6 +2077,15 @@ class Lifecycle(unittest.TestCase):
         self.assertNotEqual(roost.git(wt, "cat-file", "-e", looked["commit"] + ":data", check=False).returncode, 0)
         (wt / "data").write_bytes(b"y" * (roost.LOOK_FILE_LIMIT + 1))
         self.assertEqual(self.since_looked(task)["count"], 0)
+        # Kept once, then grown past the limit, it is still there, not gone.
+        (wt / "small").write_bytes(b"z" * (roost.LOOK_FILE_LIMIT + 1))
+        self.assertEqual(self.since_looked(task)["count"], 0)
+        (wt / "other").write_text("other\n")
+        since = self.request("look", id=task["id"])["result"]["looked"]["since"]
+        self.assertEqual((since["count"], since["paths"]), (1, ["other"]))
+        (wt / "other").unlink()
+        (wt / "small").write_text("small\n")
+        looked = self.request("look", id=task["id"])["result"]["looked"]
         # Once Git has pruned the commit a look made, HEAD as it was then stands in.
         store = roost.Store(str(self.state))
         store.save(dict(store.read(task["id"]), looked=dict(looked, commit="0" * 40)))

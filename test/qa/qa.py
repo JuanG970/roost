@@ -1528,6 +1528,26 @@ def go_shell(qa, target):
     qa.keys("t")
 
 
+def go_review(qa, target):
+    """Open TARGET in Magit from its sidebar row, with `r`: it waits for the
+    task's host to record that you looked."""
+    if qa.host or qa.emacs.eval("(and (require 'magit nil t) t)") != "t":
+        raise NotApplicable()
+    to_sidebar(qa)
+    if qa.emacs.eval("(qa-goto-row %s)" % lisp(target)) != "t":
+        raise Stuck("No row for %s in the sidebar" % target)
+    qa.keys("r")
+
+
+def shows_magit(qa, name):
+    """Whether the screen shows Magit's status of NAME's worktree, selected."""
+    def check(screen):
+        window = qa.window(screen, "magit-status-mode") or {}
+        return bool(window.get("selected")
+                    and re.search(r"^Task: +%s," % re.escape(name), window.get("text", ""), re.M))
+    return check
+
+
 def go_notification(qa, target):
     host, id = next(t["key"] for t in qa.screen()["tasks"] if t["name"] == target).split("/")
     qa.emacs.eval("(roost--open-from-notification %s %s)"
@@ -1559,6 +1579,9 @@ WALK_INTERRUPTERS = [
     ("l in the sidebar", go_switch, "other"),
     ("n in the sidebar", go_next, "waiting"),
     ("t on another task's row", go_shell, "other"),
+    # Its own task's: without workspaces, Magit on another task opens
+    # beside the terminal on screen, whoever's it is.
+    ("r on its row", go_review, "home"),
     ("a click on a notification", go_notification, "other"),
     ("a click in the terminal", go_terminal, None),
 ]
@@ -1594,7 +1617,8 @@ def walk_away(qa, repo):
                 qa.step(pair, expect=[(str(stuck), lambda s: False)])
                 continue
             shell = go is go_shell
-            opens = ((target + "'s " + ("shell" if shell else "terminal") + " opens", shows(qa, target, shell))
+            opens = ((target + "'s Magit opens", shows_magit(qa, target)) if go is go_review
+                     else (target + "'s " + ("shell" if shell else "terminal") + " opens", shows(qa, target, shell))
                      if target else (home + "'s terminal stays", shows(qa, home)))
             screen = qa.until(opens[1], timeout)
             if go is go_notification and screen["in-question"]:
