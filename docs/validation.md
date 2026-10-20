@@ -32,6 +32,84 @@ happened in a section below:
 8. Narrow and widen the frame, and open a second one: the sidebar and panel
    follow.
 
+## Attachments — 2026-10-19
+
+- **To `claylien` over SSH.** Ubuntu with Python 3.14.4, from Emacs 32 in
+  batch, with a scratch state directory and a scratch task record. Roost
+  installed its helper there and, in about a second for all four, attached a
+  549 KB PNG twice, a Scrawl-shaped capture folder and the same image as a
+  clipboard image. Each copy matched its original's SHA-256. The second PNG
+  became `shot-2.png`. Of the capture, only `summary.md`, `scrawl.json`,
+  `contact-sheet.png` and `frames/` went, not its 3 MB video or uncropped
+  frames. The files were mode 600 and their folders 700. A plain folder was
+  refused. Forgetting the task removed its attachments.
+- **The same locally,** and on macOS the clipboard image came through as PNG
+  bytes from `osascript`, as `the clipboard as «class PNGf»`.
+- **`make qa`.** 150 steps, none with problems, with the new journey
+  "Attach files to a prompt": `M-x roost-attach`, `C-c C-v` with a stubbed
+  clipboard, `C-c C-a` with a capture, and sending. It and `send` pass with
+  `--remote --popular` too. Its screenshots showed point left on the line of
+  what was attached, where your words would run on from the path; an empty
+  line you were on now stays empty below it.
+- **Walking away from it.** The walk-away grid leaves a prompt draft with
+  its file question open against each way of going to another task, locally
+  and with `--remote --popular`: 7 more rows, none with problems, and the
+  draft kept each time. Its shots showed the question opening in a remote
+  task's worktree, over SSH; it now starts on this machine, where what you
+  attach is.
+- **Claude asks to read outside its worktree.** Claude Code 2.1.303 in
+  `-p` with Haiku, `--permission-mode default` and only the project's
+  settings, in a scratch repository, told to describe an image in a folder
+  beside it: its Read was denied. With `--add-dir=` that folder, it described
+  the image. So Roost now starts Claude with `--add-dir=` the task's own
+  attachments folder, and `make contract` checks the option is there.
+  `make contract-live` passed with it; one run alongside `make test` timed out
+  waiting for an interrupted turn to be noticed, and passed when rerun alone,
+  as `main` did.
+- **Real Scrawl captures.** Two made with Scrawl on this Mac: one from its
+  welcome tour, one recorded through computer use (TextEdit, a click, and a
+  sentence spoken by `say` that Scrawl transcribed). They differed from
+  what Roost assumed: the summary names the capture's folder on this Mac,
+  and says the uncropped frames are in `frames-full/`, which Roost left
+  behind. Roost now copies all of a capture but its video and audio (3.4 MB
+  of this one's 12) and puts the copy's path in the summary. Attached on
+  this Mac and on `claylien` with scratch state directories, the copies
+  matched by SHA-256, and `M-n`'s newest capture was the new one. Claude
+  Haiku, given the drafted prompt and `--add-dir=` the attachments, read
+  the frames without asking and named the misspelling the speech pointed
+  at. On `claylien`, Claude Code 2.1.304 did the same with `--add-dir`,
+  and without it was refused the frames and asked for that option. The
+  welcome tour's capture, 9.0 MB in 8 files, took 3.5 s to reach `claylien`
+  over the home network, with Emacs waiting. Copied in the background since,
+  `roost-send-attach` returned in 0.04 s, showing `[Copying …]`, and the
+  path took its place 2.1 s later. Pen marks are untried:
+  computer use can't draw on Scrawl's overlay.
+
+## OpenCode and attachments — 2026-10-20
+
+- **OpenCode asks.** OpenCode 1.19.3, installed in a scratch folder with its
+  config, data and cache folders there too, and LM Studio's
+  qwen3.6-35b-a3b at a 48k context. Told to read a file in a folder beside
+  its project, `opencode run` asked `external_directory` for that folder,
+  and turned it down unanswered. It has no option like Claude's
+  `--add-dir`.
+- **A rule after yours.** An `external_directory` rule in the inline
+  config's own `permission` took the place of a one-word setting in the
+  config files: `"external_directory": "deny"` became ask for every other
+  folder. Given to each agent in the inline config instead, it still took
+  the place of a word an agent had in the files. OpenCode calls each
+  plugin's `config` hook with the config it merged from all of them, so
+  Roost's plugin adds the rule there, to each agent, after what applied to
+  `external_directory` before. Live: a file in the attachments folder, and
+  one in a folder in it, were read without asking, while another folder
+  stayed denied by `"*": "deny"` set after `external_directory`, and by an
+  agent's own `"external_directory": "deny"` in the config file, or read
+  where everything was allowed. Run with Roost's own plugin and
+  environment, the attachment was read and another folder refused.
+- **First runs stall.** In fresh folders OpenCode spent minutes fetching
+  its tools before a first reply, which a short timeout cut off each time;
+  once it had them, a run took about 12 s.
+
 ## OpenCode — 2026-10-19
 
 - **OpenCode 1.19.3, from its source.** Plugins receive every bus event.
