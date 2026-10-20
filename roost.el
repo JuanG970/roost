@@ -881,7 +881,7 @@ bringing back the old name, which the task's tab and panel no longer have."
     (setq task (roost--newer-name (roost--newer-events task old) old)))
   (let* ((key (roost--key task))
          (old (gethash key roost--tasks))
-         (had-merged (and old (roost--pr-merge old)))
+         (had-merged (and old (roost--pr-merges old)))
          (status (roost--field task 'status))
          (previous (gethash key roost--statuses))
          (new-stop (and (equal status "ready")
@@ -938,27 +938,29 @@ bringing back the old name, which the task's tab and panel no longer have."
       (roost--run-task-hook 'roost-task-status-functions task previous status))
     ;; Another pull request merged, as a second one on the task, is another
     ;; merge, at another head or into another branch.
-    (when-let* ((merge (roost--pr-merge task))
-                ((not (equal merge had-merged))))
-      ;; One there when Roost first saw the task is no news, nor when `m'
-      ;; then retires it.
-      (roost--report-merge task (car merge) (cdr merge) (not old)))
+    (dolist (merge (roost--pr-merges task))
+      (unless (member merge had-merged)
+        ;; One there when Roost first saw the task is no news, nor when `m'
+        ;; then retires it.
+        (roost--report-merge task (car merge) (cdr merge) (not old))))
     task))
 
-(defun roost--pr-merge (task)
-  "Where TASK's pull request merged, as (HEAD . BRANCH), or nil.
-Nil while it has none, or one GitHub has not merged.  HEAD is nil when
-not known, and BRANCH the pull request's base, which an agent's own can
-choose, or else TASK's integration branch.  One that merged at the
-task's tip counts while another, open, is the one shown."
-  (let ((status (roost--field task 'prStatus))
-        (pr (roost--field task 'pr)))
-    (cond ((eq (roost--pr-state task) 'merged)
-           (cons (or (alist-get 'head status) (alist-get 'head pr))
-                 (or (alist-get 'base status) (alist-get 'base pr) (roost--field task 'integrationBranch))))
-          ((alist-get 'mergedHead pr)
-           (cons (alist-get 'mergedHead pr)
-                 (or (alist-get 'mergedBase pr) (roost--field task 'integrationBranch)))))))
+(defun roost--pr-merges (task)
+  "Where TASK's pull requests merged, as a list of (HEAD . BRANCH).
+HEAD is nil when not known, and BRANCH a pull request's base, which an
+agent's own can choose, or else TASK's integration branch.  Those that
+merged at the task's tip count while another, open, is the one shown."
+  (let* ((status (roost--field task 'prStatus))
+         (pr (roost--field task 'pr))
+         (head (alist-get 'mergedHead pr)))
+    (delete-dups
+     (append (when (eq (roost--pr-state task) 'merged)
+               (list (cons (or (alist-get 'head status) (alist-get 'head pr))
+                           (or (alist-get 'base status) (alist-get 'base pr)
+                               (roost--field task 'integrationBranch)))))
+             (when head
+               (mapcar (lambda (base) (cons head base))
+                       (or (alist-get 'mergedBases pr) (list (roost--field task 'integrationBranch)))))))))
 
 (defvar roost--merges-reported (make-hash-table :test 'equal)
   "The merges reported for each task, by task key, as (COMMIT . BRANCH).")

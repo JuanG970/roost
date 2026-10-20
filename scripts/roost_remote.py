@@ -1704,14 +1704,18 @@ def check_pull_requests(store, tasks):
             record["base"] = pr["baseRefName"]
         # Shown or not, as when an open one goes to another base, or listed
         # or not, as when the branch has had more than a page of them.
-        merged = next((other for other in prs if other.get("state") == "MERGED" and other.get("headRefOid") == tip),
-                      None)
+        merged = [other for other in prs if other.get("state") == "MERGED" and other.get("headRefOid") == tip]
         if merged or recorded_merge_at(task, tip):
             record["mergedHead"] = tip
-            # And where, which the one shown need not say.
-            base = (merged or {}).get("baseRefName") or recorded_pull_request(task).get("mergedBase")
-            if base:
-                record["mergedBase"] = base
+            # And each branch it went to, which the one shown need not say,
+            # those recorded included, as a later lookup can list them no more.
+            recorded = recorded_pull_request(task)
+            bases = list(recorded.get("mergedBases") or []) if recorded.get("mergedHead") == tip else []
+            for other in merged:
+                if other.get("baseRefName") and other["baseRefName"] not in bases:
+                    bases.append(other["baseRefName"])
+            if bases:
+                record["mergedBases"] = bases
         try:
             with store.locked():
                 current = store.read(task["id"])

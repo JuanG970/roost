@@ -6557,9 +6557,16 @@ ssh: connect to host dev port 22: Operation timed out"
      (dotimes (_ 2)
        (roost--cache-task "dev" (append '((id . "4444444444444444")
                                           (pr (number . 15) (state . "OPEN") (head . "ddd") (base . "main")
-                                              (mergedHead . "ddd") (mergedBase . "release")))
+                                              (mergedHead . "ddd") (mergedBases "release")))
                                         (roost-test--task))))
-     (should (equal merges '(("fix auth" "release")))))))
+     (should (equal merges '(("fix auth" "release"))))
+     ;; And the open one, older or newer, once it merges too.
+     (dotimes (_ 2)
+       (roost--cache-task "dev" (append '((id . "4444444444444444")
+                                          (pr (number . 16) (state . "MERGED") (head . "ddd") (base . "release")
+                                              (mergedHead . "ddd") (mergedBases "release" "main")))
+                                        (roost-test--task))))
+     (should (equal merges '(("fix auth" "main") ("fix auth" "release")))))))
 
 (ert-deftest roost-task-commands-are-greyed-out-with-no-tasks ()
   (roost-test--isolated

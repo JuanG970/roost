@@ -2768,7 +2768,13 @@ elif args[:2] == ["auth", "status"]:
         listed = self.request("list", full=True)["result"][0]
         self.assertEqual((listed["pr"]["number"], listed["pr"]["mergedHead"], listed["landed"]), (11, tip, True))
         # Where it merged, though the one shown goes elsewhere.
-        self.assertEqual((listed["pr"]["base"], listed["pr"]["mergedBase"]), ("main", "release"))
+        self.assertEqual((listed["pr"]["base"], listed["pr"]["mergedBases"]), ("main", ["release"]))
+        # And where else, once the open one merges too, as the newer one shown.
+        (self.gh_dir / "list.json").write_text(json.dumps([
+            dict(number=11, state="MERGED", headRefOid=tip, baseRefName="main"),
+            dict(number=10, state="MERGED", headRefOid=tip, baseRefName="release")]))
+        listed = self.request("list", full=True)["result"][0]
+        self.assertEqual((listed["pr"]["number"], listed["pr"]["mergedBases"]), (11, ["release", "main"]))
         # Retiring trusts it too when gh can't say.
         (self.gh_dir / "gh").unlink()
         with patch.object(roost, "agent_path", lambda inherited: str(self.gh_dir)):
