@@ -4146,6 +4146,76 @@ Read from the layout transient keeps, whose form varies by version."
        (should (<= (string-width (roost--dashboard-row (car tasks) (roost--dashboard-layout tasks width) width))
                    width))))))
 
+(ert-deftest roost-a-large-change-is-marked-and-waits-for-nothing ()
+  (roost-test--isolated
+   (let* ((size '((added . 520) (deleted . 40) (files . 12) (directories "docs" "scripts" "test")
+                  (topLevel . t)))
+          (task (roost--cache-task "dev" (append `((size . ,size) (diff . "9 files changed") (dirty . t)
+                                                   (ahead . 3) (seen . "2026-10-03T20:00:00+00:00")
+                                                   (files ((path . "new.py") (untracked . t))))
+                                                 (roost-test--task "1111111111111111" "ready"))))
+          (small (roost--cache-task "dev" (append '((name . "typo") (size (added . 2) (deleted . 1) (files . 1)
+                                                                           (directories) (topLevel . t)))
+                                                  (roost-test--task "2222222222222222" "running"))))
+          (measure (lambda (&rest fields) `((size ,@fields)))))
+     ;; Its size counts every file, those Git does not track yet too.
+     (should (equal (roost--changes task) "12 files +520 −40 · uncommitted · 3 ahead"))
+     (should (equal (roost--changes task t t) "12 files +520 −40 · ↑3"))
+     (should (equal (roost--changes (funcall measure '(added . 0) '(deleted . 0) '(files . 1))) "1 file"))
+     ;; Any one of the sizes marks it, once reached.
+     (should (roost--large-change-p task))
+     (should-not (roost--large-change-p small))
+     (should (roost--large-change-p (funcall measure '(added . 399) '(deleted . 1) '(files . 1))))
+     (should-not (roost--large-change-p (funcall measure '(added . 398) '(deleted . 1) '(files . 9))))
+     (should (roost--large-change-p (funcall measure '(files . 10))))
+     (should (roost--large-change-p (funcall measure '(files . 3) '(directories "a" "b" "c"))))
+     (should-not (roost--large-change-p (funcall measure '(files . 3) '(directories "a" "b"))))
+     (let ((roost-large-change '(:files 10)))
+       (should-not (roost--large-change-p (funcall measure '(added . 900) '(files . 3)))))
+     (let ((roost-large-change nil))
+       (should-not (roost--large-change-p task)))
+     ;; Before it is measured, or with nothing changed, it is not.
+     (should-not (roost--large-change-p (roost-test--task)))
+     (should-not (roost--large-change-p (funcall measure '(files . 0))))
+     (let ((roost-large-change '(:lines 0)))
+       (should-not (roost--large-change-p (funcall measure '(files . 0)))))
+     ;; Where its files are, naming up to four directories.
+     (should (equal (roost--spread task) "In docs/, scripts/, test/ and the top level"))
+     (should (equal (roost--spread (funcall measure '(directories "src"))) "In src/"))
+     (should (equal (roost--spread (funcall measure '(directories "a" "b" "c" "d" "e") '(topLevel . t)))
+                    "In 5 top-level directories and the top level"))
+     (should-not (roost--spread small))
+     (should (equal (roost--size-summary task) "560 lines in 12 files, 3 top-level directories"))
+     (should (equal (roost--size-summary small) "3 lines in 1 file"))
+     ;; A dim mark on its rows, which is not something to look at.
+     (should-not (roost--waiting-p task))
+     (let ((roost-watch-mode t))
+       (with-temp-buffer
+         (roost-sidebar-list-mode)
+         (roost--render-sidebar)
+         (should (equal (substring-no-properties (buffer-string) 0 6) "Roost\n"))
+         (goto-char (roost--task-row (roost--key task)))
+         (should (looking-at " fix auth ±\n"))
+         (search-forward "±")
+         (should (eq (get-text-property (1- (point)) 'face) 'roost-dim))
+         (should (string-match-p "\n± 560 lines in 12 files, 3 top-level directories\nmouse-1"
+                                 (get-text-property (1- (point)) 'help-echo)))
+         (goto-char (roost--task-row (roost--key small)))
+         (should-not (string-match-p "±" (buffer-substring (point) (line-end-position)))))
+       (let ((tasks (list task small)))
+         (should (string-match-p "\\`  . fix auth ±  "
+                                 (roost--dashboard-row task (roost--dashboard-layout tasks 120) 120)))
+         ;; Cutting the name keeps it.
+         (should (string-match-p "…" (roost--row-name task 6)))
+         (should (string-suffix-p " ±" (roost--row-name task 6)))))
+     ;; The panel says how large, and where.
+     (with-temp-buffer
+       (roost-task-info-mode)
+       (setq roost--buffer-task-key (roost--key task))
+       (roost--render-task-info)
+       (should (string-match-p "^Changes\n± 12 files \\+520 −40 · 3 ahead\nIn docs/, scripts/, test/ and the top level\n  Uncommitted\n"
+                               (buffer-string)))))))
+
 (ert-deftest roost-review-fixes-for-paths-layout-and-drafts ()
   (roost-test--isolated
    ;; Only the owner's home is abbreviated.

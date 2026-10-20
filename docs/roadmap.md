@@ -90,20 +90,26 @@ the last two are worth trying once those show what the panel has room for.
   (`/rewind`).
 - **Evidence beside the files in the task panel.** Show what a decision can
   rest on without opening the diff: the pull request's checks, the
-  reviewer's findings still open, the size of the change, and any paths
-  marked as risky (below). That's enough to finish a small change that
+  reviewer's findings still open, and any paths marked as risky (below),
+  beside the size of the change, which it gives already. That's enough to finish a small change that
   passed everything, or to pick the one worth reading closely; the file list
   and Magit stay as they are. Before a pull request, the agent's own test
   output stays in its terminal. From the Claude Code team's review, where
   people judge a change by its evidence more than by its lines.
-- **Marks for risky changes.** A list of paths per project, in
-  `.dir-locals.el` or the repository's CODEOWNERS, marks tasks whose changes
-  touch them, such as CI workflows, authentication or releases, in the
-  sidebar and dashboard. That says which diffs to read closely, whether or
-  not you read the rest. Large changes get a mark too: the Claude Code team
-  finds that most pull requests over 1,000 lines have findings. Roost only
-  marks; it approves and merges nothing on its own. From the same post's
-  risk tiers, which come from the change, not its author.
+- **Marks for risky changes.** Large changes have theirs: a dim `±` on the
+  row once a task's changes reach 400 lines, 10 files or 3 top-level
+  directories (`roost-large-change`), with the size in the task panel.
+  Those are where studies of people reviewing code find that they catch
+  less as changes grow and spread, rather than the 1,000 lines past which
+  the Claude Code team's AI reviewer usually finds something. What's left
+  is risky paths: a list per project, in `.dir-locals.el` or drawn from the
+  repository's CODEOWNERS, marks tasks whose changes touch them, such as CI
+  workflows, authentication or releases, in the sidebar and dashboard. That
+  says which diffs to read closely, and with the size, which hour of
+  reading. CODEOWNERS often gives every path an owner, so it would need a
+  list of its own of the paths that count. Roost only marks; it approves
+  and merges nothing on its own. From the same post's risk tiers, which
+  come from the change, not its author.
 
 ## Worth trying
 

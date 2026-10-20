@@ -19,6 +19,12 @@ Since 0.9.0:
   as the turn ends. Codex 0.163.0 and later report it when a turn stops;
   Roost used to find it in Codex's session files, and still does for older
   Codex. Nothing to do when upgrading.
+- See how much a task gives you to read before you open Magit. The task
+  panel counts new files in its lines and files, and names the top-level
+  directories its changes are in. A task whose changes reach 400 lines, 10
+  files or 3 top-level directories gets a dim `±` after its name in the
+  sidebar and dashboard; it doesn't count as waiting. Set
+  `roost-large-change` to mark at other sizes, or nil for no mark.
 - Start a task from more places. `roost-new-task` on an error in a
   compilation buffer, or a match in a grep buffer, quotes that line. With
   Embark, `roost-new-task-from-region`, `-from-file`, `-from-url` and
