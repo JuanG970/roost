@@ -1259,8 +1259,11 @@ class Lifecycle(unittest.TestCase):
         # Its arguments follow its name, as when a wrapper starts it, and a
         # project folder named like it is still a project folder.
         roost.OpenCodeAgent().validate(["npx", "opencode-ai", "--model", "x"])
+        roost.OpenCodeAgent().validate(["env", "OPENCODE_DISABLE_AUTOUPDATE=1", "opencode"])
         for command in (["npx", "opencode-ai", str(self.repo)], ["opencode", "/tmp/opencode-project"],
-                        ["npx", "opencode-ai", "/tmp/opencode-project"]):
+                        ["npx", "opencode-ai", "/tmp/opencode-project"],
+                        # Set by a wrapper, these leave Roost's observer out.
+                        ["env", "OPENCODE_PURE=1", "opencode"], ["env", "OPENCODE_CONFIG_CONTENT={}", "opencode"]):
             with self.subTest(command=command), self.assertRaises(roost.RoostError):
                 roost.OpenCodeAgent().validate(command)
 
@@ -3759,6 +3762,13 @@ class ProgramStatus(unittest.TestCase):
             for bad in ("{", "[]", '"x"'):
                 with self.assertRaises(roost.RoostError):
                     agent.environment(store, dict(OPENCODE_CONFIG_CONTENT=bad))
+            # OPENCODE_PURE leaves plugins out, as --pure does.
+            for pure in ("1", "true", "TRUE"):
+                with self.assertRaises(roost.RoostError):
+                    agent.environment(store, dict(OPENCODE_PURE=pure))
+            self.assertIn("OPENCODE_CONFIG_CONTENT", agent.environment(store, dict(OPENCODE_PURE="0")))
+            # The OpenCode Roost starts is a new one to report, even from another's shell.
+            self.assertEqual(agent.environment(store, dict(ROOST_OPENCODE_OBSERVER="42"))["ROOST_OPENCODE_OBSERVER"], "")
 
     def test_a_pi_dialog_at_startup_ends_no_turn(self):
         # It can open before Pi's first report, while its hooks still set
@@ -3852,14 +3862,25 @@ class ProgramStatus(unittest.TestCase):
                                           metadata=dict(command="date"))),
                 ("permission.replied", dict(requestID="r1", sessionID="ses_a", reply="reject")),
                 status("ses_a", "idle"),
-                # Turns in two sessions at once keep what each said and how it ended.
+                # Turns in two sessions at once: the task works while either
+                # does, and waits on you while either asks.
                 status("ses_a", "busy"),
-                ("message.updated", dict(info=dict(id="msg_x", role="assistant"))),
-                text("p9", "msg_x", "A is done."),
+                status("ses_a", "busy"),
                 status("ses_b", "busy"),
-                ("session.error", dict(sessionID="ses_b", error=dict(name="APIError", data=dict(message="B failed")))),
+                ("question.asked", dict(id="q3", sessionID="ses_a", questions=[dict(question="Third?", header="h")])),
+                status("ses_b", "idle"),
+                status("ses_b", "busy"),
+                # Stopped, A's question waits no more, and goes unanswered.
                 status("ses_a", "idle"),
-                status("ses_b", "idle")]
+                ("message.updated", dict(info=dict(id="msg_b", role="assistant"))),
+                text("p8", "msg_b", "B is done.", "ses_b"),
+                ("session.error", dict(sessionID="ses_b", error=dict(name="APIError", data=dict(message="B failed")))),
+                status("ses_b", "idle"),
+                status("ses_a", "busy"),
+                ("permission.asked", dict(id="r2", sessionID="ses_a", permission="bash", patterns=["ls"],
+                                          metadata=dict(command="ls"))),
+                ("permission.replied", dict(requestID="r2", sessionID="ses_a", reply="once")),
+                status("ses_a", "idle")]
             driver = root / "driver.mjs"
             driver.write_text(
                 "const { RoostObserver } = await import(%s);\n"
@@ -3867,6 +3888,7 @@ class ProgramStatus(unittest.TestCase):
                 "for (const [type, properties] of %s) await hooks.event({ event: { type, properties } });\n"
                 % (json.dumps(plugin.as_uri()), json.dumps(events)))
             env = dict(os.environ, ROOST_PYTHON=sys.executable, ROOST_HELPER=str(helper))
+            env.pop("ROOST_OPENCODE_OBSERVER", None)
             subprocess.run(["node", str(driver)], env=env, check=True, timeout=30)
             reports = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual([(r["event"], r.get("session"), r.get("status")) for r in reports],
@@ -3876,10 +3898,14 @@ class ProgramStatus(unittest.TestCase):
                               ("status", "ses_a", "busy"), ("status", "ses_a", "idle"),
                               ("status", "ses_a", "busy"), ("asked", "ses_a", None), ("replied", "ses_a", None),
                               ("status", "ses_a", "idle"),
-                              ("status", "ses_a", "busy"), ("status", "ses_b", "busy"),
-                              ("status", "ses_a", "idle"), ("status", "ses_b", "idle")])
-            self.assertEqual((reports[15]["reply"], reports[15].get("error")), ("A is done.", None))
-            self.assertEqual((reports[16]["reply"], reports[16]["error"]), ("", dict(name="APIError", message="B failed")))
+                              ("status", "ses_a", "busy"), ("status", "ses_b", "busy"), ("asked", "ses_a", None),
+                              ("asked", "ses_a", None), ("status", "ses_b", "busy"), ("status", "ses_b", "idle"),
+                              ("status", "ses_a", "busy"), ("asked", "ses_a", None), ("replied", "ses_a", None),
+                              ("status", "ses_a", "idle")])
+            self.assertEqual(reports[16]["questions"], [dict(question="Third?")])
+            self.assertEqual((reports[18]["reply"], reports[18]["error"]),
+                             ("B is done.", dict(name="APIError", message="B failed")))
+            self.assertEqual(reports[20]["metadata"]["command"], "ls")
             self.assertEqual((reports[2]["child"], reports[2]["questions"]), (True, [dict(question="Which?")]))
             self.assertEqual(reports[4], reports[2])
             self.assertEqual(reports[6]["reply"], "Done.\n\nAll done.")
@@ -3889,6 +3915,15 @@ class ProgramStatus(unittest.TestCase):
             self.assertEqual((reports[8]["reply"], reports[10]["metadata"]["command"]), ("", "date"))
             self.assertIs(reports[12]["declined"], True)
             self.assertEqual(roost.OpenCodeAgent().observe(reports[12], "running")["lastEvent"], "Interrupt")
+            # An OpenCode started from it, by its shell tool, reports nothing.
+            nested = root / "nested.mjs"
+            nested.write_text(
+                "const { RoostObserver } = await import(%s);\n"
+                "if (process.env.ROOST_OPENCODE_OBSERVER !== '1') throw new Error('marker');\n"
+                "const hooks = await RoostObserver({});\n"
+                "if (hooks.event) throw new Error('reports');\n" % json.dumps(plugin.as_uri()))
+            subprocess.run(["node", str(nested)], env=dict(env, ROOST_OPENCODE_OBSERVER="1"), check=True, timeout=30)
+            self.assertEqual(len(log.read_text().splitlines()), len(reports))
 
 
 

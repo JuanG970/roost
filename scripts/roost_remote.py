@@ -781,6 +781,11 @@ class PiAgent:
 
 OPENCODE_PLUGIN = r'''import { spawn } from "node:child_process";
 export const RoostObserver = async () => {
+  // An OpenCode started from this one, as by its shell tool, inherits the
+  // config that loads this plugin: only the one Roost started reports.
+  const observer = process.env.ROOST_OPENCODE_OBSERVER;
+  if (observer && observer !== String(process.pid)) return {};
+  process.env.ROOST_OPENCODE_OBSERVER = String(process.pid);
   const send = payload => new Promise(resolve => {
     const child = spawn(process.env.ROOST_PYTHON, [process.env.ROOST_HELPER, "hook-env"],
       { stdio: ["pipe", "ignore", "ignore"] });
@@ -797,19 +802,22 @@ export const RoostObserver = async () => {
     const payload = JSON.stringify({ event, session, ...extra });
     return reported = reported.then(() => send(payload));
   };
-  // Subagents run in sessions of their own: their questions wait on you
-  // too, but their turns are not the task's.
-  const children = new Set();
+  // Subagents run in sessions of their own, by the session that started
+  // them: their questions wait on you too, but their turns are not the task's.
+  const parents = new Map();
+  const rootOf = session => parents.has(session) ? rootOf(parents.get(session)) : session;
   const assistant = new Set();
   // What waits on you, by request, in the order it asked.
   const waiting = new Map();
+  const newest = () => [...waiting.values()].pop();
   const ask = (id, session, extra) => {
-    waiting.set(id, [session, { child: children.has(session), ...extra }]);
+    waiting.set(id, [session, { child: parents.has(session), ...extra }]);
     return report("asked", session, waiting.get(id)[1]);
   };
   // Each session's turn, as several can run at once: its reply, and
-  // whether it failed or you declined what it asked. OpenCode can say a
-  // session idles twice as a turn ends; one is its end.
+  // whether it failed or you declined what it asked. The task works while
+  // any of them does. OpenCode can say a session idles twice as a turn
+  // ends, and works at each step of one; once is its end, or its start.
   const turns = new Map();
   report("start");
   return {
@@ -818,7 +826,7 @@ export const RoostObserver = async () => {
       switch (event.type) {
         case "session.created":
         case "session.updated":
-          if (p.info && p.info.parentID) children.add(p.info.id);
+          if (p.info && p.info.parentID) parents.set(p.info.id, p.info.parentID);
           return;
         case "message.updated":
           if (p.info && p.info.role === "assistant") assistant.add(p.info.id);
@@ -837,16 +845,25 @@ export const RoostObserver = async () => {
           if (turns.has(p.sessionID) && p.error) turns.get(p.sessionID).failure = p.error;
           return;
         case "session.status": {
-          if (children.has(p.sessionID) || !p.status) return;
-          const turn = turns.get(p.sessionID);
+          const session = p.sessionID;
+          if (parents.has(session) || !p.status) return;
+          const turn = turns.get(session);
           if (p.status.type !== "idle") {
-            if (!turn) turns.set(p.sessionID, { parts: new Map() });
-            return report("status", p.sessionID, { status: p.status.type });
+            if (turn) return;
+            turns.set(session, { parts: new Map() });
+            // A question another turn asked still waits on you.
+            return waiting.size ? undefined : report("status", session, { status: p.status.type });
           }
           if (!turn) return;
-          turns.delete(p.sessionID);
+          turns.delete(session);
+          // What it asked and you never answered, as when you stopped it, waits no more.
+          for (const [id, [asker]] of waiting) if (rootOf(asker) === session) waiting.delete(id);
+          if (turns.size) {
+            const rest = newest();
+            return rest ? report("asked", ...rest) : report("status", [...turns.keys()].pop(), { status: "busy" });
+          }
           const failure = turn.failure;
-          return report("status", p.sessionID, { status: "idle", reply: [...turn.parts.values()].join("\n\n"),
+          return report("status", session, { status: "idle", reply: [...turn.parts.values()].join("\n\n"),
             declined: turn.declined,
             error: failure && { name: failure.name, message: failure.data && failure.data.message } });
         }
@@ -864,8 +881,8 @@ export const RoostObserver = async () => {
             turns.get(p.sessionID).declined = true;
           }
           // Answered one of several, what still waits is the newest of the rest.
-          const rest = [...waiting.values()].pop();
-          return rest ? report("asked", ...rest) : report("replied", p.sessionID, { child: children.has(p.sessionID) });
+          const rest = newest();
+          return rest ? report("asked", ...rest) : report("replied", p.sessionID, { child: parents.has(p.sessionID) });
         }
       }
     },
@@ -895,6 +912,10 @@ class OpenCodeAgent:
         # project folder in place of the task's worktree. OpenCode's own
         # arguments follow its name, as in npx opencode-ai or env X=1 opencode.
         named = next((i for i, arg in enumerate(command) if os.path.basename(arg).startswith("opencode")), 0)
+        # A wrapper such as env setting these would leave the observer out.
+        if any(re.match(r"(OPENCODE_PURE|OPENCODE_CONFIG_CONTENT)=", arg) for arg in command[:named]):
+            raise RoostError("Roost sets OpenCode's inline config and needs its plugins; "
+                             "remove OPENCODE_PURE and OPENCODE_CONFIG_CONTENT from the command")
         taking = None
         for arg in command[named + 1:]:
             if arg == "--":
@@ -928,6 +949,8 @@ class OpenCodeAgent:
     def environment(self, store, env):
         """The inline config that loads the plugin, added to any the user set:
         OpenCode merges it over their files rather than in place of them."""
+        if (env.get("OPENCODE_PURE") or "").lower() in ("1", "true", "yes", "on"):
+            raise RoostError("OPENCODE_PURE leaves out every plugin, Roost's observer too; unset it for Roost's tasks")
         config = {}
         if env.get("OPENCODE_CONFIG_CONTENT"):
             try:
@@ -938,7 +961,9 @@ class OpenCodeAgent:
                 raise RoostError("Roost adds its observer to OPENCODE_CONFIG_CONTENT, which must be a JSON object")
         plugins = config.get("plugin") if isinstance(config.get("plugin"), list) else []
         config["plugin"] = plugins + [self.plugin(store).as_uri()]
-        return {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+        # Its plugin marks the OpenCode that reports; one Roost starts, as
+        # from another task's shell, is a new one.
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps(config), "ROOST_OPENCODE_OBSERVER": ""}
 
     def request(self, payload):
         """What a question or permission request asks, in Roost's words."""

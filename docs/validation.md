@@ -57,6 +57,13 @@ happened in a section below:
   made it `ready` rather than `interrupted`: its plugin now reports one
   idle per turn. Declining a request ends the turn with no error at all;
   the plugin now says the turn ended on one you declined.
+- **After review, the same setup.** OpenCode sets `busy` at each step of a
+  turn; the plugin now reports it once. A request whose turn ends unanswered
+  is dropped, as OpenCode drops one whose wait it interrupts with no reply.
+  Esc on a command's approval showed `interrupted`. The agent ran
+  `opencode run` from its shell: that OpenCode answered "nested", inheriting
+  the plugin, and reported nothing, while the task stayed `running` in its
+  own session until its turn ended.
 
 ## tmux-control's terminal interface — 2026-10-18
 

@@ -477,11 +477,15 @@ Things to know:
   merges over your own config; Roost adds its plugin to any you set there,
   which must then be plain JSON. Its command can't hold `--pure`, which
   leaves plugins out, or a project folder, which would take OpenCode out of
-  the task's worktree. OpenCode asks before a tool only where your
-  `permission` config says `ask`, and by default runs most without asking.
-  Its questions, and a subagent's, show as `permission`; Esc, or declining a
-  request, shows `interrupted`. OpenCode starts a conversation at its first
-  prompt, so a task stopped before one starts a new conversation on `s`.
+  the task's worktree, and a task won't start with `OPENCODE_PURE` set. An
+  OpenCode the agent runs itself, as `opencode run`, says nothing to Roost.
+  With turns in several sessions at once, the task works until the last
+  ends, and waits on you while any asks. OpenCode asks before a tool only
+  where your `permission` config says `ask`, and by default runs most
+  without asking. Its questions, and a subagent's, show as `permission`;
+  Esc, or declining a request, shows `interrupted`. OpenCode starts a
+  conversation at its first prompt, so a task stopped before one starts a
+  new conversation on `s`.
 - Roost's task sessions stay out of the corner where tmux-control names other
   sessions with new output, and its terminals don't show that corner: it
   lights up whenever an agent prints anything, and only shows its terminal.
