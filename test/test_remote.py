@@ -13,6 +13,7 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -112,6 +113,76 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(self.request("retire", id=task["id"])["ok"])
         self.assertFalse(Path(task["worktree"]).exists())
         self.assertEqual(self.request("list")["result"], [])
+
+    def test_attachments_keep_their_names_and_go_with_the_task(self):
+        task = self.create()
+        encode = lambda data: base64.b64encode(data).decode()
+        files = [dict(name="shot.png", data=encode(b"\x89PNG")),
+                 dict(name="a.scrawl/summary.md", data=encode(b"look\n")),
+                 dict(name="a.scrawl/frames/frame-01.png", data=encode(b"1"))]
+        reply = self.request("attach", id=task["id"], files=files)
+        self.assertTrue(reply["ok"], reply)
+        shot, bundle = map(Path, reply["result"]["paths"])
+        self.assertEqual((shot.name, shot.read_bytes()), ("shot.png", b"\x89PNG"))
+        self.assertEqual((bundle / "frames" / "frame-01.png").read_bytes(), b"1")
+        self.assertEqual(stat.S_IMODE(shot.stat().st_mode), 0o600)
+        # A name as long as names go keeps to that with its number, cut
+        # between characters.
+        long = [dict(name="é" * 123 + "abcde.png", data=encode(b"x"))]
+        first, second = (Path(self.request("attach", id=task["id"], files=long)["result"]["paths"][0])
+                         for _ in range(2))
+        self.assertEqual(len(first.name.encode()), 255)
+        self.assertTrue(second.name.endswith("-2.png") and len(second.name.encode()) <= 255, second.name)
+        self.assertEqual(second.read_bytes(), b"x")
+        # A name taken already gets a number, as a second clipboard image does.
+        again = self.request("attach", id=task["id"], files=files[:2])["result"]["paths"]
+        self.assertEqual([Path(path).name for path in again], ["shot-2.png", "a-2.scrawl"])
+        self.assertEqual(Path(again[0]).parent, shot.parent)
+        for name in ("../out", "/etc/out", "", None):
+            self.assertFalse(self.request("attach", id=task["id"], files=[dict(name=name, data="")])["ok"])
+        self.assertFalse(self.request("attach", id=task["id"], files=[dict(name="x", data="not base64!")])["ok"])
+        self.assertFalse(self.request("attach", id=task["id"], files=[])["ok"])
+        self.assertFalse((self.state / "out").exists())
+        # A name both a file and a folder, and data that isn't base64 after
+        # names were taken: nothing is left of either.
+        before = sorted(path.name for path in shot.parent.iterdir())
+        self.assertFalse(self.request("attach", id=task["id"],
+                                      files=[dict(name="x", data=""), dict(name="x/y", data="")])["ok"])
+        self.assertFalse(self.request("attach", id=task["id"],
+                                      files=[dict(name="new.png", data="AA=="),
+                                             dict(name="bad.png", data="not base64!")])["ok"])
+        self.assertEqual(sorted(path.name for path in shot.parent.iterdir()), before)
+        # Nor of the names taken before one too long to take.
+        reply = self.request("attach", id=task["id"], files=[dict(name="ok.png", data="AA=="),
+                                                             dict(name="x" * 300 + ".png", data="AA==")])
+        self.assertFalse(reply["ok"])
+        self.assertIn("Can't attach", reply["error"])
+        self.assertEqual(sorted(path.name for path in shot.parent.iterdir()), before)
+        # Hooks aren't held while a large attachment is written.
+        decode = base64.b64decode
+        free = []
+
+        def decode_and_try_the_lock(*args, **kwargs):
+            with (self.state / "registry.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    free.append(True)
+                except BlockingIOError:
+                    free.append(False)
+            # But the task can't go meanwhile, leaving what is written after.
+            self.request("stop", id=task["id"])
+            free.append(self.request("forget", id=task["id"])["ok"])
+            return decode(*args, **kwargs)
+        with patch.object(roost.base64, "b64decode", decode_and_try_the_lock):
+            reply = self.request("attach", id=task["id"], files=files[:1])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(free, [True, False])
+        self.assertTrue(Path(reply["result"]["paths"][0]).exists())
+        self.request("stop", id=task["id"])
+        self.wait_for_pane_exit(task)
+        self.assertTrue(self.request("forget", id=task["id"])["ok"])
+        self.assertFalse(shot.parent.exists())
 
     def test_permissions_and_stop_are_attention_not_completion(self):
         task = self.create()
@@ -1294,6 +1365,19 @@ class Lifecycle(unittest.TestCase):
                     resumed = adapter.launch(store, task, True)
                     self.assertEqual(resumed[-1], "recorded-session")
                     self.assertNotIn(prompt, resumed)
+
+    def test_claude_reads_its_tasks_attachments_without_asking(self):
+        store = roost.Store(str(self.state))
+        task = dict(id="1234567890abcdef", command=["claude"], prompt="Look", agentSession="recorded-session",
+                    runId="run")
+        folder = store.attachments(task["id"])
+        for resume in (False, True):
+            argv = roost.ClaudeAgent().launch(store, task, resume)
+            # Its own folder only, which exists, and named with "=", so
+            # nothing after it is taken for another folder.
+            self.assertIn("--add-dir=" + str(folder), argv)
+            self.assertTrue(folder.is_dir())
+        self.assertEqual(argv[-2:], ["--resume", "recorded-session"])
 
     def test_adapter_launch_failure_marks_the_task_failed(self):
         task = self.create()
@@ -3754,21 +3838,86 @@ class ProgramStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store = roost.Store(root)
             agent = roost.OpenCodeAgent()
+            task = dict(id="0" * 16)
             plugin = agent.plugin(store).as_uri()
-            config = lambda env: json.loads(agent.environment(store, env)["OPENCODE_CONFIG_CONTENT"])
-            self.assertEqual(config({}), dict(plugin=[plugin]))
-            self.assertEqual(config(dict(OPENCODE_CONFIG_CONTENT='{"model": "m", "plugin": ["theirs"]}')),
-                             dict(model="m", plugin=["theirs", plugin]))
+            config = lambda env: json.loads(agent.environment(store, task, env)["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(config({})["plugin"], [plugin])
+            mine = config(dict(OPENCODE_CONFIG_CONTENT='{"model": "m", "plugin": ["theirs"]}'))
+            self.assertEqual((mine["model"], mine["plugin"]), ("m", ["theirs", plugin]))
             for bad in ("{", "[]", '"x"'):
                 with self.assertRaises(roost.RoostError):
-                    agent.environment(store, dict(OPENCODE_CONFIG_CONTENT=bad))
+                    agent.environment(store, task, dict(OPENCODE_CONFIG_CONTENT=bad))
             # OPENCODE_PURE leaves plugins out, as --pure does.
             for pure in ("1", "true", "TRUE"):
                 with self.assertRaises(roost.RoostError):
-                    agent.environment(store, dict(OPENCODE_PURE=pure))
-            self.assertIn("OPENCODE_CONFIG_CONTENT", agent.environment(store, dict(OPENCODE_PURE="0")))
+                    agent.environment(store, task, dict(OPENCODE_PURE=pure))
+            self.assertIn("OPENCODE_CONFIG_CONTENT", agent.environment(store, task, dict(OPENCODE_PURE="0")))
             # The OpenCode Roost starts is a new one to report, even from another's shell.
-            self.assertEqual(agent.environment(store, dict(ROOST_OPENCODE_OBSERVER="42"))["ROOST_OPENCODE_OBSERVER"], "")
+            self.assertEqual(agent.environment(store, task, dict(ROOST_OPENCODE_OBSERVER="42"))["ROOST_OPENCODE_OBSERVER"], "")
+
+    def test_opencode_reads_its_tasks_attachments_without_asking(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            agent = roost.OpenCodeAgent()
+            task = dict(id="1234567890abcdef")
+            env = agent.environment(store, task, {})
+            folder = str(store.attachments(task["id"])) + "/*"
+            self.assertEqual(env["ROOST_OPENCODE_ATTACHMENTS"], folder)
+            # The plugin gives the rule once your config is merged; the inline
+            # config Roost writes leaves your permissions alone.
+            self.assertEqual(set(json.loads(env["OPENCODE_CONFIG_CONTENT"])), {"plugin"})
+
+    @unittest.skipUnless(shutil.which("node"), "needs Node")
+    def test_opencode_plugin_allows_attachments_after_your_rules(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            plugin = roost.OpenCodeAgent().plugin(roost.Store(str(root / "state")))
+            folder = "/state/attachments/1234567890abcdef/*"
+            configs = [
+                # Nothing set: each of OpenCode's agents allows the folder.
+                {},
+                # A word for outside folders, and one for everything, stay
+                # theirs: the rule follows them, and leaves other rules be.
+                dict(permission=dict(external_directory="deny"),
+                     agent=dict(build=dict(model="m", permission=dict(external_directory="deny", bash="ask")),
+                                plan=dict(permission="allow"),
+                                # After an outside folder's word, a word for everything decides.
+                                general=dict(permission={"external_directory": "ask", "*": "deny", "read": "allow"}),
+                                explore=dict(permission=dict(external_directory={"/x/*": "allow", folder: "deny"})),
+                                mine=dict(permission={"*": {"/y/*": "deny"}})))]
+            driver = root / "driver.mjs"
+            driver.write_text(
+                "const { RoostObserver } = await import(%s);\n"
+                "const hooks = await RoostObserver({});\n"
+                "const configs = %s;\n"
+                "for (const config of configs) await hooks.config(config);\n"
+                "console.log(JSON.stringify(configs));\n"
+                % (json.dumps(plugin.as_uri()), json.dumps(configs)))
+            env = dict(os.environ, ROOST_PYTHON=sys.executable, ROOST_HELPER="/dev/null",
+                       ROOST_OPENCODE_ATTACHMENTS=folder)
+            env.pop("ROOST_OPENCODE_OBSERVER", None)
+            done = subprocess.run(["node", str(driver)], env=env, check=True, timeout=30,
+                                  capture_output=True, text=True)
+            empty, yours = json.loads(done.stdout.splitlines()[-1])
+            self.assertEqual(empty["agent"], {name: dict(permission=dict(external_directory={folder: "allow"}))
+                                              for name in ("build", "plan", "general", "explore")})
+            agents = yours["agent"]
+            self.assertEqual(yours["permission"], dict(external_directory="deny"))
+            self.assertEqual(agents["build"], dict(model="m", permission=dict(
+                bash="ask", external_directory={"*": "deny", folder: "allow"})))
+            self.assertEqual(agents["plan"]["permission"],
+                             {"*": "allow", "external_directory": {"*": "allow", folder: "allow"}})
+            self.assertEqual(list(agents["general"]["permission"].items()),
+                             [("*", "deny"), ("read", "allow"), ("external_directory", {"*": "deny", folder: "allow"})])
+            self.assertEqual(list(agents["explore"]["permission"]["external_directory"].items()),
+                             [("/x/*", "allow"), (folder, "allow")])
+            self.assertEqual(agents["mine"]["permission"],
+                             {"*": {"/y/*": "deny"}, "external_directory": {"/y/*": "deny", folder: "allow"}})
+            # Without a folder, as for an OpenCode Roost didn't start, nothing changes.
+            env.pop("ROOST_OPENCODE_ATTACHMENTS")
+            done = subprocess.run(["node", str(driver)], env=env, check=True, timeout=30,
+                                  capture_output=True, text=True)
+            self.assertEqual(json.loads(done.stdout.splitlines()[-1]), configs)
 
     def test_a_pi_dialog_at_startup_ends_no_turn(self):
         # It can open before Pi's first report, while its hooks still set
