@@ -13,10 +13,24 @@ Since 0.9.0:
   days of task status changes for it, under `history` in its state
   directory. An agent already running when you upgrade is counted once you
   stop and resume it (`K`, then `s`).
+- The task panel shows your latest prompt under the task's own, so after a
+  few turns it still says where you left off. Claude and Codex tasks have
+  it, since their hooks say what you send; Pi and OpenCode tasks show only
+  the prompt they started with. A task already running when you upgrade
+  shows it once you stop and resume it (`K`, then `s`).
 - `roost-doctor` asks for Claude Code 2.1.78 or newer on each host. Older
   releases don't know the `StopFailure` hook, so they open a task with a
   Settings Error and then skip all of Roost's hooks, leaving the task
   `starting`. If doctor flags a host, run `claude update` there.
+- A Codex task with Codex's memories on no longer shows ready in the middle
+  of a turn, or resumes the wrong conversation with `s`. Codex runs its
+  memory agent as a session of its own beside the task's, and Roost took its
+  events for the task's; it now counts only sessions in the task's worktree.
+  Nothing to do when upgrading.
+- A Codex task's reply shows in its notification and the task panel as soon
+  as the turn ends. Codex 0.163.0 and later report it when a turn stops;
+  Roost used to find it in Codex's session files, and still does for older
+  Codex. Nothing to do when upgrading.
 - Start a task from more places. `roost-new-task` on an error in a
   compilation buffer, or a match in a grep buffer, quotes that line. With
   Embark, `roost-new-task-from-region`, `-from-file`, `-from-url` and

@@ -8,7 +8,8 @@ what each covers. What only real agents, hosts and GitHub show needs a run by
 hand. In a separate Emacs, as CLAUDE.md says, go through these and record what
 happened in a section below:
 
-1. Claude Code: `make contract`, then `make contract-live`. Start a task from
+1. Claude Code: `make contract`, then `make contract-live`, and for Codex and
+   Pi `make contract-live CONTRACT_AGENTS="codex pi"`. Start a task from
    a draft and one from an Org heading. Answer a permission prompt in its
    terminal, interrupt a turn with Esc, and let one finish while you look at
    another: it waits in the sidebar, and `n` reaches it.
@@ -56,6 +57,40 @@ happened in a section below:
 - **So** `roost-doctor` now asks for Claude Code 2.1.78 or newer, with a hint
   to upgrade. A new event in `CLAUDE_HOOK_EVENTS` raises
   `CLAUDE_MIN_VERSION` to the release that first sends it.
+
+## Recorded sessions — 2026-10-19
+
+`make contract-live` now keeps what each agent sent in `test/captures`, and
+`make contract` scans Codex, Pi and OpenCode as it scanned Claude Code. Live
+runs on the Mac, each passing every check:
+
+- Claude Code 2.1.303, Haiku, with and without the OSC 7501 relay. Without
+  it, a declined request and Esc reach Roost through no hook: the capture
+  ends those steps at `permission` and `running`, and listings correct them
+  from the transcript, as before.
+- Codex 0.163.0, its default model, read-only with approval on request,
+  with and without the relay. A fresh repository asks to trust it and then
+  to review Roost's eight hooks, both before the task's prompt runs; the
+  driver answers both, and afterwards puts back the tables of
+  `~/.codex/config.toml` they wrote, leaving the rest as Codex left it.
+  Relayed, a declined request reports `working` 85 ms before its `Interrupt`
+  hook, so it shows as approved for that long. With Codex's memories on, its
+  memory agent runs as a session of its own in the same Codex, in
+  `~/.codex/memories`, and Roost's hooks report it too: its `SessionStart`
+  showed the task ready in the middle of a turn, and its events took over
+  the task's session. Roost now leaves out a Codex session whose `cwd` is
+  outside the task's worktree, and the relayed capture shows the task
+  running on its own session throughout.
+- Pi 1.3.0 on LM Studio's qwen3.6-35b-a3b (49152 tokens of context): a turn,
+  Esc and another turn.
+
+The scans found nothing new in Codex 0.163.0 (twelve hook events, eight of
+them Roost's, whose payloads it describes as JSON schemas in its binary), Pi
+1.3.0 (41 extension events) or OpenCode 1.19.3. OpenCode also defines 28
+`session.next.*` events for the engine it is moving to; the scan sets them
+aside, and fails if the events Roost's plugin reads go. Codex's `Stop` now
+carries `last_assistant_message`, which Roost could take as Claude's is
+taken, rather than reading the rollout.
 
 ## Attachments — 2026-10-19
 

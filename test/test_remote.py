@@ -3009,6 +3009,37 @@ elif args[:2] == ["auth", "status"]:
                           task["runId"])
         reply = self.request("list", full=True)["result"][0]["lastMessage"]
         self.assertEqual((reply[:2000], reply[2000:]), ("y" * 2000, "…"))
+        # Cut where a space follows, it still says it was cut.
+        roost.update_hook(store, task["id"], dict(hook_event_name="Stop",
+                                                  last_assistant_message="y" * 2000 + " " + "z" * 100),
+                          task["runId"])
+        reply = self.request("list", full=True)["result"][0]["lastMessage"]
+        self.assertEqual((reply[:2000], reply[2000:]), ("y" * 2000, "…"))
+
+    def test_what_you_last_said_is_kept_for_the_panel_but_not_the_first_prompt(self):
+        # Claude's UserPromptSubmit carries the prompt. The first is the
+        # task's own, which the panel shows already.
+        task = self.create(prompt="Fix the parser")
+        self.wait(task, "ready", "Stop")
+        store = roost.Store(str(self.state))
+        self.assertIsNone(store.read(task["id"]).get("lastPrompt"))
+        hook = lambda **fields: roost.update_hook(store, task["id"], dict(hook_event_name="UserPromptSubmit",
+                                                                          **fields), task["runId"])
+        hook(prompt="  Now add a test\n")
+        roost.update_hook(store, task["id"], dict(hook_event_name="Stop", last_assistant_message="Added"),
+                          task["runId"])
+        # Emacs shows it as is.
+        self.assertEqual(self.request("list")["result"][0]["lastPrompt"], "Now add a test")
+        self.assertEqual(self.request("inspect", id=task["id"])["result"]["lastPrompt"], "Now add a test")
+        hook(prompt="y" * 3000)
+        said = store.read(task["id"])["lastPrompt"]
+        self.assertEqual((said[:2000], said[2000:]), ("y" * 2000, "…"))
+        # Back to the first prompt, or no words at all: nothing more to remind you of.
+        hook(prompt="Fix the parser")
+        self.assertIsNone(store.read(task["id"])["lastPrompt"])
+        hook(prompt="Again")
+        hook()
+        self.assertIsNone(store.read(task["id"])["lastPrompt"])
 
     def test_claudes_transcript_is_read_where_claude_says_it_is(self):
         task = self.create()
@@ -3639,12 +3670,51 @@ class LastMessage(unittest.TestCase):
                    [message("assistant", "wrong")])
         self.assertEqual(roost.last_message(task), "done")
 
+    def test_the_reply_codex_reports_is_the_latest_reply(self):
+        # Codex 0.163.0's Stop carries the turn's reply, ahead of its rollout.
+        agent = roost.CodexAgent()
+        task = dict(agent="codex", worktree="/w", agentSession="abc-123")
+        self.write(".codex/sessions/2026/08/28/rollout-2026-08-28T18-33-42-abc-123.jsonl", [
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                                  "content": [{"type": "output_text", "text": "from the rollout"}]}}])
+        observe = lambda **payload: agent.observe(dict(payload, session_id="abc-123"), "running")
+        stopped = observe(hook_event_name="Stop", last_assistant_message="  PONG\n")
+        self.assertEqual(stopped["lastReply"], "PONG")
+        self.assertEqual(roost.last_message(dict(task, **stopped)), "PONG")
+        # A new turn, or a cleared conversation, has no reply yet: the rollout says what is newest.
+        self.assertIsNone(observe(hook_event_name="UserPromptSubmit", prompt="next")["lastReply"])
+        self.assertIsNone(observe(hook_event_name="SessionStart", source="clear")["lastReply"])
+        self.assertEqual(roost.last_message(dict(task, lastReply=None)), "from the rollout")
+        # Older Codex, or a turn with no words, reports none.
+        for reply in (None, "", "  ", 5):
+            self.assertNotIn("lastReply", observe(hook_event_name="Stop", last_assistant_message=reply))
+        self.assertNotIn("lastReply", observe(hook_event_name="SessionStart", source="resume"))
+        long = observe(hook_event_name="Stop", last_assistant_message="y" * 3000)["lastReply"]
+        self.assertEqual(len(long), roost.LAST_MESSAGE_LIMIT + 1)
+        self.assertEqual(roost.last_message(dict(task, lastReply=long)), "y" * 2000 + "…")
+
     def test_pi_reads_its_session_file(self):
         path = self.write("pi/session.jsonl", [
             {"type": "session", "id": "x"},
             {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "pi says"}]}},
             {"type": "message", "message": {"role": "user", "content": "ok"}}])
         self.assertEqual(roost.last_message(dict(agent="pi", worktree="/w", agentSession=str(path))), "pi says")
+
+    def test_only_agents_whose_hooks_say_what_you_sent_report_it(self):
+        self.assertEqual(roost.ClaudeAgent().observe(
+            dict(hook_event_name="UserPromptSubmit", prompt="Next"))["lastPrompt"], "Next")
+        self.assertEqual(roost.CodexAgent().observe(
+            dict(hook_event_name="UserPromptSubmit", prompt="Next"))["lastPrompt"], "Next")
+        self.assertNotIn("lastPrompt", roost.ClaudeAgent().observe(dict(hook_event_name="Stop")))
+        self.assertNotIn("lastPrompt", roost.PiAgent().observe(dict(event="agent_start")))
+        self.assertNotIn("lastPrompt", roost.OpenCodeAgent().observe(dict(event="status", status="busy"), "ready"))
+        # A task recorded before the field, as by an older helper, has none.
+        self.assertIsNone(roost.later_prompt(dict(prompt="Fix it"), None))
+        self.assertIsNone(roost.later_prompt(dict(prompt="Fix it"), " Fix it\n"))
+        self.assertEqual(roost.later_prompt(dict(prompt=None), "Fix it"), "Fix it")
+        # One that starts as the first did, beyond what the panel shows, is another.
+        said = roost.later_prompt(dict(prompt="x" * 2500 + " and then a"), "x" * 2500 + " and then b")
+        self.assertEqual(said, "x" * 2000 + "…")
 
     def test_missing_or_malformed_transcripts_give_none(self):
         for agent in ("claude", "codex", "pi", "opencode"):
@@ -3905,6 +3975,30 @@ class ProgramStatus(unittest.TestCase):
             report(dict(state="idle"))
             finish()
             self.assertEqual(store.read("0" * 16)["status"], "running")
+
+    def test_codex_sessions_outside_the_worktree_are_not_the_tasks(self):
+        # With memories on, Codex runs its memory agent as a session of its
+        # own in the same process, and Roost's hooks report it too.
+        with tempfile.TemporaryDirectory() as root:
+            store = roost.Store(root)
+            worktree = Path(root) / "w"
+            (worktree / "sub").mkdir(parents=True)
+            store.save(dict(id="0" * 16, agent="codex", worktree=str(worktree), status="starting", runId="run"))
+            hook = lambda event, session, cwd: roost.update_hook(
+                store, "0" * 16, dict(hook_event_name=event, session_id=session, cwd=str(cwd)), "run")
+            hook("SessionStart", "task", worktree)
+            hook("UserPromptSubmit", "task", worktree)
+            memories = Path(root) / "home/.codex/memories"
+            for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+                hook(event, "memory", memories)
+            task = store.read("0" * 16)
+            self.assertEqual((task["status"], task["agentSession"]), ("running", "task"))
+            # Its own subagents, in a folder of the worktree, are the task's.
+            hook("Stop", "task", worktree / "sub")
+            self.assertEqual(store.read("0" * 16)["status"], "ready")
+            # A new conversation in the worktree, as with /new, is the task's.
+            hook("SessionStart", "next", worktree)
+            self.assertEqual(store.read("0" * 16)["agentSession"], "next")
 
     def test_pi_dialogs_wait_on_you(self):
         pi = roost.PiAgent()

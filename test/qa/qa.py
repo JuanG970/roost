@@ -1128,11 +1128,20 @@ def send(qa, repo):
     open_task(qa, name)
     qa.keys("C-c r e")
     qa.wait("the prompt", lambda s: s["prompt"])
-    qa.step("A prompt to send", expect=[("it names the task", lambda s: name in (s["prompt"] or ""))])
+    qa.step("A prompt to send", expect=[
+        ("it names the task", lambda s: name in (s["prompt"] or "")),
+        # Its first prompt is the task's own, which the panel shows already.
+        ("the panel has no latest prompt yet", lambda s: "Say hi" in panel_text(qa, s)
+         and "Your latest prompt" not in panel_text(qa, s))])
     qa.type("How are you?\r")
     qa.wait("the agent to get it", lambda s: any("PROMPT How are you?" in w["text"] for w in terminals(s)))
     qa.status(name, "ready", "idle")
     qa.step("Sent", expect=[("the echo area says so", lambda s: "Sent to " + name in (s["echo"] or ""))])
+    latest = lambda s: re.search(r"Your latest prompt\n\s*How are you\?", panel_text(qa, s))
+    qa.wait("the panel to hear it", latest)
+    qa.step("The panel shows what you last said", expect=[
+        ("under the task's prompt", lambda s: latest(s) and panel_text(qa, s).index("Say hi")
+         < panel_text(qa, s).index("Your latest prompt"))])
 
 
 def attached(text, name):
