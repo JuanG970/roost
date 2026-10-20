@@ -1301,6 +1301,31 @@ def search(qa, repo):
     qa.step("RET opens its task", expect=[("its panel beside it", lambda s: panel_text(qa, s).startswith(name))])
 
 
+def workload_text(qa, screen):
+    return (qa.window(screen, "roost-workload-mode") or {}).get("text", "")
+
+
+@journey("How long agents worked and waited on you")
+def workload(qa, repo):
+    start_task(qa, "Say what each note is for")
+    qa.keys("M-x")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type("roost-workload\r")
+    qa.wait("the workload", lambda s: "Week" in workload_text(qa, s))
+    qa.step("Today and each day of the past week", expect=[
+        ("an agent worked today", lambda s: re.search(r"^Today +[1-9]", workload_text(qa, s), re.M)),
+        ("six days before it", lambda s: len(re.findall(r"^(Yesterday|\w{3} \d+ \w{3}) ", workload_text(qa, s),
+                                                         re.M)) == 6),
+        ("the week too", lambda s: re.search(r"^Week +[1-9]", workload_text(qa, s), re.M)),
+        ("it says what it counts", lambda s: "time away" in workload_text(qa, s)),
+        ("it is selected", lambda s: qa.window(s, "roost-workload-mode")["selected"])])
+    qa.keys("g")
+    qa.wait("the workload again", lambda s: "Week" in workload_text(qa, s))
+    qa.step("g asks the hosts again")
+    qa.keys("q")
+    qa.step("q puts it away", expect=[("it is gone", lambda s: not qa.window(s, "roost-workload-mode"))])
+
+
 @journey("Open a task with a question left open")
 def question_left(qa, repo):
     """A question you leave open in the minibuffer, by clicking in the
@@ -2009,7 +2034,8 @@ def dropped(qa, repo):
 
 
 JOURNEYS = [sweep, answer, fold, resize, merge, review, panes, shell,
-            dashboard, stop_resume, retire, send, attach, update, conflicts, restart, search, question_left, walk_away,
+            dashboard, stop_resume, retire, send, attach, update, conflicts, restart, search, workload, question_left,
+            walk_away,
             frames, org, drafts, tabs,
             forget, rename, fork, other_branch, merged, pull_request, exits, unreachable, scrollback, fleet, dropped]
 

@@ -92,7 +92,7 @@ Magit is optional (review falls back to Dired).
   normal state switches ESC between the agents and Evil; setting
   `tmux-control-evil-state` to `emacs` sends it to the agents always.
 - **Other modal setups** (Meow, xah-fly-keys): put `roost-dashboard-mode`,
-  `roost-task-info-mode` and `roost-doctor-mode`, and the drafts
+  `roost-task-info-mode`, `roost-doctor-mode` and `roost-workload-mode`, and the drafts
   `roost-compose-mode`, `roost-send-mode` and `roost-pr-mode`, in your insert or
   Emacs-state list so their keys work.
 - **Completion.** Prompts use `completing-read`, so Vertico, Ivy, Helm and the
@@ -273,6 +273,19 @@ agent's last reply, so you can tell which tasks to retire without opening them.
 Nothing is lost by retiring it with `x`: nothing is left uncommitted, and its
 commits are all in what was merged. Commits made after its pull request merged
 keep it from saying so.
+
+**See how many agents you can keep up with.** `M-x roost-workload` shows, for
+today and each day of the past week, the most agents that worked at once, how
+long they worked, and how long they waited on you: asked you something, ended
+a turn or failed before you looked, or had a pull request or conflict for you,
+added up across agents, with the longest single wait. The last column is that
+waiting for each hour of work. A day with more agents at once should show more
+work; past what you can supervise, it shows more waiting for each hour of work
+instead, as agents queue for you. Thirty minutes with no change on any host,
+as overnight, count as time away and are left out of the waiting. `g` asks
+the hosts again. Each host's helper keeps the history, 30 days of it, under
+`history` in its state directory; an agent started before you upgraded is
+counted once you stop and resume it (`K`, then `s`).
 
 ## Commands
 
@@ -503,6 +516,12 @@ Roost never changes your global agent settings or answers prompts.
 | `exited`, `failed` | The agent exited normally, or the CLI failed; `RET` shows its last output |
 | `crashed` | The agent's tmux pane disappeared |
 | `stopped` | Stopped with `K`; `s` resumes the conversation |
+
+The helper notes each change of a task's status, of whether you've seen its
+agent since its last event, and of what of its pull request or work waits on
+you, in a file a day under `history` in its state directory, and deletes
+files older than 30 days. Only Emacs asks GitHub, so it tells the helper when
+a task's pull request or conflicts come to wait on you, or stop.
 
 A task's identity is its host and ID. A per-pane ownership tag keeps Roost from
 steering or killing an unrelated pane after a tmux restart, and hooks from an

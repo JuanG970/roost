@@ -6,6 +6,13 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- `M-x roost-workload` shows, for today and each day of the past week, the
+  most agents that worked at once, how long they worked, and how long they
+  waited on you, to see how many you can keep up with. Past that, a day with
+  more agents shows more waiting for each hour of work. Each host keeps 30
+  days of task status changes for it, under `history` in its state
+  directory. An agent already running when you upgrade is counted once you
+  stop and resume it (`K`, then `s`).
 - `roost-doctor` asks for Claude Code 2.1.78 or newer on each host. Older
   releases don't know the `StopFailure` hook, so they open a task with a
   Settings Error and then skip all of Roost's hooks, leaving the task

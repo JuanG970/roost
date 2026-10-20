@@ -1866,6 +1866,45 @@ class Lifecycle(unittest.TestCase):
         # Not an event of the agent's: nothing else changes.
         self.assertEqual(listed["status"], "ready")
 
+    def test_history_notes_each_change_of_status_seen_and_turn(self):
+        started = time.time()
+        task = self.create()
+        record = self.wait(task, "ready")
+        self.assertTrue(self.request("seen", id=task["id"], updatedAt=record["updatedAt"])["ok"])
+        for value in ("to merge", "to merge", None):
+            reply = self.request("turn", id=task["id"], turn=value)
+            self.assertTrue(reply["ok"], reply)
+        # Not an event of the agent's.
+        self.assertEqual(reply["result"]["updatedAt"], record["updatedAt"])
+        self.assertIn("Unknown turn", self.request("turn", id=task["id"], turn="later")["error"])
+        self.request("stop", id=task["id"])
+        self.assertTrue(self.request("retire", id=task["id"])["ok"])
+        reply = self.request("history", since=started)
+        self.assertTrue(reply["ok"], reply)
+        changes = [change for change in reply["result"]["changes"] if change["id"] == task["id"]]
+        self.assertEqual([(change["status"], change.get("seen"), change.get("turn")) for change in changes],
+                         [("starting", False, None), ("ready", False, None), ("ready", True, None),
+                          ("ready", True, "to merge"), ("ready", True, None), ("stopped", True, None),
+                          (None, None, None)])
+        # Each says what it was, so a day's first change tells how the day began.
+        self.assertIsNone(changes[0]["was"])
+        for before, after in zip(changes, changes[1:]):
+            self.assertEqual(after["was"], dict(status=before["status"], seen=before["seen"], turn=before["turn"]))
+        self.assertEqual(changes, sorted(changes, key=lambda change: change["at"]))
+        self.assertEqual(reply["result"]["tasks"], [])
+        self.assertGreaterEqual(reply["result"]["now"], changes[-1]["at"])
+        # Asked from later on, it has none of them.
+        self.assertEqual(self.request("history", since=time.time() + 1)["result"]["changes"], [])
+        self.assertIn("start", self.request("history")["error"])
+
+    def test_history_lists_each_task_as_it_is_now(self):
+        task = self.create()
+        record = self.wait(task, "ready")
+        self.request("seen", id=task["id"], updatedAt=record["updatedAt"])
+        self.request("turn", id=task["id"], turn="conflicts")
+        tasks = self.request("history", since=time.time())["result"]["tasks"]
+        self.assertEqual(tasks, [dict(id=task["id"], status="ready", seen=True, turn="conflicts")])
+
     def test_forget_refuses_a_running_agent_and_never_touches_git(self):
         task = self.create()
         self.assertIn("stop", self.request("forget", id=task["id"])["error"])
@@ -3018,6 +3057,44 @@ elif args[:2] == ["auth", "status"]:
         self.assertTrue(response["ok"])
         self.wait(response["result"], "failed")
         self.assertEqual(self.git("status", "--porcelain"), "")
+
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.temp.name) / "history"
+        self.history = roost.History(self.folder)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_only_changes_are_noted(self):
+        task = dict(status="ready", updatedAt="1", seen=None, name="a")
+        self.history.note("t1", task, dict(task, name="b"))
+        self.assertFalse(self.folder.exists())
+        self.history.note("t1", task, dict(task, seen="1"))
+        self.history.note("t1", dict(task, seen="1"), dict(task, seen="1", updatedAt="2"))
+        changes = self.history.read(0)
+        self.assertEqual([change["seen"] for change in changes], [True, False])
+
+    def test_old_days_are_pruned_and_damaged_lines_skipped(self):
+        self.folder.mkdir()
+        old = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (roost.HISTORY_DAYS + 2) * 86400))
+        recent = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
+        (self.folder / (old + ".jsonl")).write_text(json.dumps(dict(at=1.0, id="t0", status="ready")) + "\n")
+        (self.folder / (recent + ".jsonl")).write_text(
+            json.dumps(dict(at=time.time() - 86400, id="t0", status="running")) + "\n" + '{"at": 1')
+        (self.folder / "notes.txt").write_text("not the history's")
+        self.history.note("t1", None, dict(status="starting"))
+        self.assertFalse((self.folder / (old + ".jsonl")).exists())
+        self.assertTrue((self.folder / "notes.txt").exists())
+        self.assertEqual([change["status"] for change in self.history.read(0)], ["running", "starting"])
+        self.assertEqual([change["status"] for change in self.history.read(time.time() - 3600)], ["starting"])
+
+    def test_a_failure_to_note_fails_nothing(self):
+        Path(self.temp.name, "history").write_text("a file where the folder goes")
+        self.history.note("t1", None, dict(status="starting"))
+        self.assertEqual(self.history.read(0), [])
 
 
 class RemoteGit(unittest.TestCase):
