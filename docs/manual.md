@@ -615,13 +615,37 @@ options for itself:
 
     make qa QA_FLAGS="--remote --tuned -L ../tmux-control --package-dir ~/.emacs.d/elpa"
 
-Claude Code updates itself often, and Roost relies on what it reports and
-does. `make contract` scans the installed Claude Code for the hook events,
-notification types and payload fields Roost reads, and names any it has not
-seen; `make contract-live` also takes a real session (a few short Haiku turns,
-about three minutes) through each status Roost derives: a reply, a permission
-request approved and declined, Esc, a minute idle and `/clear`. Run them after
-Claude Code updates.
+The agents update often, and Roost relies on what they report.
+`make contract` scans each installed agent for the events and fields Roost
+reads, and names any it has not seen: Claude Code's hook events,
+notification types and payload fields; the hook events Codex's binary
+describes; the extension events Pi's types declare; and the events OpenCode
+defines. An agent that isn't installed is skipped. `make contract-live`
+also takes Claude Code through a real session (a few short Haiku turns,
+about three minutes) and checks each status Roost derives: a reply, a
+permission request approved and declined, Esc, a minute idle and `/clear`.
+`make contract-live CONTRACT_AGENTS="codex pi"` does the same with Codex
+(its default model; trusting the scratch repository and Roost's hooks is
+undone afterwards) and Pi (the model it is set to use). Add
+`CONTRACT_FLAGS=--program-status` to relay their OSC 7501 reports too, as
+`roost-program-status` does. Run them after an agent updates.
+
+A live run that passes keeps what the agent reported in `test/captures`,
+named after the agent and its version: each hook payload or extension
+report, and each relayed status report, in order, with paths and ids
+replaced. `make test` reads each capture again and checks that Roost makes
+the same of every event as it did then, so a change to an adapter is tested
+against what real agents sent, not only what the tests suppose. Captures of
+older versions stay, as hosts may run them. When a change is meant to read
+them differently, `python3 test/agent_captures.py` writes their expectations
+again, and the diff shows what changed.
+
+| Agent | Captured | Scanned | How Roost hears it |
+| --- | --- | --- | --- |
+| Claude Code | 2.1.303, with and without relay | hook events, notifications, payload fields | hooks given with `--settings` |
+| Codex | 0.163.0, with and without relay | hook events and payload fields | hooks given with `-c`, reviewed once in Codex |
+| Pi | 1.3.0 | extension events, context, options | an extension given with `--extension` |
+| OpenCode | none yet | events, settings | a plugin named in `OPENCODE_CONFIG_CONTENT` |
 
 See [validation](validation.md) for the live runs with Claude Code, Codex and
 Pi on local and remote hosts, [the demo notes](demo.md) for how the screenshots

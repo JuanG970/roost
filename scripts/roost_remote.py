@@ -609,6 +609,12 @@ def hook_shim(store):
     return str(path)
 
 
+# The Codex hook events Roost listens to; test/agent_contract.py checks
+# them, and the rest, against the installed Codex.
+CODEX_HOOK_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+                     "PostToolUse", "PermissionRequest", "Stop", "Interrupt")
+
+
 class CodexAgent:
     """Native Codex TUI with per-invocation, normally reviewed lifecycle hooks."""
 
@@ -631,8 +637,7 @@ class CodexAgent:
         # reviewed hook command stays the same across tasks and upgrades.
         command = shlex.join([sys.executable, hook_shim(store)])
         argv = list(task["command"])
-        for event in ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
-                      "PostToolUse", "PermissionRequest", "Stop", "Interrupt"):
+        for event in CODEX_HOOK_EVENTS:
             handler = '{ hooks = [{ type = "command", command = ' + json.dumps(command) + ', timeout = 3 }] }'
             argv += ["-c", "hooks." + event + "=[" + handler + "]"]
         session = task.get("agentSession")
@@ -3014,6 +3019,16 @@ def beside_program_status(updates, before, reports_turns=True):
             if key not in ("status", "updatedAt", "lastEvent", "error")}
 
 
+def capture(store, task_id, entry):
+    """Note ENTRY, what TASK_ID's agent reported, in the store's captures
+    folder if it has one: test/agent_contract.py makes one, to record a
+    real session for test/captures."""
+    folder = store.root / "captures"
+    if folder.is_dir():
+        with contextlib.suppress(OSError), (folder / (task_id + ".jsonl")).open("a") as file:
+            file.write(json.dumps(dict(entry, at=time.time()), ensure_ascii=False) + "\n")
+
+
 def update_hook(store, task_id, payload, run_id=None):
     with store.locked():
         task = store.read(task_id)
@@ -3021,6 +3036,7 @@ def update_hook(store, task_id, payload, run_id=None):
             return
         if task["status"] in ("stopped", "retired"):
             return
+        capture(store, task_id, {"hook": payload})
         before = task["status"]
         made = agent_worktree(task, payload.get("cwd"))
         if made and made not in (task.get("agentWorktrees") or []):
@@ -3292,6 +3308,8 @@ def program_status_recorder(store, task_id, run_id):
             with contextlib.suppress(OSError, ValueError, RoostError), store.locked():
                 task = store.read(task_id)
                 if task.get("runId") == run_id and task["status"] not in ("stopped", "retired"):
+                    for fields in batch:
+                        capture(store, task_id, {"report": fields})
                     if any([apply_program_status(task, fields, run_id) for fields in batch]):
                         store.save(task)
 
