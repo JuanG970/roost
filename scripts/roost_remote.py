@@ -819,6 +819,27 @@ export const RoostObserver = async () => {
   // any of them does. OpenCode can say a session idles twice as a turn
   // ends, and works at each step of one; once is its end, or its start.
   const turns = new Map();
+  // A turn ends when its session idles, or is deleted while it works. The
+  // last to end reports the task's end, with a failure from any of them:
+  // that one still waits for you to try again.
+  let failed;
+  const end = session => {
+    const turn = turns.get(session);
+    if (!turn) return;
+    turns.delete(session);
+    // What it asked and you never answered, as when you stopped it, waits no more.
+    for (const [id, [asker]] of waiting) if (rootOf(asker) === session) waiting.delete(id);
+    const failure = turn.failure && turn.failure.name !== "MessageAbortedError" ? turn.failure : undefined;
+    if (turns.size) {
+      failed = failure || failed;
+      const rest = newest();
+      return rest ? report("asked", ...rest) : report("status", [...turns.keys()].pop(), { status: "busy" });
+    }
+    const error = failure || failed || turn.failure;
+    failed = undefined;
+    return report("status", session, { status: "idle", reply: [...turn.parts.values()].join("\n\n"),
+      declined: turn.declined, error: error && { name: error.name, message: error.data && error.data.message } });
+  };
   report("start");
   return {
     event: async ({ event }) => {
@@ -854,18 +875,12 @@ export const RoostObserver = async () => {
             // A question another turn asked still waits on you.
             return waiting.size ? undefined : report("status", session, { status: p.status.type });
           }
-          if (!turn) return;
-          turns.delete(session);
-          // What it asked and you never answered, as when you stopped it, waits no more.
-          for (const [id, [asker]] of waiting) if (rootOf(asker) === session) waiting.delete(id);
-          if (turns.size) {
-            const rest = newest();
-            return rest ? report("asked", ...rest) : report("status", [...turns.keys()].pop(), { status: "busy" });
-          }
-          const failure = turn.failure;
-          return report("status", session, { status: "idle", reply: [...turn.parts.values()].join("\n\n"),
-            declined: turn.declined,
-            error: failure && { name: failure.name, message: failure.data && failure.data.message } });
+          return end(session);
+        }
+        case "session.deleted": {
+          // Its reply went with it.
+          if (turns.has(p.sessionID)) turns.get(p.sessionID).parts = new Map();
+          return end(p.sessionID);
         }
         case "permission.asked":
           return ask(p.id, p.sessionID, { permission: p.permission, patterns: p.patterns, metadata: {

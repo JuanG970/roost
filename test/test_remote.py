@@ -3880,7 +3880,20 @@ class ProgramStatus(unittest.TestCase):
                 ("permission.asked", dict(id="r2", sessionID="ses_a", permission="bash", patterns=["ls"],
                                           metadata=dict(command="ls"))),
                 ("permission.replied", dict(requestID="r2", sessionID="ses_a", reply="once")),
-                status("ses_a", "idle")]
+                status("ses_a", "idle"),
+                # A failure in one turn shows when the last one ends.
+                status("ses_a", "busy"),
+                status("ses_b", "busy"),
+                ("session.error", dict(sessionID="ses_b", error=dict(name="APIError", data=dict(message="B limited")))),
+                status("ses_b", "idle"),
+                ("message.updated", dict(info=dict(id="msg_y", role="assistant"))),
+                text("p7", "msg_y", "A ends."),
+                status("ses_a", "idle"),
+                # A session deleted while it works ends its turn.
+                status("ses_d", "busy"),
+                status("ses_e", "busy"),
+                ("session.deleted", dict(sessionID="ses_d", info=dict(id="ses_d"))),
+                status("ses_e", "idle")]
             driver = root / "driver.mjs"
             driver.write_text(
                 "const { RoostObserver } = await import(%s);\n"
@@ -3901,7 +3914,14 @@ class ProgramStatus(unittest.TestCase):
                               ("status", "ses_a", "busy"), ("status", "ses_b", "busy"), ("asked", "ses_a", None),
                               ("asked", "ses_a", None), ("status", "ses_b", "busy"), ("status", "ses_b", "idle"),
                               ("status", "ses_a", "busy"), ("asked", "ses_a", None), ("replied", "ses_a", None),
-                              ("status", "ses_a", "idle")])
+                              ("status", "ses_a", "idle"),
+                              ("status", "ses_a", "busy"), ("status", "ses_b", "busy"), ("status", "ses_a", "busy"),
+                              ("status", "ses_a", "idle"),
+                              ("status", "ses_d", "busy"), ("status", "ses_e", "busy"), ("status", "ses_e", "busy"),
+                              ("status", "ses_e", "idle")])
+            self.assertEqual((reports[26]["reply"], reports[26]["error"]),
+                             ("A ends.", dict(name="APIError", message="B limited")))
+            self.assertNotIn("error", reports[30])
             self.assertEqual(reports[16]["questions"], [dict(question="Third?")])
             self.assertEqual((reports[18]["reply"], reports[18]["error"]),
                              ("B is done.", dict(name="APIError", message="B failed")))
