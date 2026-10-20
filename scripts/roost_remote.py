@@ -23,6 +23,7 @@ import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -308,13 +309,211 @@ def pane_inventory(socket):
     return panes
 
 
+def task_inventory(task):
+    """The pane inventory TASK's agent is in: its tmux socket's, or zmx's."""
+    if task.get("terminal") == "zmx":
+        return zmx_inventory(task)
+    return pane_inventory(task["socket"])
+
+
+def inventory_key(task):
+    """What tasks sharing one inventory have in common."""
+    if task.get("terminal") == "zmx":
+        return ("zmx", (task.get("zmx") or {}).get("dir"))
+    return ("tmux", task["socket"])
+
+
 def inventory_for(task):
     """The pane inventory for TASK's socket, or an error when tmux is unreadable."""
-    inventory = pane_inventory(task["socket"])
+    inventory = task_inventory(task)
     if inventory is None:
+        if task.get("terminal") == "zmx":
+            raise RoostError("zmx did not answer; check `zmx list` on the host")
         raise RoostError("tmux did not answer on socket %r; check `tmux -L %s ls` on the host"
                          % (task["socket"], task["socket"]))
     return inventory
+
+
+def close_agent(task, check=True):
+    """End TASK's agent window, or its zmx session and shell."""
+    if task.get("terminal") == "zmx":
+        zmx_kill(task, task["session"], check=check)
+        if task.get("shellSession"):
+            zmx_kill(task, task["shellSession"], check=False)
+    else:
+        tmux(task["socket"], "kill-window", "-t", task["windowId"], check=check)
+
+
+# PROTOTYPE: a task's agent in a zmx session instead of a tmux window,
+# shown in Emacs as a ghostel terminal running `zmx attach NAME`. Each
+# session holds one PTY; its labels say whose it is, as @roost_task_id
+# does for a tmux pane. A pane-shaped record stands for the session, so
+# the rest of the helper is unchanged: its pane and window ID are
+# "zmx:" and the session's name.
+
+ZMX_PREFIX = "zmx:"
+
+
+def zmx_program(task):
+    return (task.get("zmx") or {}).get("program") or "zmx"
+
+
+def zmx_environment(task, extra=None):
+    """The environment zmx runs in for TASK: never inside a session of its
+    own, which would switch that one instead, and with its directory."""
+    env = dict(os.environ, **(extra or {}))
+    env.pop("ZMX_SESSION", None)
+    directory = (task.get("zmx") or {}).get("dir")
+    if directory:
+        env["ZMX_DIR"] = directory
+    return env
+
+
+def zmx(task, *args, check=True, input=None):
+    argv = [zmx_program(task), *args]
+    try:
+        result = subprocess.run(argv, input=input, text=True, errors="replace", stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=zmx_environment(task), pass_fds=tuple(INHERITED),
+                                stdin=None if input is not None else subprocess.DEVNULL, timeout=30)
+    except FileNotFoundError:
+        raise RoostError("zmx is not installed on this host")
+    except subprocess.TimeoutExpired:
+        raise RoostError("zmx timed out: " + shlex.join(args[:2]))
+    if check and result.returncode:
+        raise RoostError(result.stderr.strip() or result.stdout.strip() or "Command failed: " + shlex.join(argv))
+    return result
+
+
+def zmx_sessions(task):
+    """Each zmx session as name -> its fields and labels, {} when none
+    runs, or None when zmx could not answer."""
+    try:
+        result = zmx(task, "list", check=False)
+    except RoostError:
+        return None
+    if result.returncode:
+        return {} if "no sessions found" in result.stderr else None
+    sessions = {}
+    for line in result.stdout.splitlines():
+        fields = {}
+        for part in line.strip(" →").split("\t"):
+            key, equals, value = part.partition("=")
+            if equals:
+                fields[key] = value
+        if fields.get("name"):
+            sessions[fields["name"]] = fields
+    return sessions
+
+
+def zmx_inventory(task):
+    """zmx's sessions as tmux panes, keyed "zmx:NAME", for `owned_pane`."""
+    sessions = zmx_sessions(task)
+    if sessions is None:
+        return None
+    panes = {}
+    for name, fields in sessions.items():
+        if fields.get("status") == "unreachable":
+            # A daemon of another zmx version, which this one can't ask:
+            # whose it is, and whether its agent runs, is unknown.
+            panes[ZMX_PREFIX + name] = dict(window=ZMX_PREFIX + name, index=0, session=name, session_name=name,
+                                            dead=False, task=None, unknown=fields.get("err") or "unreachable",
+                                            pid=None)
+            continue
+        pid = fields.get("pid", "")
+        panes[ZMX_PREFIX + name] = dict(window=ZMX_PREFIX + name, index=0, session=name, session_name=name,
+                                        # Held by its runner after the agent ended, as remain-on-exit does.
+                                        dead="roost_exit" in fields, task=fields.get("roost_task_id", ""),
+                                        role=fields.get("roost_role"), clients=fields.get("clients"),
+                                        pid=int(pid) if pid.isdigit() else None)
+    return panes
+
+
+def zmx_kill(task, name, check=True):
+    return zmx(task, "kill", name, check=check)
+
+
+def zmx_start(task, name, argv, cwd, size, labels, env=None):
+    """Start ARGV in a new zmx session NAME, with nothing attached. Its PTY
+    takes SIZE from the terminal zmx is given, which zmx reads for a
+    session's first size; with stdin at its end, the client leaves at once."""
+    width, height = size if size else (120, 40)
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+        result = subprocess.run([zmx_program(task), "attach", "--labels",
+                                 " ".join("%s=%s" % pair for pair in labels.items()), name, *argv],
+                                cwd=cwd, stdin=subprocess.DEVNULL, stdout=slave, stderr=subprocess.PIPE,
+                                env=zmx_environment(task, env), pass_fds=tuple(INHERITED), timeout=30)
+    finally:
+        os.close(slave)
+        os.close(master)
+    if result.returncode:
+        raise RoostError("zmx could not start %s: %s" % (name, result.stderr.decode(errors="replace").strip()))
+
+
+def zmx_spawn(task, argv, size):
+    """Start TASK's runner in its own zmx session, labelled with its task."""
+    name = task["session"]
+    existing = zmx_sessions(task)
+    if existing is None:
+        raise RoostError("zmx did not answer; check `zmx list` on the host")
+    if name in existing:
+        # Attaching would join it and drop the command.
+        if existing[name].get("roost_task_id") != task["id"]:
+            raise RoostError("A zmx session named %s belongs to something else" % name)
+        zmx_kill(task, name)
+    zmx_start(task, name, argv, task["worktree"], size,
+              dict(roost_task_id=task["id"], roost_run_id=task["runId"]),
+              # What tmux gives a pane; zmx passes on its caller's, which
+              # for the helper is ssh's or Emacs's. Claude Code writes
+              # links only for terminals it knows, tmux 3.4 among them.
+              env=dict(TERM="xterm-256color", COLORTERM="truecolor", FORCE_HYPERLINK="1"))
+    task.update(windowId=ZMX_PREFIX + name, paneId=ZMX_PREFIX + name, windowIndex=0,
+                status="starting", updatedAt=now(), error=None)
+
+
+def use_terminal(task, request):
+    """Run TASK's agent under zmx when Emacs asks for it, else in tmux."""
+    terminal = request.get("terminal")
+    if terminal == "zmx":
+        options = request.get("zmx") if isinstance(request.get("zmx"), dict) else {}
+        program = (text(options.get("program"))
+                   or shutil.which("zmx", path=agent_path(os.environ.get("PATH", ""))) or "zmx")
+        task.update(terminal="zmx", zmx=dict(program=program, dir=text(options.get("dir"))))
+    elif terminal == "tmux":
+        task.pop("terminal", None)
+        task.pop("zmx", None)
+
+
+def zmx_shell(store, task, inventory):
+    """TASK's shell, a zmx session of its own beside the agent's: zmx has
+    no panes to split."""
+    name = task["session"] + "-shell"
+    pane = inventory.get(ZMX_PREFIX + name)
+    if pane and pane["task"] != task["id"]:
+        raise RoostError("A zmx session named %s belongs to something else" % name)
+    if not pane:
+        check_worktree(store, task, branch=False)
+        if not Path(task["worktree"]).is_dir():
+            raise RoostError("Task worktree is gone")
+        shell_program = os.environ.get("SHELL") or "/bin/sh"
+        zmx_start(task, name, [shell_program, "-l"], task["worktree"], None,
+                  dict(roost_task_id=task["id"], roost_role="shell"),
+                  env=dict(TERM="xterm-256color", COLORTERM="truecolor"))
+    task["shellSession"] = name
+    store.save(task)
+    return task
+
+
+def zmx_hold(task, code):
+    """Keep the session after the agent ended, showing how, as tmux's
+    remain-on-exit keeps a pane: labelled, until Roost closes it."""
+    with contextlib.suppress(RoostError, OSError):
+        zmx(task, "set", task["session"], "roost_exit=%d" % code, check=False)
+    sys.stdout.write("\r\n[The agent exited with status %d]\r\n" % code)
+    sys.stdout.flush()
+    while True:
+        signal.pause()
 
 
 def owned_pane(task, inventory):
@@ -1125,6 +1324,11 @@ def spawn(store, task, resume=False, size=()):
         argv.append("resume")
     # The runner waits on the registry lock, held here, until its stable pane
     # ID is saved, so the agent starts only after this is done.
+    if task.get("terminal") == "zmx":
+        zmx_spawn(task, argv, (int(size[1]), int(size[3])) if size else None)
+        task["helper"] = script
+        store.save(task)
+        return
     window_options = ["-P", "-F", "#{window_id}\t#{pane_id}\t#{window_index}\t#{session_name}",
                       "-n", task["name"].replace("#", "##"), "-c", task["worktree"], shlex.join(argv)]
     if tmux(socket, "has-session", "-t", "=" + session, check=False).returncode:
@@ -1302,6 +1506,7 @@ def create(store, request):
         task["setupComplete"] = False
     if request.get("programStatus") is True:
         task["programStatus"] = True
+    use_terminal(task, request)
     git(repo, "-c", "branch.autoSetupMerge=false", "worktree", "add", "-b", branch,
         str(worktree), commit)
     with store.locked():
@@ -1310,7 +1515,7 @@ def create(store, request):
             spawn(store, task, size=size_options(request))
         except Exception:
             if task.get("windowId"):
-                tmux(socket, "kill-window", "-t", task["windowId"], check=False)
+                close_agent(task, check=False)
             # Never force-remove: a runner could already have written real work.
             if not git(worktree, "status", "--porcelain", check=False).stdout:
                 git(repo, "worktree", "remove", str(worktree), check=False)
@@ -1404,10 +1609,14 @@ def list_tasks(store, request):
     inventories = {}
     table = None  # The process table, read only when a request may have been approved.
     for task in tasks:
-        socket = task["socket"]
-        if socket not in inventories:
-            inventories[socket] = pane_inventory(socket)
-        inventory = inventories[socket]
+        key = inventory_key(task)
+        if key not in inventories:
+            inventories[key] = task_inventory(task)
+        inventory = inventories[key]
+        if inventory is not None and (inventory.get(task.get("paneId")) or {}).get("unknown"):
+            # Its zmx daemon is of another version (see zmx_inventory).
+            task["live"] = None
+            continue
         if inventory is None:
             # tmux could not answer: keep the last observed status rather than
             # declaring every agent on this socket crashed.
@@ -1933,7 +2142,7 @@ def stop(store, task, inventory=None):
     """Kill the task's window if Roost still owns it. Work is kept."""
     inventory = inventory if inventory is not None else inventory_for(task)
     if owned_pane(task, inventory):
-        tmux(task["socket"], "kill-window", "-t", task["windowId"])
+        close_agent(task)
     # Stopping says nothing new: an agent you had seen stays seen.
     was_seen = bool(task.get("seen")) and task.get("seen") == task.get("updatedAt")
     # A pane ID owned by something else means ours is gone (for example after a
@@ -1942,12 +2151,13 @@ def stop(store, task, inventory=None):
     if was_seen:
         task["seen"] = task["updatedAt"]
     task.pop("shellPaneId", None)
+    task.pop("shellSession", None)
     store.save(task)
     task["live"] = False
     return task
 
 
-def resume(store, task, program_status=None, size=()):
+def resume(store, task, program_status=None, size=(), request=None):
     inventory = inventory_for(task)
     pane = owned_pane(task, inventory)
     if pane and not pane["dead"]:
@@ -1956,7 +2166,7 @@ def resume(store, task, program_status=None, size=()):
         raise RoostError("Task worktree is gone; forget the task to remove it from Roost")
     check_worktree(store, task, branch=False)
     if pane:
-        tmux(task["socket"], "kill-window", "-t", task["windowId"])
+        close_agent(task)
     # A task begun in a shared session, as before each had its own, moves to
     # its own on resume.
     task["session"] = session_name(task["repo"], task["id"])
@@ -1964,6 +2174,8 @@ def resume(store, task, program_status=None, size=()):
     # Whether its runner relays the agent's terminal, as Emacs says now.
     if isinstance(program_status, bool):
         task["programStatus"] = program_status
+    if request is not None:
+        use_terminal(task, request)
     spawn(store, task, resume=True, size=size)
     return task
 
@@ -1994,7 +2206,7 @@ def rename(store, task, name):
     store.save(task)
     # Not saved, but Emacs takes the reply for what the task is now.
     task["live"] = bool(pane and not pane["dead"])
-    if pane:
+    if pane and task.get("terminal") != "zmx":
         # A name may start with -, which tmux would take for an option.
         tmux(task["socket"], "rename-window", "-t", pane["window"], "--", name.replace("#", "##"),
              check=False)
@@ -2027,6 +2239,11 @@ def send(task, text, force=False):
         raise RoostError("Open the task to finish startup or answer its permission prompt")
     if not isinstance(text, str) or not text.strip():
         raise RoostError("Empty prompt")
+    if task.get("terminal") == "zmx":
+        # tmux pastes bracketed only for a program that asked; agents all do.
+        zmx(task, "send", task["session"], input="\x1b[200~" + text + "\x1b[201~")
+        zmx(task, "send", task["session"], input="\r")
+        return task
     buffer = "roost-" + uuid.uuid4().hex
     tmux(task["socket"], "load-buffer", "-b", buffer, "-", input=text)
     try:
@@ -2130,6 +2347,8 @@ def shell(store, task):
     inventory = inventory_for(task)
     if not owned_pane(task, inventory):
         raise RoostError("Task's tmux window is gone; resume the task before opening its shell")
+    if task.get("terminal") == "zmx":
+        return zmx_shell(store, task, inventory)
     pane = inventory.get(task.get("shellPaneId"))
     if pane and (pane["task"] != task["id"] or pane["window"] != task["windowId"]):
         raise RoostError("Task's shell ownership changed; inspect the window in tmux")
@@ -2573,12 +2792,12 @@ def discard(store, task, expect=None, dry_run=False):
 def forget(store, task):
     """Drop Roost's record without touching Git, closing an ended task's window.
     The escape hatch for tasks Roost can no longer retire."""
-    inventory = pane_inventory(task["socket"])
+    inventory = task_inventory(task)
     pane = owned_pane(task, inventory) if inventory else None
     if pane and not pane["dead"]:
         raise RoostError("The agent is running; stop the task before forgetting it")
     if pane:
-        tmux(task["socket"], "kill-window", "-t", task["windowId"], check=False)
+        close_agent(task, check=False)
     left = []
     if Path(task["worktree"]).exists():
         left.append("worktree " + task["worktree"])
@@ -3652,6 +3871,8 @@ def runner(root, task_id, run_id, resume_conversation=False):
                 current.update(status="exited" if code == 0 else "failed", updatedAt=now(),
                                exitCode=code, error=error)
                 store.save(current)
+    if task.get("terminal") == "zmx" and os.environ.get("ZMX_SESSION") == task["session"]:
+        zmx_hold(task, code)
     return code
 
 
@@ -3692,7 +3913,7 @@ def outgoing(result):
 
 TASK_ACTIONS = {
     "resume": lambda store, task, request: resume(store, task, request.get("programStatus"),
-                                                        size_options(request)),
+                                                        size_options(request), request),
     "stop": lambda store, task, request: stop(store, task),
     "send": lambda store, task, request: send(task, request["text"], request.get("force") is True),
     "shell": lambda store, task, request: shell(store, task),

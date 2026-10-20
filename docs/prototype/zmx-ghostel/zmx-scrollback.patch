@@ -1,0 +1,15 @@
+diff --git a/src/util.zig b/src/util.zig
+index b017958..e8eb5bd 100644
+--- a/src/util.zig
++++ b/src/util.zig
+@@ -849,6 +849,10 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
+         // Clear visible screen after scrollback. \x1b[2J clears only the visible
+         // rows (not the scrollback buffer). \x1b[H homes the cursor. \x1b[0m resets
+         // SGR style so phase 1 styles don't bleed into phase 2.
++        // The last screenful of scrollback is still on the client's visible
++        // rows, which \x1b[2J would erase: scroll it into the client's
++        // scrollback first, a row for each visible row.
++        for (0..pages.rows) |_| builder.writer.writeAll("\r\n") catch {};
+         builder.writer.writeAll("\x1b[2J\x1b[H\x1b[0m") catch {};
+     }
+ 

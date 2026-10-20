@@ -310,6 +310,28 @@ for Claude Code when you press Esc or decline one, which hooks don't
 report.  New tasks, and tasks you resume, follow this."
   :type 'boolean)
 
+(defcustom roost-terminal 'tmux
+  "PROTOTYPE: what holds a new task's agent and shows it.
+`tmux' runs it in a tmux window shown by tmux-control.  `zmx' runs it
+in a zmx session of its own, shown in a ghostel terminal running `zmx
+attach'; it needs zmx on the task's host and ghostel here.  New tasks,
+and tasks you resume, follow this."
+  :type '(choice (const :tag "tmux and tmux-control" tmux)
+                 (const :tag "zmx and ghostel (prototype)" zmx)))
+
+(defcustom roost-zmx-program "zmx"
+  "PROTOTYPE: zmx on this machine, for `roost-terminal' `zmx'."
+  :type 'string)
+
+(defcustom roost-zmx-remote-program "zmx"
+  "PROTOTYPE: zmx on remote hosts, for `roost-terminal' `zmx'."
+  :type 'string)
+
+(defcustom roost-zmx-directory nil
+  "PROTOTYPE: zmx's socket directory (ZMX_DIR) on every host, or nil.
+Nil leaves it to zmx, which uses $XDG_RUNTIME_DIR or $TMPDIR."
+  :type '(choice (const :tag "zmx's own" nil) string))
+
 (defcustom roost-notes-file (locate-user-emacs-file "roost/notes.json")
   "Local file keeping review notes not yet sent to an agent.
 See `roost-note'."
@@ -442,6 +464,10 @@ watching from the start of each session.")
   "Incremented by each navigation, so slower earlier replies are ignored.")
 (defvar-local roost--buffer-task-key nil
   "Task key a task panel buffer belongs to.")
+
+(defvar-local roost--zmx-terminal nil
+  "In a ghostel terminal attached to a task's zmx session: (KEY . SESSION).")
+(put 'roost--zmx-terminal 'permanent-local t)
 
 ;;;; Task records and hosts
 
@@ -1262,6 +1288,9 @@ nobody is looking."
     (with-current-buffer (window-buffer (selected-window))
       (cond ((derived-mode-p 'roost-task-info-mode)
              (and roost--buffer-task-key (gethash roost--buffer-task-key roost--tasks)))
+            (roost--zmx-terminal
+             (let ((task (gethash (car roost--zmx-terminal) roost--tasks)))
+               (and task (equal (cdr roost--zmx-terminal) (roost--field task 'session)) task)))
             ((and (fboundp 'tmux-control-active-pane) (tmux-control-active-pane))
              (seq-find (lambda (task) (roost--terminal-shows-p task (list (roost--field task 'paneId))))
                        (roost-tasks)))))))
@@ -1652,6 +1681,11 @@ buffer list of one task would offer the terminals of the others."
 
 (defun roost--task-terminal-window (task)
   "The window of the selected frame showing TASK's terminal, or nil."
+  (if (and task (equal (roost--field task 'terminal) "zmx"))
+      (seq-find (lambda (window)
+                  (equal (buffer-local-value 'roost--zmx-terminal (window-buffer window))
+                         (cons (roost--key task) (roost--field task 'session))))
+                (window-list))
   (when (and task (fboundp 'tmux-control-window-id))
     (seq-find (lambda (window)
                 (with-current-buffer (window-buffer window)
@@ -1661,13 +1695,15 @@ buffer list of one task would offer the terminals of the others."
                        (equal (tmux-control-buffer-socket-name) (roost--field task 'socket))
                        (equal (tmux-control-buffer-session) (roost--field task 'session))
                        (equal (tmux-control-window-id) (roost--field task 'windowId)))))
-              (window-list))))
+              (window-list)))))
 
 (defun roost--terminal-task (buffer)
   "The task whose terminal BUFFER is, or nil.
 A session shared by tasks from before each had its own is no one's, and
 a view of a terminal, such as its scrollback, is no terminal."
   (with-current-buffer buffer
+    (if roost--zmx-terminal
+        (gethash (car roost--zmx-terminal) roost--tasks)
     (when (and (derived-mode-p 'tmux-control-mode)
                (fboundp 'tmux-control-buffer-session) (tmux-control-buffer-session))
       (let ((tasks (seq-filter (lambda (task)
@@ -1675,7 +1711,7 @@ a view of a terminal, such as its scrollback, is no terminal."
                                       (equal (roost--field task 'socket) (tmux-control-buffer-socket-name))
                                       (equal (roost--field task 'session) (tmux-control-buffer-session))))
                                (roost-tasks))))
-        (and tasks (null (cdr tasks)) (car tasks))))))
+        (and tasks (null (cdr tasks)) (car tasks)))))))
 
 (defun roost--terminal-window-for (task)
   "The window to show TASK's terminal in, or nil for the selected one.
@@ -1693,6 +1729,12 @@ not another task's: they keep their grid."
 
 (defun roost--display-task (task &optional target-pane)
   "Display TASK after ownership validation, selecting TARGET-PANE if supplied."
+  (if (equal (roost--field task 'terminal) "zmx")
+      (roost--display-zmx-task task target-pane)
+    (roost--display-tmux-task task target-pane)))
+
+(defun roost--display-tmux-task (task &optional target-pane)
+  "Display TASK's tmux window, selecting TARGET-PANE if supplied."
   (require 'tmux-control)
   (add-hook 'tmux-control-switch-session-functions #'roost--switch-session)
   (add-hook 'after-change-major-mode-hook #'roost--keep-terminal-in-its-workspace 90)
@@ -1723,6 +1765,125 @@ not another task's: they keep their grid."
         (roost--render-visible #'roost--render-sidebar))))
   (when (roost--task-panel-window)
     (roost--refresh-host (roost--field task 'host) nil)))
+
+;;;; Prototype: zmx and ghostel
+
+;; With `roost-terminal' `zmx', a task's agent runs in a zmx session of
+;; its own on its host, and Emacs shows it as an ordinary ghostel
+;; terminal running `zmx attach SESSION', through ssh for a remote host.
+;; Nothing in Emacs speaks a protocol of zmx's: closing the terminal
+;; detaches, and opening the task attaches again.
+
+(declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
+(declare-function ghostel-semi-char-mode "ghostel" ())
+(defvar ghostel--process)
+(defvar ghostel-buffer-name-function)
+(defvar ghostel-environment)
+
+(defun roost--zmx-request (host)
+  "The request fields that choose HOST's terminal for a task, by `roost-terminal'."
+  (if (eq roost-terminal 'zmx)
+      `((terminal . "zmx")
+        (zmx . ((program . ,(if host roost-zmx-remote-program
+                              (or (executable-find roost-zmx-program) roost-zmx-program)))
+                (dir . ,roost-zmx-directory))))
+    '((terminal . "tmux"))))
+
+(defun roost--zmx-attach-command (task session)
+  "The local argv attaching to TASK's zmx SESSION, through ssh if remote.
+Without ZMX_SESSION, which would switch a session this Emacs runs in
+rather than attach, and without zmx's own detach key, Ctrl+\\, which is
+the agent's."
+  (let* ((zmx (roost--field task 'zmx))
+         (program (or (alist-get 'program zmx) "zmx"))
+         (directory (alist-get 'dir zmx))
+         (command (append (list "env" "-u" "ZMX_SESSION" "ZMX_NO_DETACH_KEY=1")
+                          (when directory (list (concat "ZMX_DIR=" directory)))
+                          (list program "attach" session)))
+         (host (roost--field task 'host)))
+    (if (not host)
+        command
+      (append (list "ssh" "-t")
+              (or (bound-and-true-p tmux-control-ssh-options) '("-o" "ConnectTimeout=8"))
+              (roost--ssh-share-options)
+              (list "--" host (mapconcat #'shell-quote-argument command " "))))))
+
+(defun roost--zmx-buffers (task &optional session)
+  "Ghostel terminals attached to TASK's zmx sessions, or to SESSION only."
+  (seq-filter (lambda (buffer)
+                (when-let* ((terminal (buffer-local-value 'roost--zmx-terminal buffer)))
+                  (and (equal (car terminal) (roost--key task))
+                       (or (null session) (equal (cdr terminal) session)))))
+              (buffer-list)))
+
+(defun roost--zmx-buffer (task session window &optional label)
+  "A live ghostel terminal attached to TASK's zmx SESSION, shown in WINDOW.
+LABEL names what it shows, the agent by default."
+  (or (seq-find (lambda (buffer)
+                  (process-live-p (buffer-local-value 'ghostel--process buffer)))
+                (roost--zmx-buffers task session))
+      (let* ((name (format "*roost %s: %s*" (or label "agent")
+                           (roost--field task 'name)))
+             (buffer (or (seq-find (lambda (buffer) (equal (buffer-name buffer) name))
+                                   (roost--zmx-buffers task session))
+                         (generate-new-buffer name)))
+             (argv (roost--zmx-attach-command task session))
+             ;; ssh, and zmx, run here, not over TRAMP.
+             (default-directory (if (roost--field task 'host)
+                                    (expand-file-name "~/")
+                                  (roost--remote-directory task))))
+        ;; Shown first: ghostel sizes the terminal to its window.
+        (set-window-buffer window buffer)
+        (with-current-buffer buffer
+          (let ((ghostel-buffer-name-function nil))
+            (ghostel-exec buffer (car argv) (cdr argv)))
+          (setq roost--zmx-terminal (cons (roost--key task) session))
+          (ghostel-semi-char-mode))
+        buffer)))
+
+(defun roost--display-zmx-task (task &optional session)
+  "Display TASK's agent, or its zmx SESSION, in a ghostel terminal."
+  (unless (require 'ghostel nil t)
+    (user-error "Roost's zmx terminals need ghostel; install it from MELPA"))
+  (roost--leave-side-window)
+  (roost--activate-workspace task)
+  (roost--leave-side-window)
+  (when-let* ((window (roost--terminal-window-for task)))
+    (select-window window))
+  (let* ((shell (and session (equal session (roost--field task 'shellSession))))
+         (session (if shell session (roost--field task 'session)))
+         (buffer (roost--zmx-buffer task session (selected-window) (and shell "shell"))))
+    (switch-to-buffer buffer nil t)
+    ;; At the live end: ghostel follows the output only in a window
+    ;; already there, and a terminal shown again keeps where it was.
+    (goto-char (point-max))
+    (recenter -1))
+  (roost--mark-seen (or (gethash (roost--key task) roost--tasks) task))
+  (roost--watch-layout)
+  (roost--sync-side-windows)
+  (when-let* ((sidebar (get-buffer roost--sidebar-buffer)))
+    (with-current-buffer sidebar
+      (when (derived-mode-p 'roost-sidebar-list-mode)
+        (roost--render-visible #'roost--render-sidebar))))
+  (when (roost--task-panel-window)
+    (roost--refresh-host (roost--field task 'host) nil)))
+
+(defun roost--display-zmx-shell (task)
+  "Show TASK's shell session beside its agent's terminal."
+  (roost--display-zmx-task task)
+  (let* ((agent (selected-window))
+         (window (or (seq-find (lambda (window)
+                                 (equal (buffer-local-value 'roost--zmx-terminal (window-buffer window))
+                                        (cons (roost--key task) (roost--field task 'shellSession))))
+                               (window-list))
+                     ;; Where the shell was, before its terminal closed.
+                     (seq-find (lambda (window)
+                                 (and (not (eq window agent))
+                                      (eq (window-buffer window) (window-buffer agent))))
+                               (window-list))
+                     (split-window-right))))
+    (select-window window)
+    (switch-to-buffer (roost--zmx-buffer task (roost--field task 'shellSession) window "shell") nil t)))
 
 (defvar roost--held-for-minibuffer 0
   "How many things Roost holds back until the minibuffer is done.
@@ -1984,6 +2145,7 @@ EXTRA is an alist of further request fields, such as the GitHub issue."
            ,(cons 'setup setup)
            ,(cons 'branchPrefix roost-branch-prefix)
            ,(cons 'programStatus (if roost-program-status t :false))
+           ,@(roost--zmx-request host)
            ,(cons 'size (roost--terminal-size))
            ,(cons 'socket (or roost-socket-name
                               (bound-and-true-p tmux-control-default-socket-name)
@@ -2631,6 +2793,9 @@ Roost gave each task one outlives the task."
         (socket (roost--field task 'socket))
         (session (roost--field task 'session))
         (id (roost--field task 'id)))
+    (if (equal (roost--field task 'terminal) "zmx")
+        ;; Their `zmx attach' ends with the session.
+        (roost--zmx-buffers task)
     (when-let* (((fboundp 'tmux-control-disconnect))
                 ((fboundp 'tmux-control-buffer-session))
                 ((stringp session))
@@ -2647,14 +2812,15 @@ Roost gave each task one outlives the task."
       (when-let* ((connection (seq-find #'get-buffer-process terminals)))
         (with-current-buffer connection
           (tmux-control-disconnect)))
-      terminals)))
+      terminals))))
 
 (defun roost--restore-terminal (task terminals)
   "Reconnect TERMINALS, released for an action on TASK the host refused.
 Only where one is still shown, and once the host confirms that TASK's
 window is still there: reconnecting to an ended session would start an
 empty one.  Opening the task reconnects the rest."
-  (when (and terminals (fboundp 'tmux-control-reconnect))
+  (when (and terminals (fboundp 'tmux-control-reconnect)
+             (not (equal (roost--field task 'terminal) "zmx")))
     (roost--request (roost--field task 'host) "inspect" (list (cons 'id (roost--field task 'id)))
                     (lambda (_)
                       (when-let* ((window (seq-find (lambda (window)
@@ -2714,8 +2880,10 @@ FAILURE, if given, receives the error message instead of Roost reporting it."
 (defun roost-resume (&optional task)
   "Restart TASK, resuming its recorded agent conversation."
   (interactive)
-  (roost--act (roost--choose task) "resume"
+  (setq task (roost--choose task))
+  (roost--act task "resume"
               `((programStatus . ,(if roost-program-status t :false))
+                ,@(roost--zmx-request (roost--field task 'host))
                 (size . ,(roost--terminal-size task)))
               #'roost-open-task))
 
@@ -4602,7 +4770,11 @@ questions you left open in the minibuffer, as `roost-open-task' does."
                 (lambda (updated)
                   (roost--when-out-of-minibuffer
                    (lambda ()
-                     (when (= generation roost--open-generation)
+                     (when (and (= generation roost--open-generation)
+                                (equal (roost--field updated 'terminal) "zmx"))
+                       (roost--display-zmx-shell updated))
+                     (when (and (= generation roost--open-generation)
+                                (not (equal (roost--field updated 'terminal) "zmx")))
                        (roost--display-task updated (roost--field updated 'shellPaneId))
                        (with-current-buffer (window-buffer (selected-window))
                          (unless (tmux-control-tiled-p) (tmux-control-tile))
@@ -8392,6 +8564,8 @@ to `mode-line-format'."
   "COMMAND in a task's terminal, and nil elsewhere.
 A key filter, so that the key keeps its own meaning in other buffers,
 the terminals of other tmux sessions included."
+  (if roost--zmx-terminal
+      (and (gethash (car roost--zmx-terminal) roost--tasks) command)
   (and (derived-mode-p 'tmux-control-mode)
        (fboundp 'tmux-control-buffer-session)
        (let ((host (tmux-control-buffer-host))
@@ -8402,7 +8576,7 @@ the terminals of other tmux sessions included."
                           (equal (roost--field task 'host) host)
                           (equal (roost--field task 'socket) socket)))
                    (roost-tasks)))
-       command))
+       command)))
 
 (defvar-keymap roost-watch-mode-map
   :doc "Roost's keys while it watches.
