@@ -8396,16 +8396,19 @@ longest any waited on you at a time while you were here."
                                                (car (last (split-string (cdr reply) "\n" t))))
                                        'face 'roost-status-failed)
                       "\n")))
-          (insert "\n"
-                  (propertize
-                   (concat "At once is the most agents working at the same time.  Waited on you adds up "
-                           "the time agents asked you something, ended a turn or failed before you looked, "
-                           "or had a pull request or conflict for you; "
-                           (format "%d minutes with no change on any host count as time away, and are left out.  "
-                                   (/ roost--away 60))
-                           "Past what you can supervise, a day with more agents at once has more waiting "
-                           "on you for each hour they work.\n")
-                   'face 'roost-dim))))
+          (insert "\n")
+          (let ((start (point)) (fill-column 72))
+            (insert (propertize
+                     (concat "At once is the most agents working at the same time.  Waited on you adds up "
+                             "the time agents asked you something, ended a turn or failed before you looked, "
+                             "or had a pull request or conflict for you; "
+                             (format "%d minutes with no change on any host count as time away, and are left out.  "
+                                     (/ roost--away 60))
+                             "Past what you can supervise, a day with more agents at once has more waiting "
+                             "on you for each hour they work.\n")
+                     'face 'roost-dim))
+            ;; Filled, rather than wrapped by the window with a mark at each break.
+            (fill-region start (point)))))
         (goto-char (point-min))))))
 
 (defun roost--workload-reply (host reply)
