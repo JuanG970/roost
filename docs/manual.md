@@ -15,9 +15,9 @@ day of work, every command and option, and how Roost works.
 
 Requirements: Emacs 29.1+ and [tmux-control](https://github.com/csheaff/tmux-control)
 0.8.1+ (which brings [Eat](https://codeberg.org/akib/emacs-eat)). Each task host needs
-Python 3.9+, Git, tmux 3.1+, and an installed, signed-in agent CLI (Codex 0.160.0
-or newer). Remote hosts need key- or agent-based SSH; use SSH config aliases for
-ports and jump hosts. Roost copies its helper to each host itself.
+Python 3.9+, Git, tmux 3.1+, and an installed, signed-in agent CLI (Claude Code
+2.1.78 or newer, Codex 0.160.0 or newer). Remote hosts need key- or agent-based
+SSH; use SSH config aliases for ports and jump hosts. Roost copies its helper to each host itself.
 
 Emacs 30 (built-in `use-package`):
 
@@ -680,7 +680,9 @@ notification types and payload fields Roost reads, and names any it has not
 seen; `make contract-live` also takes a real session (a few short Haiku turns,
 about three minutes) through each status Roost derives: a reply, a permission
 request approved and declined, Esc, a minute idle and `/clear`. Run them after
-Claude Code updates.
+Claude Code updates. A Claude Code older than an event Roost listens to runs
+none of Roost's hooks, so a new event in `CLAUDE_HOOK_EVENTS` raises
+`CLAUDE_MIN_VERSION`, which `roost-doctor` checks.
 
 See [validation](validation.md) for the live runs with Claude Code, Codex and
 Pi on local and remote hosts, [the demo notes](demo.md) for how the screenshots

@@ -6,6 +6,10 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- `roost-doctor` asks for Claude Code 2.1.78 or newer on each host. Older
+  releases don't know the `StopFailure` hook, so they open a task with a
+  Settings Error and then skip all of Roost's hooks, leaving the task
+  `starting`. If doctor flags a host, run `claude update` there.
 - Start a task from more places. `roost-new-task` on an error in a
   compilation buffer, or a match in a grep buffer, quotes that line. With
   Embark, `roost-new-task-from-region`, `-from-file`, `-from-url` and
