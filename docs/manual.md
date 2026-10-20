@@ -80,7 +80,9 @@ Magit is optional (review falls back to Dired).
 
 - **Workspaces.** Each task gets its own window arrangement: a perspective with
   [perspective.el](https://github.com/nex3/perspective-el), otherwise a tab when
-  `tab-bar-mode` is on, otherwise none (tasks open in the selected window). Set
+  `tab-bar-mode` is on, otherwise none: a frame shows one task, whose
+  terminal takes the place of another's. `r`, `f` or `D` on another task's
+  row opens its terminal first, then its Magit, files or diff. Set
   `roost-workspace` to choose.
 - **Evil.** Roost's dashboard and panels start in Emacs state so their keys work
   (`roost-evil-state`); `j`/`k` move between tasks. Drafts start in insert

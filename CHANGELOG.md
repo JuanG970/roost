@@ -6,6 +6,12 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- Without workspaces, `r`, `f` and `D` on another task's row open that task
+  first, as `RET` does, then its Magit, files or diff, as from its own
+  terminal. They opened beside the terminal on screen, another task's, and
+  the sidebar went on marking that task. A stopped task, with no terminal,
+  takes the frame without one. So do a changed file clicked in another
+  task's panel and `'` on another task's row. Nothing to do when upgrading.
 - `M-x roost-workload` shows, for today and each day of the past week, the
   most agents that worked at once, how long they worked, and how long they
   waited on you, to see how many you can keep up with. Past that, a day with

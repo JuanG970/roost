@@ -3012,6 +3012,92 @@ Read from the layout transient keeps, whose form varies by version."
        (should (window-live-p opened-in))
        (should-not (window-parameter opened-in 'window-side))))))
 
+;; A frame shows one task: X's terminal beside it, ID 1111..., and Y,
+;; ID 2222..., the task asked about.
+(defmacro roost-test--with-another-task-shown (&rest body)
+  "Run BODY with the frame X's, showing its terminal over a code buffer.
+`x', `y', `terminal' and `code' are bound, and `events' collects what
+the stubbed requests, `roost--display-task' and `dired' were asked."
+  `(roost-test--isolated
+    (let* ((roost-workspace nil)
+           (x (roost--cache-task "dev" (roost-test--task "1111111111111111")))
+           (y (roost--cache-task "dev" (append '((session . "roost-other") (windowId . "@10"))
+                                               (roost-test--task "2222222222222222"))))
+           (terminal (generate-new-buffer "x's terminal"))
+           (code (generate-new-buffer "x's code.py"))
+           (events nil))
+      (ignore x y)
+      (unwind-protect
+          (roost-test--with-tmux-buffers
+           (save-window-excursion
+             (delete-other-windows)
+             (with-current-buffer terminal
+               (setq major-mode 'tmux-control-mode
+                     roost-test--tmux (list :host "dev" :socket "main" :session (roost--field x 'session))))
+             (switch-to-buffer code)
+             (switch-to-buffer terminal)
+             (set-frame-parameter nil 'roost-task (roost--key x))
+             (cl-letf (((symbol-function 'roost--display-task)
+                        (lambda (task &rest _)
+                          (push (list 'display (roost--field task 'id)) events)
+                          (set-frame-parameter nil 'roost-task (roost--key task))))
+                       ((symbol-function 'dired) (lambda (&rest _) (push 'dired events))))
+               ,@body)))
+        (mapc #'kill-buffer (list terminal code))))))
+
+(ert-deftest roost-a-view-of-another-task-opens-that-task-first ()
+  ;; Dired or Magit on another task's row opened beside the terminal on
+  ;; screen, whoever's it was, with the sidebar still marking that task.
+  (roost-test--with-another-task-shown
+   (cl-letf (((symbol-function 'roost--request)
+              (lambda (_host action params success &optional _failure)
+                (push (list action (alist-get 'id params)) events)
+                (funcall success (copy-tree y)))))
+     (roost-files y)
+     (should (equal (reverse events) '(("inspect" "2222222222222222") (display "2222222222222222") dired))))))
+
+(ert-deftest roost-a-view-of-a-task-whose-terminal-is-gone-takes-the-frame-without-it ()
+  ;; Its agent's window gone, as after a crash: the view shows, with no
+  ;; offer to resume, and X's terminal gives way to what was there before.
+  (roost-test--with-another-task-shown
+   (let ((drawn 0))
+     (cl-letf (((symbol-function 'roost--request)
+                (lambda (_host action _params _success &optional failure)
+                  (push action events)
+                  (funcall failure "The agent's tmux window is gone; resume the task")))
+               ((symbol-function 'roost--mark-in-sidebar) (lambda () (cl-incf drawn))))
+       (roost-files y)
+       (should (equal (reverse events) '("inspect" dired)))
+       (should (eq (window-buffer) code))
+       (should (equal (frame-parameter nil 'roost-task) (roost--key y)))
+       (should (= drawn 1))))))
+
+(ert-deftest roost-a-view-opens-at-once-in-the-tasks-own-frame-or-without-its-terminal ()
+  (roost-test--with-another-task-shown
+   (cl-letf (((symbol-function 'roost--request)
+              (lambda (_host action &rest _) (push action events))))
+     ;; X's own: nothing to open first.
+     (roost-files x)
+     (should (equal events '(dired)))
+     (should (eq (window-buffer) terminal))
+     ;; A task stopped has no terminal: X's gives way, without asking its host.
+     (setq events nil)
+     (setf (alist-get 'windowId y) nil)
+     (roost-files y)
+     (should (equal events '(dired)))
+     (should (eq (window-buffer) code))
+     (should (equal (frame-parameter nil 'roost-task) (roost--key y)))
+     ;; With workspaces, the view shows in the task's.
+     (setq events nil)
+     (setf (alist-get 'windowId y) "@10")
+     (cl-letf (((symbol-function 'roost--workspace-backend) (lambda () 'perspective))
+               ((symbol-function 'roost--activate-workspace)
+                (lambda (task) (push (list 'workspace (roost--field task 'id)) events))))
+       (roost-files y))
+     (should (equal (car events) 'dired))
+     (should (equal (cadr events) '(workspace "2222222222222222")))
+     (should-not (member "inspect" events)))))
+
 (ert-deftest roost-request-wait-returns-results-and-signals-failures ()
   (cl-letf (((symbol-function 'roost--request)
              (lambda (_host _action _params success &optional _failure)
