@@ -6,6 +6,16 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- Start a task from more places. `roost-new-task` on an error in a
+  compilation buffer, or a match in a grep buffer, quotes that line. With
+  Embark, `roost-new-task-from-region`, `-from-file`, `-from-url` and
+  `-from-diagnostic` act on a region, a file, a URL or a Flymake
+  diagnostic; the manual shows how to bind them. `roost-draft-task` opens
+  the draft with a prompt of your own. Nothing to do when upgrading.
+- Your own functions can follow tasks: `roost-task-status-functions` runs
+  when a task's status changes, and `roost-task-merged-functions` once its
+  work is merged, by `m` or on GitHub, for notifications or logs of your
+  own. Nothing to do when upgrading.
 - Attach files to a prompt: in its draft, `C-c C-a` attaches a file and
   `C-c C-v` the image on the clipboard. Roost copies each to the task's
   host in the background, so an agent on another machine can read it too,

@@ -2317,7 +2317,7 @@ elif args[:2] == ["auth", "status"]:
         store.save(record)
         (self.gh_dir / "list.json").write_text(json.dumps([dict(
             number=7, url="https://github.com/octo/repo/pull/7",
-            state="OPEN", isDraft=True, reviewDecision="APPROVED", headRefOid=tip,
+            state="OPEN", isDraft=True, reviewDecision="APPROVED", headRefOid=tip, baseRefName="release",
             statusCheckRollup=[
                 dict(__typename="CheckRun", status="COMPLETED", conclusion="SUCCESS"),
                 dict(__typename="CheckRun", status="COMPLETED", conclusion="SKIPPED"),
@@ -2331,18 +2331,18 @@ elif args[:2] == ["auth", "status"]:
         self.assertLessEqual(before, checked)
         # GitHub didn't say what it has of reviews (reviews.json is missing).
         self.assertEqual(listed["prStatus"], dict(
-            state="OPEN", draft=True, review="APPROVED", head=tip,
+            state="OPEN", draft=True, review="APPROVED", head=tip, base="release",
             checks=dict(passing=3, failing=1, pending=2), failedAt=None))
         self.assertEqual(listed["unpushed"], 0)
         self.assertEqual(self.gh_calls()[-2],
                          ["pr", "list", "--head", task["branch"], "--state", "all", "--limit", "10", "--json",
-                          "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"])
+                          "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,baseRefName"])
         self.assertEqual(self.gh_calls()[-1][:3], ["api", "graphql", "--hostname"])
         self.assertNotIn("prStatus", store.read(task["id"]))
         self.assertNotIn("unpushed", store.read(task["id"]))
         # What it shows is recorded, for views that ask GitHub nothing.
         self.assertEqual(store.read(task["id"])["pr"], dict(number=7, url="https://github.com/octo/repo/pull/7",
-                                                            state="OPEN", head=tip))
+                                                            state="OPEN", head=tip, base="release"))
         self.assertNotIn("prStatus", self.request("list")["result"][0])
         # Refreshing an active agent's changes leaves GitHub alone.
         calls = len(self.gh_calls())
@@ -2421,7 +2421,7 @@ elif args[:2] == ["auth", "status"]:
         (self.gh_dir / "list.json").write_text(json.dumps([dict(number=7, url=url, state="MERGED", headRefOid=tip)]))
         status = self.request("list", full=True)["result"][0]["prStatus"]
         self.assertEqual(len(self.gh_calls()), calls + 1)
-        self.assertEqual(set(status), {"state", "draft", "review", "checks", "head"})
+        self.assertEqual(set(status), {"state", "draft", "review", "checks", "head", "base"})
 
     def test_reviews_are_asked_once_for_each_repository(self):
         self.github()
@@ -2762,10 +2762,19 @@ elif args[:2] == ["auth", "status"]:
         task = self.create()
         tip = self.commit_in(task)
         self.push(task)
-        (self.gh_dir / "list.json").write_text(json.dumps([dict(number=11, state="OPEN", headRefOid=tip),
-                                                           dict(number=10, state="MERGED", headRefOid=tip)]))
+        (self.gh_dir / "list.json").write_text(json.dumps([
+            dict(number=11, state="OPEN", headRefOid=tip, baseRefName="main"),
+            dict(number=10, state="MERGED", headRefOid=tip, baseRefName="release")]))
         listed = self.request("list", full=True)["result"][0]
         self.assertEqual((listed["pr"]["number"], listed["pr"]["mergedHead"], listed["landed"]), (11, tip, True))
+        # Where it merged, though the one shown goes elsewhere.
+        self.assertEqual((listed["pr"]["base"], listed["pr"]["mergedBases"]), ("main", ["release"]))
+        # And where else, once the open one merges too, as the newer one shown.
+        (self.gh_dir / "list.json").write_text(json.dumps([
+            dict(number=11, state="MERGED", headRefOid=tip, baseRefName="main"),
+            dict(number=10, state="MERGED", headRefOid=tip, baseRefName="release")]))
+        listed = self.request("list", full=True)["result"][0]
+        self.assertEqual((listed["pr"]["number"], listed["pr"]["mergedBases"]), (11, ["release", "main"]))
         # Retiring trusts it too when gh can't say.
         (self.gh_dir / "gh").unlink()
         with patch.object(roost, "agent_path", lambda inherited: str(self.gh_dir)):

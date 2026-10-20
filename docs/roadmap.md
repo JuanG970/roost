@@ -134,6 +134,22 @@ the last two are worth trying once those show what the panel has room for.
   Unchecked checkboxes in the entry warn before `m`. From Orca's workflow
   states, Conductor's todos that block a merge, and the kanban
   orchestrators (Vibe Kanban, openkanban, agent-deck's fleet board).
+  `roost-task-status-functions` and `roost-task-merged-functions` can
+  already drive it from your own configuration.
+- **Other tasks' changes in your file buffers.** Visiting a file that
+  another task has changed, a header line names those tasks and their
+  status, with a click for that task's diff of the file. Most useful in the
+  primary checkout, where you otherwise find a conflict only at `m`. Roost
+  already finds overlaps between tasks.
+- **Since you last looked, in the fringe.** With "since you last looked"
+  recorded, point diff-hl at that commit in a task's worktree, so a file
+  shows only what changed since your last review, in your own buffer.
+- **Attempts compared with Ediff.** With several attempts at one prompt,
+  compare two attempts' worktrees file by file in Ediff and take hunks from
+  each, rather than picking one.
+- **An attach command for other terminals.** Copy the `ssh -t … tmux
+  attach` that reaches a task's real terminal, for a phone's SSH app or
+  another machine, for every agent rather than Claude only.
 - **Attachments when starting a task, and straight from Scrawl.** `C-c C-a`
   attaches a file to a prompt for a running task; the new task draft could
   take one too, copied once the task exists. Scrawl sends a capture of a dev

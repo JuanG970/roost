@@ -82,6 +82,10 @@
 (declare-function persp-format-name "perspective" (name))
 (declare-function persp-rename "perspective" (name))
 (declare-function evil-set-initial-state "evil-core" (mode state))
+(declare-function flymake-diagnostics "flymake" (&optional beg end))
+(declare-function flymake-diagnostic-beg "flymake" (diag))
+(declare-function flymake-diagnostic-end "flymake" (diag))
+(declare-function flymake-diagnostic-text "flymake" (diag))
 (declare-function svg-create "svg" (width height &rest args))
 (declare-function svg-rectangle "svg" (svg x y width height &rest args))
 (declare-function svg-line "svg" (svg x1 y1 x2 y2 &rest args))
@@ -244,6 +248,30 @@ Ordinary perspectives retain their existing labels and click actions."
 (defcustom roost-notify-function nil
   "Optional function of TITLE and BODY to display notifications."
   :type '(choice (const nil) function))
+
+(defcustom roost-task-status-functions nil
+  "Functions called with TASK, PREVIOUS and STATUS when a task's status changes.
+PREVIOUS and STATUS are the status its host recorded before and now:
+\"starting\", \"running\", \"ready\" (its turn is over), \"permission\",
+\"failed\", \"crashed\", \"exited\" or \"stopped\", and, as Roost lets it
+go, \"retired\", \"discarded\" or \"forgotten\".  They are called for
+changes this Emacs sees, whether you or its agent made them, not when
+Roost first sees a task.  TASK is an alist: `alist-get' reads its `name',
+`id', `host' (nil on this machine), `agent', `branch', `worktree' and
+`integrationBranch'.  A function that fails is reported, and the rest
+still run."
+  :type 'hook)
+
+(defcustom roost-task-merged-functions nil
+  "Functions called with TASK and BRANCH once TASK's work is merged into BRANCH.
+That is when `m' merges it, or when Roost sees GitHub merge its pull
+request while Emacs runs, into the branch the pull request went to.
+Each merge is reported once, though both can see it.  Roost asks GitHub
+every two minutes, and sees only the merges of the branch's latest
+commit: one followed by new commits before it asks goes unreported.
+TASK is an alist, as for `roost-task-status-functions'.  A function that
+fails is reported, and the rest still run."
+  :type 'hook)
 
 (defcustom roost-hosts-file (locate-user-emacs-file "roost/hosts.json")
   "Local file remembering hosts used by Roost."
@@ -853,6 +881,7 @@ bringing back the old name, which the task's tab and panel no longer have."
     (setq task (roost--newer-name (roost--newer-events task old) old)))
   (let* ((key (roost--key task))
          (old (gethash key roost--tasks))
+         (had-merged (and old (roost--pr-merges old)))
          (status (roost--field task 'status))
          (previous (gethash key roost--statuses))
          (new-stop (and (equal status "ready")
@@ -905,7 +934,62 @@ bringing back the old name, which the task's tab and panel no longer have."
         (roost--notify (format "Roost: %s — %s" (roost--field task 'name) turn)
                        (concat (roost--host-label host) " · " (roost--pr-reason task turn))
                        task)))
+    (when (and previous (not (equal previous status)))
+      (roost--run-task-hook 'roost-task-status-functions task previous status))
+    ;; Another pull request merged, as a second one on the task, is another
+    ;; merge, at another head or into another branch.
+    (dolist (merge (roost--pr-merges task))
+      (unless (member merge had-merged)
+        ;; One there when Roost first saw the task is no news, nor when `m'
+        ;; then retires it.
+        (roost--report-merge task (car merge) (cdr merge) (not old))))
     task))
+
+(defun roost--pr-merges (task)
+  "Where TASK's pull requests merged, as a list of (HEAD . BRANCH).
+HEAD is nil when not known, and BRANCH a pull request's base, which an
+agent's own can choose, or else TASK's integration branch.  Those that
+merged at the task's tip count while another, open, is the one shown."
+  (let* ((status (roost--field task 'prStatus))
+         (pr (roost--field task 'pr))
+         (head (alist-get 'mergedHead pr)))
+    (delete-dups
+     (append (when (eq (roost--pr-state task) 'merged)
+               (list (cons (or (alist-get 'head status) (alist-get 'head pr))
+                           (or (alist-get 'base status) (alist-get 'base pr)
+                               (roost--field task 'integrationBranch)))))
+             (when head
+               (mapcar (lambda (base) (cons head base))
+                       (or (alist-get 'mergedBases pr) (list (roost--field task 'integrationBranch)))))))))
+
+(defvar roost--merges-reported (make-hash-table :test 'equal)
+  "The merges reported for each task, by task key, as (COMMIT . BRANCH).")
+
+(defun roost--report-merge (task commit branch &optional quietly)
+  "Run `roost-task-merged-functions' for TASK, merged at COMMIT into BRANCH.
+Once for each COMMIT and BRANCH: a merge on GitHub and `m' can both see
+one, as when a poll finds its pull request merged while `m' runs.
+Commits made after a pull request merged, which `m' then merges, are
+another merge, as is the same commit merged into another branch.
+QUIETLY records the merge as reported without running them."
+  (let* ((key (roost--key task))
+         (reported (gethash key roost--merges-reported)))
+    (unless (and commit (member (cons commit branch) reported))
+      (when commit (puthash key (cons (cons commit branch) reported) roost--merges-reported))
+      (unless quietly
+        (roost--run-task-hook 'roost-task-merged-functions task branch)))))
+
+(defun roost--run-task-hook (hook &rest arguments)
+  "Call each function on HOOK with ARGUMENTS, reporting any that fails.
+A function of yours that fails must not keep Roost from taking in what
+a host said, nor the other functions from running."
+  (apply #'run-hook-wrapped hook
+         (lambda (function &rest arguments)
+           (condition-case err
+               (apply function arguments)
+             (error (message "Roost: %s failed: %s" function (error-message-string err))))
+           nil)
+         arguments))
 
 (defun roost--notify-attention (host task status)
   "Notify that TASK on HOST became STATUS.
@@ -943,6 +1027,7 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
                  (remhash key roost--statuses)
                  (remhash key roost--pr-verdicts)
                  (remhash key roost--seen)
+                 (remhash key roost--merges-reported)
                  (roost--remove-notes (lambda (note) (equal (roost--note-key note) key)))))
              roost--tasks)
     (mapc (lambda (task) (roost--cache-task host task)) tasks)
@@ -1941,6 +2026,78 @@ worktree; explicit HEAD uses DIRECTORY.  Nil AGENT uses
       (roost--create-task directory name base prompt agent)
     (roost--compose current-prefix-arg)))
 
+;;;###autoload
+(defun roost-draft-task (prompt &optional directory)
+  "Open the new task draft with PROMPT, in the project DIRECTORY is in.
+Without DIRECTORY, the project is the one you are in, as for
+`roost-new-task'.  A draft you have written in already is kept as it is.
+For commands of your own that start a task from what they show, such
+as a mail or a bug report."
+  (roost--compose nil (cons prompt nil) (and directory (roost--draft-directory directory))))
+
+;;;###autoload
+(defun roost-new-task-from-region (start end)
+  "Start a new task from the text between START and END.
+Code is quoted with its file and lines, and you write above it.  The
+same as `roost-new-task' with the region active, for Embark's region
+actions."
+  (interactive "r")
+  (roost--compose nil (roost--region-seed start end)))
+
+;;;###autoload
+(defun roost-new-task-from-file (file)
+  "Start a new task about FILE, in the project it is in.
+The draft names FILE from the top of its checkout."
+  (interactive (list (read-file-name "New task about: ")))
+  (setq file (expand-file-name file))
+  (let ((root (locate-dominating-file file ".git")))
+    (roost--compose nil (cons (concat "\n\n" (if root
+                                                 (file-relative-name file root)
+                                               (abbreviate-file-name file)))
+                              t)
+                    (roost--draft-directory (file-name-directory file)))))
+
+;;;###autoload
+(defun roost-new-task-from-url (url)
+  "Start a new task about URL, such as a bug report or a page of documentation."
+  (interactive (list (read-string "New task about: " (thing-at-point 'url t))))
+  (roost--compose nil (cons (concat "\n\n" url) t)))
+
+;;;###autoload
+(defun roost-new-task-from-diagnostic ()
+  "Start a new task about the Flymake diagnostics at point.
+The draft quotes each with its file and line, then the lines they are
+on, and you write above them."
+  (interactive)
+  (let ((diagnostics (and (bound-and-true-p flymake-mode)
+                          (or (flymake-diagnostics (point))
+                              (flymake-diagnostics (line-beginning-position) (line-end-position))))))
+    (unless diagnostics
+      (user-error "No Flymake diagnostic here"))
+    (setq diagnostics (sort (copy-sequence diagnostics)
+                            (lambda (a b) (< (flymake-diagnostic-beg a) (flymake-diagnostic-beg b)))))
+    (let* ((start (save-excursion (goto-char (flymake-diagnostic-beg (car diagnostics)))
+                                  (line-beginning-position)))
+           (end (save-excursion (goto-char (apply #'max (mapcar #'flymake-diagnostic-end diagnostics)))
+                                (line-end-position)))
+           (file (roost--buffer-file-label)))
+      (roost--compose
+       nil (cons (concat "\n\n"
+                         (mapconcat (lambda (diagnostic)
+                                      (format "%s:%d: %s" file
+                                              (line-number-at-pos (flymake-diagnostic-beg diagnostic))
+                                              (string-trim (flymake-diagnostic-text diagnostic))))
+                                    diagnostics "\n")
+                         "\n\n" (string-trim-right (buffer-substring-no-properties start end)))
+                 t)))))
+
+(defun roost--draft-directory (directory)
+  "The project a new task drafted about DIRECTORY goes to.
+DIRECTORY's checkout, or a project Roost knows it is in."
+  (with-temp-buffer
+    (setq default-directory (file-name-as-directory (expand-file-name directory)))
+    (roost--compose-default-directory nil nil)))
+
 ;;;; Composing a new task
 
 (defconst roost--compose-buffer "*roost new task*")
@@ -2025,22 +2182,13 @@ Org entry at point or on the agenda line: its heading and text without
 planning or drawers.
 The cdr is non-nil when the writer should start above the text."
   (cond
-   ((use-region-p)
-    (let* ((start (region-beginning))
-           (end (region-end))
-           (last (if (and (> end start) (eq (char-before end) ?\n)) (1- end) end))
-           (text (buffer-substring-no-properties start end)))
-      (if (derived-mode-p 'prog-mode)
-          (cons (format "\n\n%s:%d-%d\n\n%s"
-                        (if buffer-file-name
-                            (file-relative-name (file-local-name buffer-file-name)
-                                                (file-local-name
-                                                 (or (ignore-errors (vc-root-dir)) default-directory)))
-                          (buffer-name))
-                        (line-number-at-pos start) (line-number-at-pos last)
-                        (string-trim-right text))
-                t)
-        (cons (string-trim text) nil))))
+   ((use-region-p) (roost--region-seed (region-beginning) (region-end)))
+   ;; An error or a match in a compilation or grep buffer, with its place.
+   ((and (derived-mode-p 'compilation-mode)
+         (text-property-not-all (line-beginning-position) (line-end-position) 'compilation-message nil))
+    (cons (concat "\n\n" (string-trim (buffer-substring-no-properties
+                                       (line-beginning-position) (line-end-position))))
+          t))
    ((and (derived-mode-p 'org-mode) (not (org-before-first-heading-p)))
     (cons (roost--org-entry-text) nil))
    ((and (derived-mode-p 'org-agenda-mode)
@@ -2052,6 +2200,26 @@ The cdr is non-nil when the writer should start above the text."
             (widen)
             (goto-char marker)
             (cons (roost--org-entry-text) nil))))))))
+
+(defun roost--region-seed (start end)
+  "Prompt text from the text between START and END, as `roost--compose-seed'.
+Code is quoted with its file and lines, and the writer starts above it."
+  (let ((last (if (and (> end start) (eq (char-before end) ?\n)) (1- end) end))
+        (text (buffer-substring-no-properties start end)))
+    (if (derived-mode-p 'prog-mode)
+        (cons (format "\n\n%s:%d-%d\n\n%s" (roost--buffer-file-label)
+                      (line-number-at-pos start) (line-number-at-pos last)
+                      (string-trim-right text))
+              t)
+      (cons (string-trim text) nil))))
+
+(defun roost--buffer-file-label ()
+  "The current buffer's file from the top of its checkout, or its name."
+  (if buffer-file-name
+      (file-relative-name (file-local-name buffer-file-name)
+                          (file-local-name
+                           (or (ignore-errors (vc-root-dir)) default-directory)))
+    (buffer-name)))
 
 (defun roost--org-marker ()
   "Marker at the Org heading at point or on the agenda line, or nil."
@@ -2090,14 +2258,17 @@ Planning lines and drawers are left out."
            (body (if (< start end) (string-trim (buffer-substring-no-properties start end)) "")))
       (if (string-empty-p body) title (concat title "\n\n" body)))))
 
-(defun roost--compose (&optional fork)
-  "Open the new task buffer.  FORK defaults to the current task's HEAD."
+(defun roost--compose (&optional fork seed directory)
+  "Open the new task buffer.  FORK defaults to the current task's HEAD.
+SEED, as `roost--compose-seed' makes one, starts the prompt in place of
+what is at point, and DIRECTORY is its project in place of where you are."
   (let* ((task (roost--task-at-point))
          (fork (and fork task))
-         (seed (roost--compose-seed))
-         (org (and seed (not (use-region-p)) (roost--org-marker)))
+         (given seed)
+         (seed (or seed (roost--compose-seed)))
+         (org (and seed (not given) (not (use-region-p)) (roost--org-marker)))
          ;; Where you are, before the draft becomes the current buffer.
-         (directory (roost--compose-default-directory task fork))
+         (directory (or directory (roost--compose-default-directory task fork)))
          (buffer (get-buffer roost--compose-buffer))
          (fresh (not buffer)))
     (setq buffer (or buffer (get-buffer-create roost--compose-buffer)))
@@ -5103,6 +5274,9 @@ comes in as one squashed commit, or a merge commit; see `roost-merge-style'."
                 (lambda (merged)
                   (roost--retired-workspace merged)
                   (roost--kill-worktree-buffers merged)
+                  (roost--report-merge merged (roost--field merged 'retiringCommit)
+                                       (or (roost--field merged 'integrationBranch)
+                                           (roost--field task 'integrationBranch)))
                   ;; The other tasks are measured against the branch that moved.
                   (roost--refresh-host (roost--field merged 'host) nil)
                   (message (if (eq roost-merge-style 'squash)
