@@ -436,17 +436,30 @@ def last_assistant_text(entries, extract):
     return None
 
 
+def shortened(value):
+    """VALUE's text, stripped and cut for display, or None for none."""
+    value = (text(value) or "").strip()
+    if not value:
+        return None
+    return value if len(value) <= LAST_MESSAGE_LIMIT else value[:LAST_MESSAGE_LIMIT].rstrip() + "…"
+
+
 def last_message(task):
     """The agent's latest reply, shortened for display, or None: as the agent
     reported it at the end of its turn, else from its transcript. A missing
     or malformed transcript never fails a request."""
     try:
-        reply = text(task.get("lastReply")) or agent_for(task).last_message(task)
+        return shortened(text(task.get("lastReply")) or agent_for(task).last_message(task))
     except (RoostError, OSError, ValueError, TypeError, AttributeError, KeyError):
         return None
-    if not reply:
-        return None
-    return reply if len(reply) <= LAST_MESSAGE_LIMIT else reply[:LAST_MESSAGE_LIMIT].rstrip() + "…"
+
+
+def later_prompt(task, prompt):
+    """PROMPT, which TASK's agent says you sent it, as the task panel shows
+    it, to remind you where you left off: None for none, and for the one
+    the task started with, which the panel shows already."""
+    said = shortened(prompt)
+    return None if said == shortened(task.get("prompt")) else said
 
 
 CLAUDE_FOLDER_LIMIT = 200
@@ -560,6 +573,8 @@ class ClaudeAgent:
             updates["lastReply"] = reply.strip()[:LAST_MESSAGE_LIMIT + 1]
         elif event == "UserPromptSubmit" or (event == "SessionStart" and payload.get("source") == "clear"):
             updates["lastReply"] = None
+        if event == "UserPromptSubmit":
+            updates["lastPrompt"] = payload.get("prompt")
         # The old claudeSession field serves tasks whose original helper still runs.
         updates.update(reported)
         return updates
@@ -684,6 +699,8 @@ class CodexAgent:
             return None
         # An interrupted turn keeps its name, so it shows as interrupted.
         updates = dict(status=status, updatedAt=now(), lastEvent=event)
+        if event == "UserPromptSubmit":
+            updates["lastPrompt"] = payload.get("prompt")
         if payload.get("session_id"):
             updates["agentSession"] = payload["session_id"]
         return updates
@@ -3225,6 +3242,8 @@ def update_hook(store, task_id, payload, run_id=None):
                 task["hookAt"] = read_at = time.time()
             # What the agent asks, if its adapter can say better than its payload.
             named = updates.pop("request", None)
+            if "lastPrompt" in updates:
+                updates["lastPrompt"] = later_prompt(task, updates["lastPrompt"])
             task.update(updates)
             request = (named or permission_request(payload, task.get("worktree"))) if asks else None
             if request:

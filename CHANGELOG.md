@@ -6,6 +6,11 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- The task panel shows your latest prompt under the task's own, so after a
+  few turns it still says where you left off. Claude and Codex tasks have
+  it, since their hooks say what you send; Pi and OpenCode tasks show only
+  the prompt they started with. A task already running when you upgrade
+  shows it once you stop and resume it (`K`, then `s`).
 - `roost-doctor` asks for Claude Code 2.1.78 or newer on each host. Older
   releases don't know the `StopFailure` hook, so they open a task with a
   Settings Error and then skip all of Roost's hooks, leaving the task

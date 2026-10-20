@@ -362,6 +362,40 @@
        (should-not (string-match-p "Run the tests" (buffer-string)))
        (should (looking-at-p "Show the whole prompt"))))))
 
+(ert-deftest roost-task-panel-shows-your-latest-prompt ()
+  ;; Under the task's prompt, what you last said, folded as the prompt is;
+  ;; beside the terminal too, where it may have scrolled away.
+  (roost-test--isolated
+   (let ((task (roost--cache-task "dev" (append '((task . "Fix the login.")
+                                                  (lastPrompt . "Now the logout.\n\nAnd its test.")
+                                                  (lastMessage . "Done."))
+                                                (roost-test--task)))))
+     (with-temp-buffer
+       (setq roost--buffer-task-key (roost--key task))
+       (cl-letf (((symbol-function 'roost--panel-beside-terminal-p) #'ignore))
+         (roost--render-task-info))
+       (should (string-match-p "^Prompt\nFix the login\\.\n\n?Your latest prompt\nNow the logout\\.\nShow the whole prompt\n\n?Agent's latest reply$"
+                               (buffer-string)))
+       (goto-char (point-min))
+       (search-forward "Show the whole")
+       (push-button (1- (point)))
+       (should (string-match-p "^Your latest prompt\nCollapse prompt\nNow the logout\\.\n\nAnd its test\\.$"
+                               (buffer-string)))
+       (should (looking-at-p "Collapse prompt"))
+       ;; A new one starts folded.
+       (roost--cache-task "dev" (append '((task . "Fix the login.")
+                                          (lastPrompt . "Then the signup.\n\nWith a test."))
+                                        (roost-test--task)))
+       (cl-letf (((symbol-function 'roost--panel-beside-terminal-p) #'always))
+         (roost--render-task-info))
+       (should (string-match-p "^Your latest prompt\nThen the signup\\.\nShow the whole prompt$" (buffer-string)))
+       (should-not (string-match-p "Agent's latest reply" (buffer-string)))
+       ;; None from the agent, or the record of an older helper: no heading.
+       (dolist (said '(nil " \n"))
+         (roost--cache-task "dev" (append `((task . "Fix the login.") (lastPrompt . ,said)) (roost-test--task)))
+         (roost--render-task-info)
+         (should-not (string-match-p "Your latest prompt" (buffer-string))))))))
+
 (ert-deftest roost-a-draft-from-a-tiled-pane-opens-beside-the-tiles ()
   ;; Shown in the pane's window, the draft was taken back when tmux-control
   ;; next arranged its panes, and what you typed went to the terminal.

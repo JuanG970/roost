@@ -6107,6 +6107,15 @@ Only ERR's first line fits there; the echo area and *Messages* have it all."
   (let ((prompt (roost--field task 'task)))
     (unless (or (null prompt) (equal prompt (roost--field task 'name))) prompt)))
 
+(defun roost--latest-prompt (task)
+  "What you last sent TASK's agent, or nil.
+That is nil too while it is the prompt the task started with, for agents
+whose hooks don't say, and for tasks recorded by older helpers."
+  (let ((prompt (roost--field task 'lastPrompt)))
+    (when (stringp prompt)
+      (let ((prompt (string-trim prompt)))
+        (unless (string-empty-p prompt) prompt)))))
+
 (defconst roost--url-regexp
   "\\([*_~]*\\)\\(https?://[^[:space:]<>\"'`\ue000\ue001]+\\)"
   "A URL in what an agent wrote, and the Markdown emphasis that opens on it.
@@ -6560,7 +6569,11 @@ the last column is kept for the truncation mark."
   (insert roost--gap (propertize title 'face 'roost-heading) "\n"))
 
 (defvar-local roost--show-full-prompt nil
-  "Non-nil when the task panel shows a long prompt in full.")
+  "The task's prompt when the task panel shows it in full, or nil.")
+
+(defvar-local roost--show-full-latest-prompt nil
+  "Your latest prompt when the task panel shows it in full, or nil.
+A different one starts folded when it arrives.")
 
 (defvar-local roost--expanded-reply nil
   "The reply expanded in a compact panel, or nil.
@@ -6591,6 +6604,20 @@ prompt is returned whole."
                               "…")
                     paragraph)))
     (if (equal (string-trim preview) (string-trim prompt)) prompt preview)))
+
+(defun roost--insert-prompt (prompt what full)
+  "Insert PROMPT, only its start when long, with a button for the rest.
+WHAT names the button, as for `roost--insert-toggle'.  FULL is the
+variable that holds the prompt shown in full, or nil."
+  (let ((preview (roost--prompt-preview prompt)))
+    (cond ((equal preview prompt)
+           (roost--insert-indented (roost--prose prompt)))
+          ((equal (symbol-value full) prompt)
+           (roost--insert-toggle "Collapse prompt" what (lambda () (set full nil)))
+           (roost--insert-indented (roost--prose prompt)))
+          (t
+           (roost--insert-indented (roost--prose preview))
+           (roost--insert-toggle "Show the whole prompt" what (lambda () (set full prompt)))))))
 
 (defun roost--insert-indented (text &optional face)
   "Insert TEXT wrapped and indented under a heading, adding FACE."
@@ -6728,17 +6755,11 @@ Windows showing the panel keep their scroll position, and the mark stays."
             (roost--insert-indented (roost--prose request))))
         (when-let* ((prompt (roost--prompt-text task)))
           (roost--insert-heading "Prompt")
-          (let ((preview (roost--prompt-preview prompt)))
-            (cond ((equal preview prompt)
-                   (roost--insert-indented (roost--prose prompt)))
-                  (roost--show-full-prompt
-                   (roost--insert-toggle "Collapse prompt" 'prompt
-                                         (lambda () (setq roost--show-full-prompt nil)))
-                   (roost--insert-indented (roost--prose prompt)))
-                  (t
-                   (roost--insert-indented (roost--prose preview))
-                   (roost--insert-toggle "Show the whole prompt" 'prompt
-                                         (lambda () (setq roost--show-full-prompt t)))))))
+          (roost--insert-prompt prompt 'prompt 'roost--show-full-prompt))
+        ;; Where you left off, which the terminal may have scrolled away.
+        (when-let* ((prompt (roost--latest-prompt task)))
+          (roost--insert-heading "Your latest prompt")
+          (roost--insert-prompt prompt 'latest-prompt 'roost--show-full-latest-prompt))
         (when-let* (((not beside))
                     (reply (roost--last-message task))
                     (reply (roost--prose reply)))

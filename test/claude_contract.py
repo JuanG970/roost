@@ -253,7 +253,7 @@ class Session:
         # However it ends, Ctrl-C too, the agent and its tmux server go.
         try:
             self.task = self.rpc("create", directory=str(self.repo), name="contract", socket=self.socket,
-                                 agent=self.agent, prompt="Reply with the single word PONG.",
+                                 agent=self.agent, prompt=agent_captures.PROMPT,
                                  command=self.command, programStatus=self.program_status)
             self.step("a first turn, from the task's prompt")
             try:
