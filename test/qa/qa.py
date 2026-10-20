@@ -1135,6 +1135,66 @@ def send(qa, repo):
     qa.step("Sent", expect=[("the echo area says so", lambda s: "Sent to " + name in (s["echo"] or ""))])
 
 
+def attached(text, name):
+    """The path in TEXT of the attachment whose name matches NAME, a regexp,
+    as copied to the task's host."""
+    # Up to a line's start, as the directory may hold spaces.
+    match = re.search(r"(/[^\n]*/attachments/[0-9a-f]{16}/%s)" % name, text)
+    return match and match.group(1)
+
+
+@journey("Attach files to a prompt")
+def attach(qa, repo):
+    folder = qa.out / "attach"
+    capture = folder / "20261019-101500.scrawl"
+    (capture / "frames").mkdir(parents=True, exist_ok=True)
+    shot = folder / "shot.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\nshot")
+    for name in ("scrawl.json", "contact-sheet.png", "frames/frame-01.png", "recording.mov"):
+        (capture / name).write_bytes(b"x")
+    (capture / "summary.md").write_text("- #1 (0:04) \"This badge collides with the title.\"\n")
+    name = start_task(qa, "Look at the picture", "picture")
+    open_task(qa, name)
+    qa.keys("M-x")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type("roost-attach\r")
+    qa.wait("which file", lambda s: (s["prompt"] or "").startswith("Attach file"))
+    qa.keys("C-a C-k")
+    qa.type(str(shot) + "\r")
+    draft = lambda s: (qa.window(s, "roost-send-mode") or {}).get("text") or ""
+    qa.wait("the draft", lambda s: attached(draft(s), r"shot\.png"))
+    qa.step("A draft with the file attached", expect=[
+        ("it is selected", lambda s: (qa.window(s, "roost-send-mode") or {}).get("selected")),
+        ("the copy is on the task's host", lambda s: Path(attached(draft(s), r"shot\.png")).read_bytes()
+         == shot.read_bytes())])
+    # The clipboard is yours: Roost reads this file as its image instead.
+    qa.emacs.eval("(advice-add 'roost--clipboard-image :override (lambda () (roost--file-bytes %s))"
+                  " '((name . qa-clipboard)))" % lisp(str(shot)))
+    try:
+        qa.keys("C-c C-v")
+        qa.wait("the image", lambda s: attached(draft(s), r"clipboard-[0-9-]+\.png"))
+    finally:
+        qa.emacs.eval("(advice-remove 'roost--clipboard-image 'qa-clipboard)")
+    qa.keys("C-c C-a")
+    qa.wait("which file", lambda s: (s["prompt"] or "").startswith("Attach file"))
+    qa.keys("C-a C-k")
+    qa.type(str(capture) + "\r")
+    qa.wait("the capture", lambda s: "A Scrawl recording" in draft(s))
+    qa.step("An image and a Scrawl capture attached too", expect=[
+        ("the capture's summary follows", lambda s: "This badge collides" in draft(s)),
+        ("its keyframes went, not its video", lambda s: (
+            lambda path: path and (Path(path) / "frames" / "frame-01.png").exists()
+            and not (Path(path) / "recording.mov").exists())(attached(draft(s), re.escape(capture.name))))])
+    path = attached(draft(qa.screen()), r"shot\.png")
+    qa.keys("C-c C-c")
+    # The terminal wraps the path where its lines end.
+    qa.wait("the agent to get it", lambda s: any("PROMPT " + path in w["text"].replace("\n", "")
+                                                 for w in terminals(s)))
+    qa.status(name, "ready", "idle")
+    qa.step("Sent with the paths", expect=[
+        ("the echo area says so", lambda s: "Sent to " + name in (s["echo"] or ""))])
+
+
 @journey("Bring a task up to date")
 def update(qa, repo):
     behind = start_task(qa, "Stay behind", "stay-behind")
@@ -1303,6 +1363,17 @@ def leave_draft(qa, tasks):
     qa.type("Half a thought")
 
 
+def leave_attaching(qa, tasks):
+    qa.keys("M-x")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type("roost-send\r")
+    qa.wait("the draft", lambda s: (qa.window(s, "roost-send-mode") or {}).get("selected"))
+    qa.type("Half a thought")
+    qa.keys("C-c C-a")
+    qa.wait("which file", lambda s: (s["prompt"] or "").startswith("Attach file"))
+    qa.leave_question()
+
+
 def leave_opening(qa, tasks):
     # Its host replies after what comes next.
     qa.emacs.eval("(qa-slow-opens 1 3)")
@@ -1325,6 +1396,7 @@ WALK_STARTERS = [
     ("Roost's Switch task left open", leave_roost_question),
     ("Roost's menu left open", leave_menu),
     ("a draft half written", leave_draft),
+    ("a prompt's file to attach not yet chosen", leave_attaching),
     ("another task still opening", leave_opening),
     ("a mouse press in the terminal never let go", leave_mouse_press),
 ]
@@ -1443,7 +1515,7 @@ def walk_away(qa, repo):
                 qa.until(late[1], timeout)
                 qa.settle()
                 expect.append(late)
-            if leave is leave_draft:
+            if leave in (leave_draft, leave_attaching):
                 expect.append(("the draft is kept", lambda s: any(
                     "Half a thought" in draft for draft in qa.emacs.json("(json-encode (vconcat (qa-drafts)))"))))
             qa.step(pair, expect=expect)
@@ -1937,7 +2009,7 @@ def dropped(qa, repo):
 
 
 JOURNEYS = [sweep, answer, fold, resize, merge, review, panes, shell,
-            dashboard, stop_resume, retire, send, update, conflicts, restart, search, question_left, walk_away,
+            dashboard, stop_resume, retire, send, attach, update, conflicts, restart, search, question_left, walk_away,
             frames, org, drafts, tabs,
             forget, rename, fork, other_branch, merged, pull_request, exits, unreachable, scrollback, fleet, dropped]
 

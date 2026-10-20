@@ -14,7 +14,7 @@ import hashlib
 import heapq
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import pty
 import queue
 import re
@@ -239,6 +239,11 @@ class Store:
             raise RoostError("Invalid task ID")
         return self.tasks_dir / (task_id + ".json")
 
+    def attachments(self, task_id):
+        """The folder of the files attached to the task's prompts."""
+        self.path(task_id)
+        return self.root / "attachments" / task_id
+
     def read(self, task_id):
         try:
             task = json.loads(self.path(task_id).read_text())
@@ -257,6 +262,7 @@ class Store:
         and found by searching under the repository noted beside the worktrees,
         also for tasks created before Roost noted it."""
         path = self.path(task_id)
+        shutil.rmtree(self.attachments(task_id), ignore_errors=True)
         with contextlib.suppress(OSError, ValueError, AttributeError):
             repo = json.loads(path.read_text()).get("repo")
             if isinstance(repo, str):
@@ -483,7 +489,13 @@ class ClaudeAgent:
             raise RoostError("Roost owns worktrees, conversation resume, and hook settings; remove conflicting Claude flags")
 
     def launch(self, store, task, resume_conversation):
-        argv = task["command"] + ["--settings", claude_hook_settings(store, task)]
+        # Claude asks before reading outside its worktree; a file attached
+        # to a prompt is read without asking. With "=": --add-dir takes
+        # every argument after it that isn't an option.
+        attachments = store.attachments(task["id"])
+        attachments.mkdir(mode=0o700, parents=True, exist_ok=True)
+        argv = task["command"] + ["--settings", claude_hook_settings(store, task),
+                                  "--add-dir=" + str(attachments)]
         session = task.get("agentSession") or task.get("claudeSession")
         if resume_conversation and session:
             argv += ["--resume", session]
@@ -780,6 +792,27 @@ class PiAgent:
 
 
 OPENCODE_PLUGIN = r'''import { spawn } from "node:child_process";
+// PERMISSION, as OpenCode's config has it, a word or rules, with NAME
+// allowed for PATTERN last. OpenCode asks the last rule that applies, so
+// NAME's rules hold all that applied to it before, a word for everything
+// included, and end with PATTERN; other permissions are as they were.
+const allowing = (permission, name, pattern) => {
+  if (typeof permission === "string") permission = { "*": permission };
+  if (!permission || typeof permission !== "object") permission = {};
+  let rules = {};
+  for (const [key, value] of Object.entries(permission)) {
+    if (key !== name && key !== "*") continue;
+    if (typeof value === "string") rules = { "*": value };
+    else if (value && typeof value === "object")
+      for (const [p, action] of Object.entries(value)) { delete rules[p]; rules[p] = action; }
+  }
+  delete rules[pattern];
+  rules[pattern] = "allow";
+  const out = {};
+  for (const [key, value] of Object.entries(permission)) if (key !== name) out[key] = value;
+  out[name] = rules;
+  return out;
+};
 export const RoostObserver = async () => {
   // An OpenCode started from this one, as by its shell tool, inherits the
   // config that loads this plugin: only the one Roost started reports.
@@ -842,6 +875,18 @@ export const RoostObserver = async () => {
   };
   report("start");
   return {
+    // The task's attachments are outside its worktree, which OpenCode asks
+    // about: allowed for every agent once your config, files and inline
+    // alike, is merged, as the last rule, so the rest is as you set it.
+    config: async config => {
+      const pattern = process.env.ROOST_OPENCODE_ATTACHMENTS;
+      if (!pattern || !config || typeof config !== "object") return;
+      if (!config.agent || typeof config.agent !== "object") config.agent = {};
+      for (const name of new Set(["build", "plan", "general", "explore", ...Object.keys(config.agent)])) {
+        const agent = config.agent[name] && typeof config.agent[name] === "object" ? config.agent[name] : {};
+        config.agent[name] = { ...agent, permission: allowing(agent.permission, "external_directory", pattern) };
+      }
+    },
     event: async ({ event }) => {
       const p = event.properties || {};
       switch (event.type) {
@@ -961,9 +1006,11 @@ class OpenCodeAgent:
             argv.append("--prompt=" + task["prompt"])
         return argv
 
-    def environment(self, store, env):
+    def environment(self, store, task, env):
         """The inline config that loads the plugin, added to any the user set:
-        OpenCode merges it over their files rather than in place of them."""
+        OpenCode merges it over their files rather than in place of them.
+        The plugin lets TASK's agents read its attachments, named here, which
+        OpenCode would ask about, as outside its worktree."""
         if (env.get("OPENCODE_PURE") or "").lower() in ("1", "true", "yes", "on"):
             raise RoostError("OPENCODE_PURE leaves out every plugin, Roost's observer too; unset it for Roost's tasks")
         config = {}
@@ -978,7 +1025,8 @@ class OpenCodeAgent:
         config["plugin"] = plugins + [self.plugin(store).as_uri()]
         # Its plugin marks the OpenCode that reports; one Roost starts, as
         # from another task's shell, is a new one.
-        return {"OPENCODE_CONFIG_CONTENT": json.dumps(config), "ROOST_OPENCODE_OBSERVER": ""}
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps(config), "ROOST_OPENCODE_OBSERVER": "",
+                "ROOST_OPENCODE_ATTACHMENTS": str(store.attachments(task["id"])) + "/*"}
 
     def request(self, payload):
         """What a question or permission request asks, in Roost's words."""
@@ -1975,6 +2023,94 @@ def send(task, text, force=False):
     finally:
         tmux(task["socket"], "delete-buffer", "-b", buffer, check=False)
     return task
+
+
+def numbered(folder, stem, number, suffix):
+    """STEM-NUMBER.SUFFIX, its stem shortened, between characters, to fit
+    the longest name FOLDER takes."""
+    try:
+        limit = os.pathconf(folder, "PC_NAME_MAX")
+    except (OSError, ValueError):
+        limit = 255
+    tail = "-%d%s" % (number, suffix)
+    room = limit - len(tail.encode())
+    if room < 1:
+        # A suffix about as long as a name can be: keep the number alone.
+        return "%d" % number
+    return stem.encode()[:room].decode(errors="ignore") + tail
+
+
+def attach(store, task, files):
+    """Copy FILES, each {"name": a relative path, "data": its bytes in base64},
+    to the task's attachments on this host, where its agent can read them.
+    Files whose names start with one folder go in one folder. Return the path
+    each file or folder got: a name already taken gets a number. They go with
+    the task's record."""
+    if not isinstance(files, list) or not files:
+        raise RoostError("Nothing to attach")
+    entries = []
+    folders = {}
+    for item in files:
+        name = item.get("name") if isinstance(item, dict) else None
+        parts = PurePosixPath(name).parts if isinstance(name, str) and "\0" not in name else ()
+        if not parts or PurePosixPath(name).is_absolute() or ".." in parts:
+            raise RoostError("Not a name to attach: %r" % (name,))
+        if folders.setdefault(parts[0], len(parts) > 1) != (len(parts) > 1):
+            raise RoostError("Both a file and a folder: " + parts[0])
+        entries.append((parts, item.get("data") or ""))
+    # Each name is taken here, under the lock, so attachments made at once
+    # don't share one; what goes in them is written after.
+    folder = store.attachments(task["id"])
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    chosen = {}
+
+    def discard():
+        """What this request reserved or wrote, should it fail."""
+        for name in chosen.values():
+            if (folder / name).is_dir():
+                shutil.rmtree(folder / name, ignore_errors=True)
+            else:
+                with contextlib.suppress(OSError):
+                    (folder / name).unlink()
+    try:
+        for top, is_folder in folders.items():
+            stem, suffix = os.path.splitext(top)
+            candidate, number = top, 1
+            while True:
+                try:
+                    if is_folder:
+                        (folder / candidate).mkdir(mode=0o700)
+                    else:
+                        os.close(os.open(folder / candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+                    break
+                except FileExistsError:
+                    number += 1
+                    candidate = numbered(folder, stem, number, suffix)
+                except OSError as error:
+                    raise RoostError("Can't attach %s: %s" % (top, error.strerror or error))
+            chosen[top] = candidate
+    except BaseException:
+        discard()
+        raise
+    # Decoding and writing a large attachment takes a while: hooks must not
+    # wait on the registry lock meanwhile. The task stays, with its
+    # attachments: removing it waits until they are written.
+    with holding_worktree(store, task, fcntl.LOCK_SH,
+                          "Roost is still removing this task; refresh in a moment"), store.released():
+        try:
+            for parts, encoded in entries:
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                except (TypeError, ValueError):
+                    raise RoostError("Not base64: " + "/".join(parts))
+                path = folder.joinpath(chosen[parts[0]], *parts[1:])
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as output:
+                    output.write(data)
+        except BaseException:
+            discard()
+            raise
+    return {"paths": [str(folder / name) for name in chosen.values()]}
 
 
 def shell(store, task):
@@ -3476,7 +3612,7 @@ def runner(root, task_id, run_id, resume_conversation=False):
             agent = agent_for(task)
             argv = agent.launch(store, task, resume_conversation)
             # What the agent alone needs in its environment, as to load an observer.
-            agent_env = dict(env, **(agent.environment(store, env) if hasattr(agent, "environment") else {}))
+            agent_env = dict(env, **(agent.environment(store, task, env) if hasattr(agent, "environment") else {}))
         setup = text(task.get("setup"))
         # Resume reruns setup only when the first run never finished it.
         if setup and (not resume_conversation or task.get("setupComplete") is False):
@@ -3548,6 +3684,7 @@ TASK_ACTIONS = {
     "stop": lambda store, task, request: stop(store, task),
     "send": lambda store, task, request: send(task, request["text"], request.get("force") is True),
     "shell": lambda store, task, request: shell(store, task),
+    "attach": lambda store, task, request: attach(store, task, request.get("files")),
     "inspect": lambda store, task, request: inspect(store, task),
     "seen": lambda store, task, request: seen(store, task, request.get("updatedAt")),
     "rename": lambda store, task, request: rename(store, task, request.get("name")),

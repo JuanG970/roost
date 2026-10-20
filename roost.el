@@ -90,6 +90,7 @@
 (declare-function svg-rectangle "svg" (svg x y width height &rest args))
 (declare-function svg-line "svg" (svg x1 y1 x2 y2 &rest args))
 (declare-function svg-image "svg" (svg &rest props))
+(declare-function dired-get-marked-files "dired" (&optional localp arg filter distinguish-one-marked error))
 (declare-function evil-define-minor-mode-key "evil-core" (state mode key def &rest bindings))
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
 (declare-function org-back-to-heading "org" (&optional invisible-ok))
@@ -590,25 +591,27 @@ file instead.  Writing it to the pipe would wait, with Emacs frozen,
 until ssh had connected and read it: for a host that is down, the whole
 connection timeout.")
 
-(defun roost--expire-request (process on-timeout)
+(defun roost--expire-request (process on-timeout &optional timeout)
   "Kill host request PROCESS, calling ON-TIMEOUT, unless it ends in time.
-That is `roost-request-timeout' seconds.  A timer that runs well after
-then slept with this computer, through a laptop's sleep or Power Nap; the
-request then gets its time again, awake, rather than failing for want of
-a reply nobody could send while asleep."
-  (let ((deadline (+ (float-time) roost-request-timeout)))
+That is TIMEOUT seconds, or `roost-request-timeout'.  A timer that runs
+well after then slept with this computer, through a laptop's sleep or
+Power Nap; the request then gets its time again, awake, rather than
+failing for want of a reply nobody could send while asleep."
+  (let* ((timeout (or timeout roost-request-timeout))
+         (deadline (+ (float-time) timeout)))
     (process-put process 'roost-timer
-                 (run-at-time roost-request-timeout nil
+                 (run-at-time timeout nil
                               (lambda ()
                                 (when (process-live-p process)
                                   (if (> (float-time) (+ deadline 5))
-                                      (roost--expire-request process on-timeout)
+                                      (roost--expire-request process on-timeout timeout)
                                     (funcall on-timeout)
                                     (delete-process process))))))))
 
-(defun roost--run (host code input success failure)
+(defun roost--run (host code input success failure &optional timeout)
   "Execute CODE asynchronously on HOST with INPUT.
-Call SUCCESS with the result or FAILURE with an error message."
+Call SUCCESS with the result or FAILURE with an error message.  TIMEOUT
+is the seconds it may take, if not `roost-request-timeout'."
   (let* ((buffer (generate-new-buffer " *roost-rpc*"))
          (errors (generate-new-buffer " *roost-rpc-errors*"))
          (default-directory temporary-file-directory)
@@ -660,7 +663,7 @@ Call SUCCESS with the result or FAILURE with an error message."
                                        (list failure
                                              (cond (timed-out
                                                     (format "No reply after %ss; the operation may still finish on the host, so refresh before retrying"
-                                                            roost-request-timeout))
+                                                            (or timeout roost-request-timeout)))
                                                    ((string-empty-p stderr) "Host operation failed")
                                                    (t stderr))))
                                    (error (list failure (error-message-string parse-error))))))
@@ -668,7 +671,7 @@ Call SUCCESS with the result or FAILURE with an error message."
                        (kill-buffer buffer)
                        (kill-buffer errors))))))
           (push process roost--requests)
-          (roost--expire-request process (lambda () (setq timed-out t)))
+          (roost--expire-request process (lambda () (setq timed-out t)) timeout)
           (unless input-file
             ;; ssh may have exited already, as for an unknown host; then
             ;; the sentinel reports why.
@@ -725,9 +728,10 @@ one not yet created."
                         like)
                       like)))
 
-(defun roost--request (host action parameters success &optional failure)
+(defun roost--request (host action parameters success &optional failure timeout)
   "Run ACTION with PARAMETERS on HOST, installing the versioned helper as needed.
-Call SUCCESS with the result, or FAILURE with an error message."
+Call SUCCESS with the result, or FAILURE with an error message.  TIMEOUT
+is the seconds ACTION may take, if not `roost-request-timeout'."
   (let* ((helper (roost--helper))
          (filename (car helper))
          (root roost-state-directory)
@@ -742,7 +746,7 @@ Call SUCCESS with the result, or FAILURE with an error message."
                      (json-serialize root) (json-serialize filename))
              (roost--json-encode (append (list (cons 'action action) (cons 'root root))
                                          parameters))
-             success on-failure)))
+             success on-failure timeout)))
          (install-and-invoke
           (lambda ()
             (roost--run
@@ -2730,19 +2734,22 @@ CALLBACK and FAILURE are passed to `roost--act'."
 (defvar-keymap roost-send-mode-map
   :doc "Keys for drafting a follow-up prompt."
   "C-c C-c" #'roost-send-submit
-  "C-c C-k" #'roost-send-cancel)
+  "C-c C-k" #'roost-send-cancel
+  "C-c C-a" #'roost-send-attach
+  "C-c C-v" #'roost-send-attach-image)
 
 (define-derived-mode roost-send-mode text-mode "Roost Send"
   "Draft a follow-up prompt for a Roost task's agent.
 \\{roost-send-mode-map}"
   (add-hook 'after-change-major-mode-hook #'roost--quiet-display 90 t)
   (roost--evil-state 'roost-send-mode 'insert)
+  (yank-media-handler "image/png" #'roost--send-yank-image)
   (roost--quiet-display))
 
 (defun roost--send-header (task)
   "Header line for TASK's follow-up draft."
   (substitute-command-keys
-   (format " Send to %s · \\<roost-send-mode-map>\\[roost-send-submit] send · \\[roost-send-cancel] cancel"
+   (format " Send to %s · \\<roost-send-mode-map>\\[roost-send-submit] send · \\[roost-send-attach] attach · \\[roost-send-cancel] cancel"
            (roost--field task 'name))))
 
 (defun roost--send-draft (task &optional initial)
@@ -2792,6 +2799,13 @@ Review notes in it are cleared once it is sent."
         (buffer (current-buffer)))
     (when (string-empty-p (string-trim text))
       (user-error "Write a prompt first"))
+    (let ((states (roost--attachment-states)))
+      (when (memq 'copying states)
+        (user-error "Still copying an attachment; send once its path is in"))
+      (when (memq 'failed states)
+        (user-error "An attachment didn't copy: delete its note, then attach it again if you like"))
+      (when (memq 'stale states)
+        (user-error "A [Copying …] is from a copy since done, as undo brings back: redo for its path, or delete it")))
     (when roost--send-sending
       (user-error "Already sending"))
     (setq roost--send-sending t)
@@ -2831,6 +2845,339 @@ chosen one.  A draft already begun keeps its text, and the quote follows."
                    (t (buffer-name)))
              (line-number-at-pos start) (line-number-at-pos last)
              (buffer-substring-no-properties start end)))))
+
+;;;; Attachments
+
+(defconst roost--attach-limit (* 64 1024 1024)
+  "Most bytes Roost copies to a host for one attachment.")
+
+(defconst roost--scrawl-media '("mp4" "mov" "m4v" "wav" "m4a" "caf" "aac" "mp3")
+  "Extensions of what Roost leaves of a Scrawl capture: video and audio.
+They are most of its size, and an agent reads its frames instead.")
+
+(defun roost--scrawl-capture-p (file)
+  "Non-nil if FILE is the folder of a Scrawl capture."
+  (and (file-directory-p file)
+       (file-regular-p (expand-file-name "scrawl.json" file))
+       (file-regular-p (expand-file-name "summary.md" file))))
+
+(defun roost--scrawl-latest ()
+  "The newest Scrawl capture on this machine, or nil."
+  (let ((captures (expand-file-name (or (getenv "SCRAWL_CAPTURES_DIR")
+                                        "~/Library/Application Support/scrawl/captures"))))
+    (car (sort (seq-filter #'roost--scrawl-capture-p
+                           (and (file-directory-p captures)
+                                (directory-files captures t "\\.scrawl\\'")))
+               #'file-newer-than-file-p))))
+
+(defun roost--file-bytes (file &optional limit)
+  "FILE's contents, as a unibyte string; with LIMIT, at most that many bytes."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file nil (and limit 0) limit)
+    (buffer-string)))
+
+(defun roost--attachment-files (file)
+  "The files to copy for FILE, as (NAME . LOCAL-FILE).
+A Scrawl capture gives its folder's name and the files in it but its
+video and audio; see `roost--scrawl-media'.  Signal a `user-error' for
+what Roost won't attach: a folder, a file that isn't on this machine,
+which an agent can be given by its path, or more than
+`roost--attach-limit' bytes."
+  (setq file (directory-file-name (expand-file-name file)))
+  (when (file-remote-p file)
+    (user-error "%s is on %s already: give the agent its path there"
+                (file-local-name file) (file-remote-p file 'host)))
+  (let* ((files (roost--attachment-entries file))
+         ;; What a link points to, which is what Roost reads.
+         (size (apply #'+ (mapcar (lambda (entry)
+                                    ;; Not a pipe, say, which reading would
+                                    ;; wait on, with Emacs.
+                                    (unless (file-regular-p (cdr entry))
+                                      (user-error "Can't read %s as a file" (cdr entry)))
+                                    (file-attribute-size
+                                     (or (file-attributes (file-truename (cdr entry)))
+                                         (user-error "Can't read %s" (cdr entry)))))
+                                  files))))
+    (when (> size roost--attach-limit)
+      (user-error "%s is %s; Roost attaches up to %s at once" (file-name-nondirectory file)
+                  (file-size-human-readable size) (file-size-human-readable roost--attach-limit)))
+    files))
+
+(defun roost--attachment-entries (file)
+  "The files to copy for FILE, an absolute name; see `roost--attachment-files'."
+  (cond ((roost--scrawl-capture-p file)
+         (let ((top (file-name-nondirectory file)))
+           ;; Not hidden ones either, as Scrawl's own marks.
+           (mapcan (lambda (path)
+                     (unless (or (member (downcase (or (file-name-extension path) "")) roost--scrawl-media)
+                                 (string-prefix-p "." (file-name-nondirectory path)))
+                       (list (cons (concat top "/" (file-relative-name path file)) path))))
+                   (directory-files-recursively
+                    file "" nil (lambda (folder) (not (string-prefix-p "." (file-name-nondirectory folder))))))))
+        ((file-directory-p file)
+         (user-error "Roost attaches files and Scrawl captures, not folders"))
+        ((file-readable-p file) (list (cons (file-name-nondirectory file) file)))
+        (t (user-error "Can't read %s" file))))
+
+(defconst roost--attach-rate 100000
+  "Bytes a second Roost counts on to copy an attachment, at the least.
+A copy may take `roost-request-timeout' seconds and this long besides,
+so a large one over a slow link gets its time.")
+
+(defun roost--attach (task files success failure)
+  "Copy FILES, as (NAME . BYTES), to TASK's host in the background.
+Call SUCCESS with their path there, or FAILURE with a message.  NAMES
+share a first part, a file's or a folder's, which the host may number to
+keep it apart from those already there."
+  (let ((size (apply #'+ (mapcar (lambda (file) (length (cdr file))) files))))
+    ;; What was read, which may have grown since it was looked at.
+    (when (> size roost--attach-limit)
+      (user-error "The attachment is %s; Roost attaches up to %s at once"
+                  (file-size-human-readable size) (file-size-human-readable roost--attach-limit)))
+    (roost--request (roost--field task 'host) "attach"
+                    `((id . ,(roost--field task 'id))
+                      (files . ,(vconcat
+                                 (mapcar (lambda (file)
+                                           `((name . ,(car file))
+                                             (data . ,(base64-encode-string (cdr file) t))))
+                                         files))))
+                    (lambda (result) (funcall success (car (alist-get 'paths result))))
+                    failure
+                    (+ roost-request-timeout (/ size roost--attach-rate)))))
+
+(defun roost--attach-file (task file entries success failure)
+  "Copy FILE, whose ENTRIES `roost--attachment-files' lists, to TASK's host.
+It is copied in the background: call SUCCESS with what a prompt says of
+it, or FAILURE with a message.
+What it says is its path there; for a Scrawl capture, also where its
+contact sheet and frames are, and its summary."
+  (let ((summary (when (roost--scrawl-capture-p file)
+                   ;; Which names the capture where it was made.
+                   (string-trim (with-temp-buffer
+                                  (insert-file-contents (expand-file-name "summary.md" file))
+                                  (buffer-string))))))
+    ;; A byte past the limit at most, as it may have grown since: enough
+    ;; for `roost--attach' to refuse it, without reading all of it.
+    (roost--attach task (mapcar (lambda (entry)
+                                  (cons (car entry) (roost--file-bytes (cdr entry) (1+ roost--attach-limit))))
+                                entries)
+                   (lambda (path)
+                     (funcall success
+                              (if (not summary)
+                                  path
+                                (concat (format "A Scrawl recording of my screen, in %s: contact-sheet.png shows its keyframes, numbered as below, each in frames/; scrawl.json has the rest.\n\n"
+                                                path)
+                                        (roost--scrawl-summary-at summary file path)))))
+                   failure)))
+
+(defun roost--scrawl-summary-at (summary capture path)
+  "SUMMARY of Scrawl CAPTURE, naming its copy at PATH instead.
+Its first line names the capture where Scrawl made it, which may have
+moved since, or been reached through a link."
+  (dolist (name (delete-dups
+                 (delq nil (list (and (string-match "\\`\\[scrawl .* · \\(/[^]\n]*\\.scrawl\\)\\]" summary)
+                                      (match-string 1 summary))
+                                 (directory-file-name (expand-file-name capture))
+                                 (directory-file-name (file-truename capture)))))
+           summary)
+    (setq summary (string-replace name path summary))))
+
+(defconst roost--clipboard-png-script
+  "on run argv
+set f to open for access (POSIX file (item 1 of argv)) with write permission
+try
+write (the clipboard as «class PNGf») to f
+end try
+close access f
+end run"
+  "AppleScript writing the clipboard's image as PNG to a file, or nothing.")
+
+(defun roost--clipboard-image ()
+  "The image on the clipboard as PNG bytes, or nil."
+  (or (when-let* ((data (ignore-errors (gui-get-selection 'CLIPBOARD 'image/png)))
+                  ((stringp data))
+                  ((not (string-empty-p data))))
+        (if (multibyte-string-p data) (encode-coding-string data 'raw-text) data))
+      (when (eq system-type 'darwin)
+        (let ((file (make-temp-file "roost-clipboard-" nil ".png")))
+          (unwind-protect
+              (when (eq 0 (call-process "osascript" nil nil nil "-e" roost--clipboard-png-script file))
+                (let ((data (roost--file-bytes file)))
+                  (unless (string-empty-p data) data)))
+            (delete-file file))))))
+
+(defun roost--attach-image (task png success failure)
+  "Copy image PNG, its bytes, to TASK's host in the background.
+Call SUCCESS with its path there, or FAILURE with a message."
+  (roost--attach task (list (cons (format-time-string "clipboard-%Y%m%d-%H%M%S.png") png))
+                 success failure))
+
+(defvar roost--attachment-count 0
+  "Attachments begun in this Emacs, which numbers each one's place in a draft.")
+
+(defun roost--attachment-placeholder (id name)
+  "What a draft shows of attachment ID, NAME, while it is copied."
+  (propertize (format "[Copying %s…]" name)
+              'roost-attachment id 'roost-attachment-state 'copying 'font-lock-face 'shadow))
+
+(defvar-local roost--attachments-copying nil
+  "This draft's attachments still copying, by number.
+A placeholder of one not among them, as undo brings back, is stale.")
+
+(defun roost--attachment-done (buffer id text &optional error)
+  "Put TEXT in place of attachment ID's placeholder in draft BUFFER.
+With ERROR, the attachment, named TEXT, failed to copy: put a note of
+that there instead, which stays until you delete it."
+  (when error
+    (message "Roost could not attach %s: %s" text error))
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq roost--attachments-copying (delq id roost--attachments-copying))
+      (save-restriction
+        (widen)
+        ;; Each copy of it you made, and none if you deleted it meanwhile.
+        (let (start)
+          (while (setq start (roost--attachment-placeholder-at id))
+            (let* ((end (or (next-single-property-change start 'roost-attachment) (point-max)))
+                   (new (if error
+                            (propertize (format "[Not attached: %s: %s]" text error)
+                                        'roost-attachment id 'roost-attachment-state 'failed
+                                        'font-lock-face 'error)
+                          text))
+                   (point (point)))
+              ;; A step of its own to undo, apart from your writing.
+              (undo-boundary)
+              (goto-char start)
+              (delete-region start end)
+              (insert new)
+              (undo-boundary)
+              (goto-char (cond ((< point start) point)
+                               ((>= point end) (+ point (- (length new) (- end start))))
+                               (t start))))))))))
+
+(defun roost--attachment-placeholder-at (id)
+  "Where a placeholder of attachment ID, still copying, starts, or nil."
+  (let ((position (point-min)) found)
+    (while (and (not found)
+                (setq position (text-property-any position (point-max) 'roost-attachment id)))
+      (if (eq (get-text-property position 'roost-attachment-state) 'copying)
+          (setq found position)
+        (setq position (or (next-single-property-change position 'roost-attachment) (point-max)))))
+    found))
+
+(defun roost--attachment-states ()
+  "The states of the draft's attachments not yet in it.
+`copying', `failed', or `stale' for the placeholder of a copy since done."
+  (let ((position (point-min)) states)
+    (while (setq position (text-property-not-all position (point-max) 'roost-attachment-state nil))
+      (let ((state (get-text-property position 'roost-attachment-state)))
+        (push (if (and (eq state 'copying)
+                       (not (memq (get-text-property position 'roost-attachment)
+                                  roost--attachments-copying)))
+                  'stale
+                state)
+              states))
+      (setq position (or (next-single-property-change position 'roost-attachment-state) (point-max))))
+    states))
+
+(defun roost--send-attach-start (task name copy)
+  "Attach NAME to the draft for TASK: a placeholder now, COPY's result later.
+COPY is called with TASK, a success and a failure function, and copies
+in the background.  An error it signals at once, as for a file too big,
+or a quit while it reads the file, leaves no placeholder."
+  (let ((buffer (current-buffer))
+        (id (cl-incf roost--attachment-count))
+        (from (point)))
+    (roost--send-insert-attachment (roost--attachment-placeholder id name))
+    (push id roost--attachments-copying)
+    (let ((to (point)))
+      (condition-case err
+          (funcall copy task
+                   (lambda (text) (roost--attachment-done buffer id text))
+                   (lambda (error) (roost--attachment-done buffer id name error)))
+        ((error quit)
+         (setq roost--attachments-copying (delq id roost--attachments-copying))
+         ;; All it inserted, the line it broke included.
+         (delete-region from to)
+         (signal (car err) (cdr err)))))))
+
+(defun roost--send-insert-attachment (text)
+  "Insert TEXT, about an attachment, at point in the draft, on lines of its own.
+What followed point goes on the line after it, where point goes too: on
+an empty line, that stays empty, to write on."
+  (unless (bolp) (insert "\n"))
+  (insert text "\n"))
+
+(defun roost--read-attachment ()
+  "Read a file or Scrawl capture to attach; \\`M-n' gives the newest capture.
+It is on this machine: the question starts here, not in a remote task's
+worktree."
+  (let ((default-directory (if (file-remote-p default-directory)
+                               (expand-file-name "~/")
+                             default-directory)))
+    ;; Expanded here, where a name you typed was meant.
+    (expand-file-name (read-file-name "Attach file or Scrawl capture: " nil (roost--scrawl-latest) t))))
+
+(defun roost-send-attach (file)
+  "Attach FILE to the drafted prompt.
+Roost copies it to the task's host in the background, where the agent
+can read it, and puts its path in place of \"[Copying FILE…]\", or a
+note that it failed.  For a Scrawl capture's folder (\\`M-n' gives the
+newest), it copies all but its video and audio, and adds its summary.
+The copies go when the task does."
+  (interactive (progn (roost--attaching-task) (list (roost--read-attachment))))
+  (roost--send-attach-file file (roost--attachment-files file)))
+
+(defun roost--attaching-task ()
+  "The task of the prompt draft you are in, which you attach to."
+  (or roost--send-task (user-error "Not in a prompt draft; M-x roost-attach starts one")))
+
+(defun roost--send-attach-file (file entries)
+  "Attach FILE, whose ENTRIES `roost--attachment-files' lists, to the draft."
+  (roost--send-attach-start (roost--attaching-task) (file-name-nondirectory (directory-file-name file))
+                            (lambda (task success failure)
+                              (roost--attach-file task file entries success failure))))
+
+(defun roost--send-attach-png (png)
+  "Attach PNG, an image's bytes, to the draft."
+  (roost--send-attach-start (roost--attaching-task) "the image"
+                            (lambda (task success failure)
+                              (roost--attach-image task png success failure))))
+
+(defun roost-send-attach-image ()
+  "Attach the image on the clipboard to the drafted prompt.
+Roost copies it to the task's host as a PNG file and adds its path; see
+`roost-send-attach'."
+  (interactive)
+  (roost--attaching-task)
+  (roost--send-attach-png (or (roost--clipboard-image) (user-error "No image on the clipboard"))))
+
+(defun roost--send-yank-image (_type png)
+  "Attach PNG, an image `yank-media' found on the clipboard, to the draft."
+  (roost--send-attach-png (if (multibyte-string-p png) (encode-coding-string png 'raw-text) png)))
+
+;;;###autoload
+(defun roost-attach (files &optional task)
+  "Draft a prompt to TASK attaching FILES, a file name or a list of them.
+In Dired, FILES are the marked files.  Roost copies each to the task's
+host and adds its path; see `roost-send-attach'.  TASK is the task of
+the current terminal or worktree file, or one you choose.  Roost checks
+them all before copying any."
+  (interactive (list (if (derived-mode-p 'dired-mode)
+                         (dired-get-marked-files)
+                       (roost--read-attachment))))
+  ;; Expanded here: the draft has a directory of its own.
+  (setq files (mapcar #'expand-file-name (if (stringp files) (list files) files)))
+  (let ((entries (mapcar #'roost--attachment-files files)))
+    (setq task (roost--choose task))
+    (roost--send-draft task)
+    ;; After what the draft holds, and in a new one, under a line to write on.
+    (let ((at (copy-marker (point))))
+      (goto-char (point-max))
+      (if (bobp) (insert "\n\n") (unless (bolp) (insert "\n")))
+      (cl-mapc #'roost--send-attach-file files entries)
+      (goto-char at))))
 
 ;;;; Review notes
 

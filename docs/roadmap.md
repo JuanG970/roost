@@ -150,10 +150,12 @@ the last two are worth trying once those show what the panel has room for.
 - **An attach command for other terminals.** Copy the `ssh -t … tmux
   attach` that reaches a task's real terminal, for a phone's SSH app or
   another machine, for every agent rather than Claude only.
-- **Images and files for remote tasks.** An agent on a remote host can't see
-  this machine's clipboard. Copy a file or a clipboard image to the task's
-  host and put its path in the prompt. cmux and Orca upload to remote
-  sessions.
+- **Attachments when starting a task, and straight from Scrawl.** `C-c C-a`
+  attaches a file to a prompt for a running task; the new task draft could
+  take one too, copied once the task exists. Scrawl sends a capture of a dev
+  site to the OpenCode session working on it; given a command to run
+  instead, it could reach the task whose worktree serves that page. cmux and
+  Orca upload to remote sessions.
 - **Resuming a host's tasks after it restarts.** After a reboot, each task
   waits for `s`. Offer to resume them all when a host's tmux server is
   gone. Herdr resumes agents when it restores a session; workmux has

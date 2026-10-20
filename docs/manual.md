@@ -338,6 +338,21 @@ terminal, it opens in a window below.
 `M-x roost-discard-notes` drops a task's notes unsent. In a task's panel, `e`
 also drafts a prompt holding them.
 
+In a prompt draft (`e` or `@`): `C-c C-c` sends, `C-c C-k` cancels, `C-c C-a`
+attaches a file from this machine and `C-c C-v` the image on the clipboard (as does
+`M-x yank-media`, where Emacs reads images from the clipboard). Roost copies
+an attachment to the task's host in the background, under `attachments` in its
+state directory there, where the agent can read it. Meanwhile the draft shows
+`[Copying shot.png…]`, and you can go on writing; the path takes its place, or
+a note that it failed, which you delete before sending. `C-c C-c` waits until
+none is left copying. Agents read a task's attachments without asking: Roost
+starts Claude with `--add-dir` for them, and its OpenCode plugin adds a rule
+allowing them to each agent, after OpenCode has read your config, so your
+permission settings stand for every other folder. The copies go when the task does. For the folder of a [Scrawl](https://scrawl.kitlangton.com)
+capture (`M-n` at the prompt gives the newest), Roost copies all of it but its
+video and audio, and adds its summary. `M-x roost-attach` drafts a
+prompt with a file attached, or with the files marked in Dired.
+
 In the new task draft: `C-c C-c` creates, `C-c C-k` cancels, and `C-c C-p`,
 `C-c C-a`, `C-c C-b` and `C-c C-n` change the project, agent, starting ref and
 name. `C-c C-t` starts from a GitHub issue (with `gh` on the project's host). An
