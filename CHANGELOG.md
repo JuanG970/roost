@@ -20,6 +20,18 @@ Since 0.9.0:
   weeks; your index and branches are left alone. Nothing to do when
   upgrading; tasks you already have say `not looked at` until you open
   them with `r`.
+- `M-x roost-workload` shows, for today and each day of the past week, the
+  most agents that worked at once, how long they worked, and how long they
+  waited on you, to see how many you can keep up with. Past that, a day with
+  more agents shows more waiting for each hour of work. Each host keeps 30
+  days of task status changes for it, under `history` in its state
+  directory. An agent already running when you upgrade is counted once you
+  stop and resume it (`K`, then `s`).
+- The task panel shows your latest prompt under the task's own, so after a
+  few turns it still says where you left off. Claude and Codex tasks have
+  it, since their hooks say what you send; Pi and OpenCode tasks show only
+  the prompt they started with. A task already running when you upgrade
+  shows it once you stop and resume it (`K`, then `s`).
 - `roost-doctor` asks for Claude Code 2.1.78 or newer on each host. Older
   releases don't know the `StopFailure` hook, so they open a task with a
   Settings Error and then skip all of Roost's hooks, leaving the task
@@ -33,6 +45,12 @@ Since 0.9.0:
   as the turn ends. Codex 0.163.0 and later report it when a turn stops;
   Roost used to find it in Codex's session files, and still does for older
   Codex. Nothing to do when upgrading.
+- See how much a task gives you to read before you open Magit. The task
+  panel counts new files in its lines and files, and names the top-level
+  directories its changes are in. A task whose changes reach 400 lines, 10
+  files or 3 top-level directories gets a dim `±` after its name in the
+  sidebar and dashboard; it doesn't count as waiting. Set
+  `roost-large-change` to mark at other sizes, or nil for no mark.
 - Start a task from more places. `roost-new-task` on an error in a
   compilation buffer, or a match in a grep buffer, quotes that line. With
   Embark, `roost-new-task-from-region`, `-from-file`, `-from-url` and

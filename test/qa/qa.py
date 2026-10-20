@@ -1192,11 +1192,20 @@ def send(qa, repo):
     open_task(qa, name)
     qa.keys("C-c r e")
     qa.wait("the prompt", lambda s: s["prompt"])
-    qa.step("A prompt to send", expect=[("it names the task", lambda s: name in (s["prompt"] or ""))])
+    qa.step("A prompt to send", expect=[
+        ("it names the task", lambda s: name in (s["prompt"] or "")),
+        # Its first prompt is the task's own, which the panel shows already.
+        ("the panel has no latest prompt yet", lambda s: "Say hi" in panel_text(qa, s)
+         and "Your latest prompt" not in panel_text(qa, s))])
     qa.type("How are you?\r")
     qa.wait("the agent to get it", lambda s: any("PROMPT How are you?" in w["text"] for w in terminals(s)))
     qa.status(name, "ready", "idle")
     qa.step("Sent", expect=[("the echo area says so", lambda s: "Sent to " + name in (s["echo"] or ""))])
+    latest = lambda s: re.search(r"Your latest prompt\n\s*How are you\?", panel_text(qa, s))
+    qa.wait("the panel to hear it", latest)
+    qa.step("The panel shows what you last said", expect=[
+        ("under the task's prompt", lambda s: latest(s) and panel_text(qa, s).index("Say hi")
+         < panel_text(qa, s).index("Your latest prompt"))])
 
 
 def attached(text, name):
@@ -1363,6 +1372,31 @@ def search(qa, repo):
     qa.keys("RET")
     qa.wait("its terminal", lambda s: (s.get("task") or {}).get("name") == name and selected_terminal(s))
     qa.step("RET opens its task", expect=[("its panel beside it", lambda s: panel_text(qa, s).startswith(name))])
+
+
+def workload_text(qa, screen):
+    return (qa.window(screen, "roost-workload-mode") or {}).get("text", "")
+
+
+@journey("How long agents worked and waited on you")
+def workload(qa, repo):
+    start_task(qa, "Say what each note is for")
+    qa.keys("M-x")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type("roost-workload\r")
+    qa.wait("the workload", lambda s: "Week" in workload_text(qa, s))
+    qa.step("Today and each day of the past week", expect=[
+        ("an agent worked today", lambda s: re.search(r"^Today +[1-9]", workload_text(qa, s), re.M)),
+        ("six days before it", lambda s: len(re.findall(r"^(Yesterday|\w{3} \d+ \w{3}) ", workload_text(qa, s),
+                                                         re.M)) == 6),
+        ("the week too", lambda s: re.search(r"^Week +[1-9]", workload_text(qa, s), re.M)),
+        ("it says what it counts", lambda s: "time away" in workload_text(qa, s)),
+        ("it is selected", lambda s: qa.window(s, "roost-workload-mode")["selected"])])
+    qa.keys("g")
+    qa.wait("the workload again", lambda s: "Week" in workload_text(qa, s))
+    qa.step("g asks the hosts again")
+    qa.keys("q")
+    qa.step("q puts it away", expect=[("it is gone", lambda s: not qa.window(s, "roost-workload-mode"))])
 
 
 @journey("Open a task with a question left open")
@@ -1857,6 +1891,27 @@ def merged(qa, repo):
         ("its branch is gone", lambda s: not qa.git(repo, "branch", "--list", branch))])
 
 
+@journey("A large change")
+def large(qa, repo):
+    """A task whose changes reach roost-large-change's sizes has a dim ± on
+    its row, and its panel says how large they are and where; it waits for
+    nothing more than another task would."""
+    name = new_task(qa, "ask sh -c \"mkdir -p docs src test && seq 450 > src/long.txt"
+                        " && echo a > docs/a.md && echo b > test/b.py\"")
+    answer_yes(qa, name)
+    qa.wait("its size", lambda s: "In docs/, src/ and test/" in panel_text(qa, s))
+    qa.step("Marked", expect=[
+        ("the panel counts the lines of its new files", lambda s: "± 3 files +452 −0" in panel_text(qa, s)),
+        ("its row in the sidebar has the mark", lambda s: "±" in sidebar_row(qa, s, name)),
+        ("and no status, once seen", lambda s: (qa.task(s, name) or {}).get("status") == "idle"
+         and sidebar_row(qa, s, name).endswith("±"))])
+    qa.keys("C-c r S")
+    qa.wait("the dashboard", lambda s: (qa.window(s, "roost-dashboard-mode") or {}).get("selected"))
+    qa.step("The dashboard marks it too", expect=[
+        ("its row has the mark", lambda s: any(name[:12] in line and "±" in line for line in
+                                               qa.window(s, "roost-dashboard-mode")["text"].splitlines()))])
+
+
 def github(qa, **canned):
     """Have the fake GitHub say CANNED: list.json and reviews.json, as JSON."""
     for name, value in canned.items():
@@ -2073,9 +2128,10 @@ def dropped(qa, repo):
 
 
 JOURNEYS = [sweep, answer, fold, resize, merge, review, since_looked, panes, shell,
-            dashboard, stop_resume, retire, send, attach, update, conflicts, restart, search, question_left, walk_away,
+            dashboard, stop_resume, retire, send, attach, update, conflicts, restart, search, workload, question_left,
+            walk_away,
             frames, org, drafts, tabs,
-            forget, rename, fork, other_branch, merged, pull_request, exits, unreachable, scrollback, fleet, dropped]
+            forget, rename, fork, other_branch, merged, large, pull_request, exits, unreachable, scrollback, fleet, dropped]
 
 
 def main():

@@ -81,20 +81,26 @@ What changed since you last looked, once among them, is in Roost now.
   minutes.
 - **Evidence beside the files in the task panel.** Show what a decision can
   rest on without opening the diff: the pull request's checks, the
-  reviewer's findings still open, the size of the change, and any paths
-  marked as risky (below). That's enough to finish a small change that
+  reviewer's findings still open, and any paths marked as risky (below),
+  beside the size of the change, which it gives already. That's enough to finish a small change that
   passed everything, or to pick the one worth reading closely; the file list
   and Magit stay as they are. Before a pull request, the agent's own test
   output stays in its terminal. From the Claude Code team's review, where
   people judge a change by its evidence more than by its lines.
-- **Marks for risky changes.** A list of paths per project, in
-  `.dir-locals.el` or the repository's CODEOWNERS, marks tasks whose changes
-  touch them, such as CI workflows, authentication or releases, in the
-  sidebar and dashboard. That says which diffs to read closely, whether or
-  not you read the rest. Large changes get a mark too: the Claude Code team
-  finds that most pull requests over 1,000 lines have findings. Roost only
-  marks; it approves and merges nothing on its own. From the same post's
-  risk tiers, which come from the change, not its author.
+- **Marks for risky changes.** Large changes have theirs: a dim `±` on the
+  row once a task's changes reach 400 lines, 10 files or 3 top-level
+  directories (`roost-large-change`), with the size in the task panel.
+  Those are where studies of people reviewing code find that they catch
+  less as changes grow and spread, rather than the 1,000 lines past which
+  the Claude Code team's AI reviewer usually finds something. What's left
+  is risky paths: a list per project, in `.dir-locals.el` or drawn from the
+  repository's CODEOWNERS, marks tasks whose changes touch them, such as CI
+  workflows, authentication or releases, in the sidebar and dashboard. That
+  says which diffs to read closely, and with the size, which hour of
+  reading. CODEOWNERS often gives every path an owner, so it would need a
+  list of its own of the paths that count. Roost only marks; it approves
+  and merges nothing on its own. From the same post's risk tiers, which
+  come from the change, not its author.
 
 ## Worth trying
 
@@ -265,6 +271,10 @@ Larger, or undecided.
   a new task's first one can, shows `ready` while Codex works.
 - A Pi extension's dialog names only its title ("Run this command?"), not
   what it asks about, so that is all the request shows.
+- The task panel shows your latest prompt only for Claude Code and Codex,
+  whose `UserPromptSubmit` hooks carry it. Roost's Pi extension and
+  OpenCode plugin report no prompt, though Pi's `before_agent_start` event
+  and OpenCode's user messages have it.
 - While you write a commit message in a remote task, Magit can't show the
   diff beside it ("Error showing commit diff"); the commit goes through.
   The bug is Magit's, with any TRAMP method: from a linked worktree's Git

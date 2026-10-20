@@ -44,6 +44,8 @@ WORKTREE = "/work/task"
 STATE = "/state"
 HOME = "/home/user"
 TASK_ID = "0123456789abcdef"
+# The prompt a live session's task starts with: see claude_contract.py.
+PROMPT = "Reply with the single word PONG."
 RUN_ID = "run"
 # When a replay starts: times in a capture count from its first event, and
 # the helper takes a time of 0 for one it never noted.
@@ -51,7 +53,7 @@ EPOCH = 1e9
 # What stands in for what a capture leaves out: see `withhold`.
 WITHHELD = "(left out of the capture)"
 # What each event's `then` records of the task.
-FIELDS = ("status", "lastEvent", "request", "error", "lastReply", "agentSession")
+FIELDS = ("status", "lastEvent", "request", "error", "lastReply", "lastPrompt", "agentSession")
 # Ids an agent makes up, as a pattern and the stand-in's form.
 IDS = ((re.compile(r"(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])"),
         "00000000-0000-4000-8000-%012d"),
@@ -127,7 +129,7 @@ def replay(meta, entries):
             mock.patch.object(roost.time, "time", lambda: clock[0]):
         store = roost.Store(root)
         task = dict(id=TASK_ID, agent=meta["agent"], command=[meta["agent"]], status="starting",
-                    runId=RUN_ID, repo=REPO, worktree=WORKTREE, branch="roost/capture",
+                    runId=RUN_ID, repo=REPO, worktree=WORKTREE, branch="roost/capture", prompt=PROMPT,
                     programStatus=bool(meta.get("programStatus")), startedAt=roost.now(),
                     updatedAt=roost.now())
         store.save(task)

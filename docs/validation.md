@@ -33,6 +33,25 @@ happened in a section below:
 8. Narrow and widen the frame, and open a second one: the sidebar and panel
    follow.
 
+## Size and spread — 2026-10-20
+
+- **The question.** Whether a task's size can come from what the helper
+  already reads, and whether its row mark reads as a fact rather than
+  something waiting.
+- **No new Git calls.** The size comes from the `git diff --numstat` and
+  `git ls-files --others` the file list already ran, counted before the
+  list is cut to 50. Lines of untracked files are counted in Python, as Git
+  would once they were added: none for a binary file or one over a
+  megabyte. On this branch, 9 files measured in 37 ms. In a scratch
+  repository with 2,000 untracked files of 10 KB, counting their lines
+  added 50 ms to the 25 the listing took.
+- **`make qa`**, with a new journey whose agent writes 452 lines in
+  `docs/`, `src/` and `test/`: 166 steps, none with problems. The sidebar
+  and dashboard show a dim `±` after the name, the panel `± 3 files +452
+  −0` and `In docs/, src/ and test/`, and once seen the task has no status
+  word and isn't counted waiting. Every screenshot looked at; one showed
+  an empty new file as `1 file +0 −0`, which now reads `1 file`.
+
 ## Old Claude Code and Roost's hooks — 2026-10-20
 
 - **The question.** Orca's source says Claude Code 1.0.23 through 2.1.100

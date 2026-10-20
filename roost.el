@@ -301,6 +301,18 @@ as they are."
   :type '(choice (const :tag "Merge commit" merge)
                  (const :tag "One squashed commit" squash)))
 
+(defcustom roost-large-change '(:lines 400 :files 10 :directories 3)
+  "How large a task's changes get before its row is marked ±.
+A task is marked once its changes reach any of these: `:lines', lines
+added and removed together; `:files', files changed; `:directories',
+top-level directories that hold changed files.  They count from where
+the task's work leaves its integration branch, uncommitted work and
+new files included.  Leave one out to mark by the others, or set this
+to nil to mark none.  Reviews of larger and more spread-out changes
+find less and take longer; the numbers are rough."
+  :type '(choice (const :tag "Mark none" nil)
+                 (plist :tag "Mark at" :options ((:lines natnum) (:files natnum) (:directories natnum)))))
+
 (defcustom roost-program-status nil
   "Whether Roost reads the status an agent reports to its terminal.
 Claude Code 2.1.295, Codex 0.163.0 and Pi 1.1.0 and later report
@@ -412,6 +424,9 @@ As `roost--pr-verdict' has it, or nil, for notifications.")
 (defvar roost--seen (make-hash-table :test 'equal)
   "For each task key, its `updatedAt' when you last saw its agent.
 A ready agent you have seen since its last event is no longer waiting.")
+(defvar roost--turns-sent (make-hash-table :test 'equal)
+  "For each task key, the turn sent to its host that its record lacks yet.
+See `roost--report-turn'.")
 (defvar roost--remembered-hosts nil)
 (defvar roost--hosts-loaded nil)
 (defvar roost--remembered-projects nil)
@@ -836,8 +851,8 @@ and a newer notification about TASK replaces it."
         (t (message "%s: %s" title body))))
 
 (defconst roost--measured-fields
-  '(diff dirty files ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging landed
-    conflicts pr sinceLooked)
+  '(diff dirty files size ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging
+    landed conflicts pr sinceLooked)
   "A task's fields its host measures for each reply, such as Git statistics.
 They are as new as the reply, whatever its `updatedAt': its pull
 request too, which the host records as it finds one on GitHub.")
@@ -904,8 +919,8 @@ before, which would count again what you have looked at since."
     ;; Quiet polls skip Git and the latest reply; keep the last full refresh's.
     ;; Not what GitHub said of a pull request since recorded otherwise, as
     ;; by another Emacs: closed, or another in its place.
-    (dolist (field '(diff dirty files ahead behind worktreeMissing prStatus unpushed lastMessage gitStamp agentWork
-                            merging landed conflicts sinceLooked))
+    (dolist (field '(diff dirty files size ahead behind worktreeMissing prStatus unpushed lastMessage gitStamp
+                            agentWork merging landed conflicts sinceLooked))
       (unless (or (assoc field task)
                   (and (eq field 'prStatus)
                        (not (equal (roost--field task 'pr) (roost--field old 'pr)))))
@@ -949,6 +964,8 @@ before, which would count again what you have looked at since."
                        task)))
     (when (and previous (not (equal previous status)))
       (roost--run-task-hook 'roost-task-status-functions task previous status))
+    (when (gethash key roost--tasks)
+      (roost--report-turn task))
     ;; Another pull request merged, as a second one on the task, is another
     ;; merge, at another head or into another branch.
     (dolist (merge (roost--pr-merges task))
@@ -1040,6 +1057,7 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
                  (remhash key roost--statuses)
                  (remhash key roost--pr-verdicts)
                  (remhash key roost--seen)
+                 (remhash key roost--turns-sent)
                  (remhash key roost--merges-reported)
                  (roost--remove-notes (lambda (note) (equal (roost--note-key note) key)))))
              roost--tasks)
@@ -1165,7 +1183,8 @@ Hosts in `roost-hosts' are watched until you take them out of it."
       (dolist (task tasks)
         (remhash (roost--key task) roost--tasks)
         (remhash (roost--key task) roost--statuses)
-        (remhash (roost--key task) roost--pr-verdicts))
+        (remhash (roost--key task) roost--pr-verdicts)
+        (remhash (roost--key task) roost--turns-sent))
       (remhash host roost--errors)
       (remhash host roost--failures)
       (roost--redraw)
@@ -5084,6 +5103,42 @@ it changes nothing, as it does nothing to the pull request."
   (when (roost--seen-p task)
     (roost--pr-verdict task t)))
 
+(defun roost--turn (task)
+  "What of TASK's pull request or work waits on you, as its status word, or nil.
+One of `roost--pr-turns' or \"conflicts\", as `roost--display-status'
+has it.  Its host notes it, for `roost-workload'."
+  (unless (roost--merged-p task)
+    (or (roost--pr-turn task) (and (roost--conflict-turn task) "conflicts"))))
+
+(defun roost--report-turn (task)
+  "Tell TASK's host when `roost--turn' changes for it, as its record has it.
+Only Emacs asks GitHub, and judges what it says: the host's history
+notes it beside what the agent did.  Not until the host has measured
+the task, and GitHub has said how its open pull request is, or a turn
+it had would seem to end."
+  (let ((key (roost--key task))
+        (turn (roost--turn task)))
+    (cond ((equal turn (roost--field task 'turn)) (remhash key roost--turns-sent))
+          ((equal turn (gethash key roost--turns-sent 'none)))
+          ((and (assq 'landed task)
+                (or (not (memq (roost--pr-state task) '(open draft))) (roost--field task 'prStatus)))
+           (puthash key turn roost--turns-sent)
+           (let ((sent (lambda ()
+                         (when (equal (gethash key roost--turns-sent 'none) turn)
+                           (remhash key roost--turns-sent)))))
+             (roost--request (roost--field task 'host) "turn"
+                             (list (cons 'id (roost--field task 'id)) (cons 'turn turn))
+                             ;; What its record says now, which another Emacs
+                             ;; may yet change: the next poll compares again.
+                             (lambda (record)
+                               (funcall sent)
+                               (when-let* ((cached (gethash key roost--tasks)))
+                                 (puthash key (cons (cons 'turn (roost--field record 'turn))
+                                                    (assq-delete-all 'turn (copy-sequence cached)))
+                                          roost--tasks)))
+                             ;; Sent again with the task's next news.
+                             (lambda (_) (funcall sent))))))))
+
 (defun roost--reviewer-name (reviewer)
   "How to name REVIEWER, a login or team slug that a review is asked of.
 GitHub's GraphQL API names Copilot's reviewer by its bot's login."
@@ -5559,10 +5614,12 @@ a task you never looked at."
           ;; You look in Magit, so without it there is no way to.
           ((and (fboundp 'magit-status) (assq 'diff task))
            (let ((diff (or (roost--field task 'diff) "")))
-             (cons (+ (if (string-match "\\([0-9]+\\) files? changed" diff)
-                          (string-to-number (match-string 1 diff))
-                        0)
-                      (seq-count (lambda (file) (alist-get 'untracked file)) (roost--field task 'files)))
+             (cons (or (alist-get 'files (roost--field task 'size))
+                       ;; From a helper that doesn't measure the size.
+                       (+ (if (string-match "\\([0-9]+\\) files? changed" diff)
+                              (string-to-number (match-string 1 diff))
+                            0)
+                          (seq-count (lambda (file) (alist-get 'untracked file)) (roost--field task 'files))))
                    nil))))))
 
 (defun roost--since-looked-text (task &optional short)
@@ -6169,28 +6226,86 @@ shows starts it again."
 COMPACT abbreviates commits ahead of and behind the integration branch.
 LISTED non-nil leaves out whether changes are uncommitted, for where
 the files are listed under labels that say so."
-  (let* ((diff (or (roost--field task 'diff) ""))
-         (count (lambda (pattern)
-                  (if (string-match (concat "\\([0-9]+\\) " pattern) diff)
-                      (string-to-number (match-string 1 diff))
-                    0)))
-         (files (funcall count "files? changed"))
-         ;; Git's statistics leave out files it does not track yet.
-         (new (seq-count (lambda (file) (alist-get 'untracked file)) (roost--field task 'files)))
+  (let* ((size (roost--field task 'size))
+         (diff (or (roost--field task 'diff) ""))
+         (count (lambda (field pattern)
+                  (cond (size (alist-get field size 0))
+                        ((string-match (concat "\\([0-9]+\\) " pattern) diff)
+                         (string-to-number (match-string 1 diff)))
+                        (t 0))))
+         (files (funcall count 'files "files? changed"))
+         (added (funcall count 'added "insertions?"))
+         (deleted (funcall count 'deleted "deletions?"))
+         ;; Its size counts every file, but Git's statistics leave out
+         ;; files it does not track yet.
+         (new (if size 0 (seq-count (lambda (file) (alist-get 'untracked file)) (roost--field task 'files))))
          (ahead (or (roost--field task 'ahead) 0))
          (behind (or (roost--field task 'behind) 0))
          (commits (delq nil (list (when (> ahead 0) (format (if compact "↑%d" "%d ahead") ahead))
                                   (when (> behind 0) (format (if compact "↓%d" "%d behind") behind))))))
     (string-join
      (delq nil (list (when (> files 0)
-                       (format "%d file%s +%d −%d" files (if (= files 1) "" "s")
-                               (funcall count "insertions?") (funcall count "deletions?")))
+                       (concat (format "%d file%s" files (if (= files 1) "" "s"))
+                               ;; Not for files with no lines, as a new one
+                               ;; that is empty, or binary.
+                               (unless (and size (= added 0) (= deleted 0))
+                                 (format " +%d −%d" added deleted))))
                      (when (> new 0)
                        (if (> files 0) (format "%d new" new)
                          (format "%d new file%s" new (if (= new 1) "" "s"))))
                      (when (and (roost--field task 'dirty) (not listed)) "uncommitted")
                      (when commits (string-join commits (if compact " " " · ")))))
      " · ")))
+
+(defun roost--large-change-p (task)
+  "Whether TASK's changes reach any of the sizes in `roost-large-change'."
+  (when-let* ((size (roost--field task 'size))
+              ((> (alist-get 'files size 0) 0)))
+    (seq-some (pcase-lambda (`(,key . ,count))
+                (when-let* ((limit (plist-get roost-large-change key)))
+                  (>= count limit)))
+              `((:lines . ,(+ (alist-get 'added size 0) (alist-get 'deleted size 0)))
+                (:files . ,(alist-get 'files size 0))
+                (:directories . ,(length (alist-get 'directories size)))))))
+
+(defun roost--size-summary (task)
+  "TASK's changed lines, files and top-level directories, or nil if none.
+As \"560 lines in 12 files, 4 top-level directories\"."
+  (when-let* ((size (roost--field task 'size))
+              (files (alist-get 'files size 0))
+              ((> files 0)))
+    (let ((lines (+ (alist-get 'added size 0) (alist-get 'deleted size 0)))
+          (directories (length (alist-get 'directories size))))
+      (concat (format "%d line%s in %d file%s" lines (if (= lines 1) "" "s") files (if (= files 1) "" "s"))
+              (when (> directories 0)
+                (format ", %d top-level director%s" directories (if (= directories 1) "y" "ies")))))))
+
+(defun roost--large-change-mark (task)
+  "The dim ± of TASK's row and panel when its changes are large, or nil.
+See `roost-large-change'."
+  (when (roost--large-change-p task)
+    (propertize "±" 'face 'roost-dim
+                'help-echo (concat "roost-large-change marks changes this large: "
+                                   (roost--size-summary task)))))
+
+(defun roost--large-change-echo (task)
+  "A line saying what TASK's ± stands for, for a row's help, or \"\"."
+  (if (roost--large-change-p task) (format "± %s\n" (roost--size-summary task)) ""))
+
+(defun roost--spread (task)
+  "Where TASK's changed files are, as \"In docs/, test/ and the top level\".
+Nil when none are in a directory.  The top level holds those that are
+in none."
+  (when-let* ((size (roost--field task 'size))
+              (directories (alist-get 'directories size)))
+    (let ((top (when (alist-get 'topLevel size) '("the top level"))))
+      (concat "In "
+              (if (> (length directories) 4)
+                  (string-join (cons (format "%d top-level directories" (length directories)) top) " and ")
+                (let ((places (append (mapcar (lambda (directory) (concat directory "/")) directories) top)))
+                  (concat (string-join (butlast places) ", ")
+                          (when (cdr places) " and ")
+                          (car (last places)))))))))
 
 (defconst roost--changed-files-shown 12
   "How many changed files a task panel lists before summing up the rest.")
@@ -6307,6 +6422,15 @@ Only ERR's first line fits there; the echo area and *Messages* have it all."
   "TASK's prompt, or nil when it was created without one."
   (let ((prompt (roost--field task 'task)))
     (unless (or (null prompt) (equal prompt (roost--field task 'name))) prompt)))
+
+(defun roost--latest-prompt (task)
+  "What you last sent TASK's agent, or nil.
+That is nil too while it is the prompt the task started with, for agents
+whose hooks don't say, and for tasks recorded by older helpers."
+  (let ((prompt (roost--field task 'lastPrompt)))
+    (when (stringp prompt)
+      (let ((prompt (string-trim prompt)))
+        (unless (string-empty-p prompt) prompt)))))
 
 (defconst roost--url-regexp
   "\\([*_~]*\\)\\(https?://[^[:space:]<>\"'`\ue000\ue001]+\\)"
@@ -6451,7 +6575,7 @@ keeps one process-wide registration per mode; a nil STATE removes it."
   "Turn off line numbers and wrapping that global modes enable in Roost buffers."
   (when (derived-mode-p 'roost-dashboard-mode 'roost-task-info-mode 'roost-compose-mode
                       'roost-send-mode 'roost-pr-mode 'roost-search-mode 'roost-doctor-mode
-                      'roost-note-box-mode)
+                      'roost-note-box-mode 'roost-workload-mode)
     (display-line-numbers-mode -1)
     (when (derived-mode-p 'roost-dashboard-mode 'roost-search-mode)
       (visual-line-mode -1)
@@ -6761,7 +6885,11 @@ the last column is kept for the truncation mark."
   (insert roost--gap (propertize title 'face 'roost-heading) "\n"))
 
 (defvar-local roost--show-full-prompt nil
-  "Non-nil when the task panel shows a long prompt in full.")
+  "The task's prompt when the task panel shows it in full, or nil.")
+
+(defvar-local roost--show-full-latest-prompt nil
+  "Your latest prompt when the task panel shows it in full, or nil.
+A different one starts folded when it arrives.")
 
 (defvar-local roost--expanded-reply nil
   "The reply expanded in a compact panel, or nil.
@@ -6792,6 +6920,20 @@ prompt is returned whole."
                               "…")
                     paragraph)))
     (if (equal (string-trim preview) (string-trim prompt)) prompt preview)))
+
+(defun roost--insert-prompt (prompt what full)
+  "Insert PROMPT, only its start when long, with a button for the rest.
+WHAT names the button, as for `roost--insert-toggle'.  FULL is the
+variable that holds the prompt shown in full, or nil."
+  (let ((preview (roost--prompt-preview prompt)))
+    (cond ((equal preview prompt)
+           (roost--insert-indented (roost--prose prompt)))
+          ((equal (symbol-value full) prompt)
+           (roost--insert-toggle "Collapse prompt" what (lambda () (set full nil)))
+           (roost--insert-indented (roost--prose prompt)))
+          (t
+           (roost--insert-indented (roost--prose preview))
+           (roost--insert-toggle "Show the whole prompt" what (lambda () (set full prompt)))))))
 
 (defun roost--insert-indented (text &optional face)
   "Insert TEXT wrapped and indented under a heading, adding FACE."
@@ -6929,17 +7071,15 @@ Windows showing the panel keep their scroll position, and the mark stays."
             (roost--insert-indented (roost--prose request))))
         (when-let* ((prompt (roost--prompt-text task)))
           (roost--insert-heading "Prompt")
-          (let ((preview (roost--prompt-preview prompt)))
-            (cond ((equal preview prompt)
-                   (roost--insert-indented (roost--prose prompt)))
-                  (roost--show-full-prompt
-                   (roost--insert-toggle "Collapse prompt" 'prompt
-                                         (lambda () (setq roost--show-full-prompt nil)))
-                   (roost--insert-indented (roost--prose prompt)))
-                  (t
-                   (roost--insert-indented (roost--prose preview))
-                   (roost--insert-toggle "Show the whole prompt" 'prompt
-                                         (lambda () (setq roost--show-full-prompt t)))))))
+          (roost--insert-prompt prompt 'prompt 'roost--show-full-prompt))
+        ;; Where you left off, which the terminal may have scrolled away.
+        (let ((prompt (roost--latest-prompt task)))
+          ;; Another one, or none, leaves the next to come folded.
+          (unless (equal prompt roost--show-full-latest-prompt)
+            (setq roost--show-full-latest-prompt nil))
+          (when prompt
+            (roost--insert-heading "Your latest prompt")
+            (roost--insert-prompt prompt 'latest-prompt 'roost--show-full-latest-prompt)))
         (when-let* (((not beside))
                     (reply (roost--last-message task))
                     (reply (roost--prose reply)))
@@ -6959,7 +7099,11 @@ Windows showing the panel keep their scroll position, and the mark stays."
                             'face 'roost-status-failed))
                ((not (assq 'diff task)) (propertize "Refreshing…" 'face 'roost-dim))
                ((string-empty-p changes) (propertize "No changes yet" 'face 'roost-dim))
-               (t (roost--fontify-changes changes))))
+               (t (concat (when-let* ((mark (roost--large-change-mark task))) (concat mark " "))
+                          (roost--fontify-changes changes)))))
+        (when-let* (((not (roost--field task 'worktreeMissing)))
+                    (spread (roost--spread task)))
+          (roost--insert-indented spread))
         (roost--insert-changed-files task width)
         (roost--insert-since-looked task)
         (if-let* ((notes (roost--notes-summary task)))
@@ -7254,8 +7398,10 @@ Refreshes are asynchronous; rendering uses only cached state.
 (defun roost--row-name (task &optional width face)
   "TASK's name in FACE for its row under its project, cut to WIDTH columns.
 When another task in the project has the same name, the start of its ID
-follows, dim, as in `roost-open-task' and tab names; cutting the name to
-fit keeps the ID."
+follows, dim, as in `roost-open-task' and tab names, and then a dim ±
+when its changes are large (`roost-large-change').  Cutting the name to
+fit keeps the ID, and the ± while a column of the name is left beside
+them: a row that narrow keeps its room for an urgent status."
   (let* ((name (roost--field task 'name))
          (id (roost--field task 'id))
          (twin (seq-some (lambda (other)
@@ -7264,7 +7410,11 @@ fit keeps the ID."
                                 (equal (roost--field other 'host) (roost--field task 'host))
                                 (equal (roost--field other 'repo) (roost--field task 'repo))))
                          (roost-tasks)))
-         (suffix (if (and twin id) (concat " " (substring id 0 (min 6 (length id)))) "")))
+         (suffix (if (and twin id) (concat " " (substring id 0 (min 6 (length id)))) ""))
+         (mark (roost--large-change-mark task))
+         (suffix (if (and mark (or (not width) (> width (+ (length suffix) 2))))
+                     (concat suffix " " mark)
+                   suffix)))
     (concat (propertize (if width
                             (truncate-string-to-width name (max 1 (- width (length suffix)))
                                                       nil nil "…")
@@ -7410,7 +7560,10 @@ The mark stays where it was."
             (dolist (task (cdr group))
               (let ((row (list 'roost-task (roost--key task) 'keymap roost--dashboard-row-map)))
                 (insert (apply #'propertize (roost--dashboard-row task layout width)
-                               'mouse-face 'highlight 'help-echo "mouse-1: open · mouse-3: actions" row)
+                               'mouse-face 'highlight
+                               'help-echo (concat (roost--large-change-echo task)
+                                                  "mouse-1: open · mouse-3: actions")
+                               row)
                         ;; Without `mouse-face', so each row lights up alone,
                         ;; but still the task's, for point and clicks there.
                         (apply #'propertize "\n" row))))))))
@@ -8068,10 +8221,11 @@ have seen that waits for nothing."
             (let ((row (list 'roost-task (roost--key task) 'keymap roost--dashboard-row-map)))
               (insert (apply #'propertize (roost--sidebar-row task width)
                              'mouse-face 'highlight
-                             'help-echo (format "%s\n%s · %s\nmouse-1: open · mouse-3: actions"
+                             'help-echo (format "%s\n%s · %s\n%smouse-1: open · mouse-3: actions"
                                                 (roost--field task 'name)
                                                 (roost--host-label host)
-                                                (or repo "?"))
+                                                (or repo "?")
+                                                (roost--large-change-echo task))
                              row)
                       ;; As in the dashboard: unhighlighted, still the task's,
                       ;; and the current task's band reaches the window's edge.
@@ -8359,6 +8513,280 @@ Beside a terminal, that turns off `roost-task-panel-mode'."
     (define-key transient-predicate-map (vector command) nil t))
   ;; Continue with the standard unloading.
   nil)
+
+;;;; Workload
+
+;; Each host's helper notes when each task's status changes: whether its
+;; agent works or waits on you.  From that, `roost-workload' measures how
+;; long agents worked, and how long they waited on you, each day.  Past
+;; what one person can supervise, another agent adds more waiting on you
+;; than work.
+
+(defconst roost--workload-days 7
+  "Days `roost-workload' shows, today among them.")
+
+(defconst roost--away 1800
+  "Seconds without a change on any host that count as time you were away.
+Agents waited then on nobody, as overnight, so `roost-workload' leaves
+such stretches out of the time they waited on you.")
+
+(defvar roost--workload-generation 0
+  "Counts `roost-workload's requests, so replies to earlier ones are ignored.")
+
+(defvar roost--workload nil
+  "What `roost-workload' shows, as a plist.
+:since and :now bound it, in seconds since the epoch, and :asked is
+when the histories asked for begin, `roost--away' before :since, to
+tell whether you were here at its start; :replies has each host's
+history, as (HOST . REPLY), REPLY being `pending' or
+\(error . MESSAGE) until it comes; :days and :week are what
+`roost--workload-tally' makes of it, :days as (START . TALLY) for each
+day, today first.")
+
+(defun roost--day-start (time &optional days)
+  "The start of the day of TIME, or of DAYS days after it, in seconds."
+  (let ((decoded (decode-time time)))
+    (setf (decoded-time-second decoded) 0
+          (decoded-time-minute decoded) 0
+          (decoded-time-hour decoded) 0
+          (decoded-time-day decoded) (+ (decoded-time-day decoded) (or days 0))
+          ;; Local time as it is that day, across a change to or from DST.
+          (decoded-time-dst decoded) -1
+          (decoded-time-zone decoded) nil)
+    (float-time (encode-time decoded))))
+
+(defun roost--history-waiting-p (status seen turn)
+  "Whether a task whose host noted STATUS, SEEN and TURN waited on you.
+As `roost--waiting-p' has it: its agent asks you something, or ended a
+turn, failed or exited since you last saw it; or once you have seen it,
+and it neither works nor asks, its pull request or work waits on you as
+TURN, one of `roost--pr-turns' or \"conflicts\", says.  One starting
+waits on you after `roost-startup-grace' seconds: see
+`roost--history-spans'."
+  (or (equal status "permission")
+      (and (member status '("ready" "failed" "crashed" "exited")) (not seen))
+      (and turn seen (not (member status '("starting" "running" "background" "permission"))))))
+
+(defun roost--history-spans (reply since)
+  "What each task in REPLY, a host's history from SINCE, did meanwhile.
+A list of (KIND START END), in seconds since the epoch: KIND is `work'
+while its agent worked and `wait' while it waited on you, a task's
+spans of one kind that follow each other being one.  A task's first
+change says what it was before; one that didn't change was as it is now.
+None start before the host's history begins: nothing was noted then."
+  (let ((now (alist-get 'now reply))
+        (since (max since (or (alist-get 'begun reply) (alist-get 'now reply))))
+        (changes (make-hash-table :test 'equal))
+        spans)
+    (dolist (change (alist-get 'changes reply))
+      (push change (gethash (alist-get 'id change) changes)))
+    (dolist (task (alist-get 'tasks reply))
+      (unless (gethash (alist-get 'id task) changes)
+        ;; As if it went at NOW, as it was until then.
+        (puthash (alist-get 'id task) (list `((at . ,now) (was . ,task) (status))) changes)))
+    (maphash
+     (lambda (_ list)
+       (let* ((list (reverse list))
+              (state (alist-get 'was (car list)))
+              (start since) (began since) last)
+         (dolist (change (append list '(nil)))
+           (let* ((end (if change (alist-get 'at change) now))
+                  (status (alist-get 'status state)))
+             (dolist (span (cond ((>= start end) nil)
+                                 ((member status '("running" "background")) `((work ,start ,end)))
+                                 ((equal status "starting")
+                                  (let ((waits (max start (+ began roost-startup-grace))))
+                                    (when (< waits end) `((wait ,waits ,end)))))
+                                 ((and status (roost--history-waiting-p status (alist-get 'seen state)
+                                                                        (alist-get 'turn state)))
+                                  `((wait ,start ,end)))))
+               (if (and last (eq (car last) (car span)) (= (nth 2 last) (nth 1 span)))
+                   (setcar (nthcdr 2 last) (nth 2 span))
+                 (push (setq last (copy-sequence span)) spans)))
+             (when change
+               (unless (equal (alist-get 'status change) status) (setq began end))
+               (setq state change start end))))))
+     changes)
+    spans))
+
+(defun roost--workload-present (times now)
+  "When you were here, as a list of (START . END), from TIMES things changed.
+Between two changes, or the last and NOW, `roost--away' seconds or more
+apart, you were away."
+  (let ((times (sort (cons now (copy-sequence times)) #'<)) present)
+    (while (cdr times)
+      (let ((from (car times)) (to (cadr times)))
+        (when (< (- to from) roost--away)
+          (if (and present (= (cdar present) from))
+              (setcdr (car present) to)
+            (push (cons from to) present))))
+      (setq times (cdr times)))
+    (nreverse present)))
+
+(defun roost--overlap (start end from to)
+  "Seconds START to END shares with FROM to TO."
+  (max 0 (- (min end to) (max start from))))
+
+(defun roost--workload-tally (spans present start end)
+  "What SPANS, from `roost--history-spans', add up to from START to END.
+A plist: :peak, the most agents that worked at once; :work, the seconds
+they worked; :wait, the seconds they waited on you while you were
+here, as PRESENT, from `roost--workload-present', has it; :longest, the
+longest any waited on you at a time while you were here."
+  (let ((work 0) (wait 0) (longest 0) (at-once 0) (peak 0) edges)
+    (pcase-dolist (`(,kind ,from ,to) spans)
+      (when (> (roost--overlap from to start end) 0)
+        (if (eq kind 'work)
+            (progn (cl-incf work (roost--overlap from to start end))
+                   (push (cons (max from start) 1) edges)
+                   (push (cons (min to end) -1) edges))
+          (let ((waited (apply #'+ (mapcar (lambda (here)
+                                             (roost--overlap (max from start) (min to end) (car here) (cdr here)))
+                                           present))))
+            (cl-incf wait waited)
+            (setq longest (max longest waited))))))
+    ;; One agent's work ending as another's starts is one at a time.
+    (dolist (edge (sort edges (lambda (a b) (or (< (car a) (car b))
+                                                (and (= (car a) (car b)) (< (cdr a) (cdr b)))))))
+      (setq peak (max peak (cl-incf at-once (cdr edge)))))
+    (list :peak peak :work work :wait wait :longest longest)))
+
+(defun roost--workload-compute ()
+  "Add to `roost--workload' what the hosts that replied say."
+  (let* ((since (plist-get roost--workload :since))
+         (now (plist-get roost--workload :now))
+         (replies (seq-keep (lambda (entry) (and (consp (cdr entry)) (not (eq (cadr entry) 'error))
+                                                 (cdr entry)))
+                            (plist-get roost--workload :replies)))
+         ;; From before SINCE; the tallies count only what follows it.
+         (spans (mapcan (lambda (reply)
+                          (roost--history-spans reply (or (plist-get roost--workload :asked) since)))
+                        replies))
+         (present (roost--workload-present
+                   (mapcan (lambda (reply) (mapcar (lambda (change) (alist-get 'at change))
+                                                   (alist-get 'changes reply)))
+                           replies)
+                   now)))
+    (setq roost--workload
+          (plist-put (plist-put roost--workload :week (roost--workload-tally spans present since now))
+                     :days (mapcar (lambda (day)
+                                     (let ((start (roost--day-start now (- day))))
+                                       (cons start (roost--workload-tally
+                                                    spans present start
+                                                    (min now (roost--day-start now (- 1 day)))))))
+                                   (number-sequence 0 (1- roost--workload-days)))))))
+
+(defvar-keymap roost-workload-mode-map
+  :doc "Keys for Roost's workload."
+  "g" #'roost-workload)
+
+(define-derived-mode roost-workload-mode special-mode "Roost Workload"
+  "How long agents worked and waited on you, each day.
+\\{roost-workload-mode-map}"
+  (setq-local truncate-lines nil word-wrap t)
+  (add-hook 'after-change-major-mode-hook #'roost--quiet-display 90 t)
+  (roost--evil-state 'roost-workload-mode roost-evil-state)
+  (roost--quiet-display))
+
+(defun roost--workload-duration (seconds)
+  "SECONDS as hours and minutes, or a dash for none."
+  (let ((minutes (round seconds 60)))
+    (cond ((and (= minutes 0) (> seconds 0)) "<1m")
+          ((= minutes 0) "–")
+          ((< minutes 60) (format "%dm" minutes))
+          (t (format "%dh %dm" (/ minutes 60) (% minutes 60))))))
+
+(defun roost--workload-row (label tally &optional face)
+  "A row of the workload table for LABEL, from TALLY, LABEL in FACE."
+  (let ((work (plist-get tally :work)) (wait (plist-get tally :wait)))
+    (concat (propertize (string-pad label 12) 'face face)
+            (format "%7s%10s%15s%10s%17s\n"
+                    (if (> (plist-get tally :peak) 0) (plist-get tally :peak) "–")
+                    (roost--workload-duration work) (roost--workload-duration wait)
+                    (roost--workload-duration (plist-get tally :longest))
+                    ;; Too little work to say.
+                    (if (< work 60) "–" (roost--workload-duration (* 3600 (/ wait work))))))))
+
+(defun roost--render-workload ()
+  "Redraw Roost's workload from `roost--workload'."
+  (when-let* ((buffer (if (derived-mode-p 'roost-workload-mode) (current-buffer) (get-buffer "*roost workload*"))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)
+            (replies (plist-get roost--workload :replies))
+            (today (plist-get roost--workload :now)))
+        (erase-buffer)
+        (insert (propertize "Workload" 'face 'roost-title) "\n\n")
+        (cond
+         ((null replies) (insert "No hosts to ask.\n"))
+         ((seq-some (lambda (entry) (eq (cdr entry) 'pending)) replies)
+          (insert (propertize "Asking each host…\n" 'face 'roost-dim)))
+         (t
+          (insert (propertize (format "%-12s%7s%10s%15s%10s%17s\n" "" "At once" "Worked" "Waited on you"
+                                      "Longest" "Per hour worked")
+                              'face 'roost-dim))
+          (pcase-dolist (`(,start . ,tally) (plist-get roost--workload :days))
+            (insert (roost--workload-row
+                     (cond ((= start (roost--day-start today)) "Today")
+                           ((= start (roost--day-start today -1)) "Yesterday")
+                           (t (format-time-string "%a %-d %b" start)))
+                     tally)))
+          (insert (roost--workload-row "Week" (plist-get roost--workload :week) 'roost-heading))
+          (pcase-dolist (`(,host . ,reply) replies)
+            (when (eq (car-safe reply) 'error)
+              (insert "\n" (propertize (format "%s didn't answer, so it isn't counted: %s"
+                                               (roost--host-label host)
+                                               (car (last (split-string (cdr reply) "\n" t))))
+                                       'face 'roost-status-failed)
+                      "\n")))
+          (insert "\n")
+          (let ((start (point)) (fill-column 72))
+            (insert (propertize
+                     (concat "At once is the most agents working at the same time.  Waited on you adds up "
+                             "the time agents asked you something, ended a turn or failed before you looked, "
+                             "or had a pull request or conflict for you; "
+                             (format "%d minutes with no change on any host count as time away, and are left out.  "
+                                     (/ roost--away 60))
+                             "Past what you can supervise, a day with more agents at once has more waiting "
+                             "on you for each hour they work.\n")
+                     'face 'roost-dim))
+            ;; Filled, rather than wrapped by the window with a mark at each break.
+            (fill-region start (point)))))
+        (goto-char (point-min))))))
+
+(defun roost--workload-reply (generation host reply)
+  "Take in HOST's REPLY to `roost-workload', and redraw once all have come.
+Unless GENERATION, of `roost--workload-generation', is past: `g' asked again."
+  (when-let* (((= generation roost--workload-generation))
+              (entry (assoc host (plist-get roost--workload :replies))))
+    (setcdr entry reply)
+    (unless (seq-some (lambda (entry) (eq (cdr entry) 'pending)) (plist-get roost--workload :replies))
+      (roost--workload-compute))
+    (roost--render-workload)))
+
+;;;###autoload
+(defun roost-workload ()
+  "Show how long agents worked and waited on you, today and each day before.
+Each host's history goes back a month, from when its helper was first
+this version; `roost-workload' shows a week.  Waiting on you counts
+agents that asked you something, ended a turn or failed before you
+looked, or whose pull request or work waited on you, while you were
+here: see `roost--away'."
+  (interactive)
+  (let* ((hosts (roost--hosts))
+         (now (float-time))
+         (since (roost--day-start now (- 1 roost--workload-days)))
+         (generation (cl-incf roost--workload-generation)))
+    (setq roost--workload (list :since since :asked (- since roost--away) :now now
+                                :replies (mapcar (lambda (host) (cons host 'pending)) hosts)))
+    (with-current-buffer (get-buffer-create "*roost workload*")
+      (unless (derived-mode-p 'roost-workload-mode) (roost-workload-mode)))
+    (unless hosts (roost--workload-compute))
+    (roost--render-workload)
+    (pop-to-buffer "*roost workload*")
+    (dolist (host hosts)
+      (roost--request host "history" `((since . ,(- since roost--away)))
+                      (lambda (reply) (roost--workload-reply generation host reply))
+                      (lambda (err) (roost--workload-reply generation host (cons 'error err)))))))
 
 ;;;; Setup check
 

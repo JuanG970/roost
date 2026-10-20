@@ -61,7 +61,13 @@ class Lifecycle(unittest.TestCase):
     def tearDown(self):
         roost.tmux(self.socket, "kill-server", check=False)
         tmux_socket_path(self.socket).unlink(missing_ok=True)
-        self.temp.cleanup()
+        try:
+            self.temp.cleanup()
+        except OSError:
+            # A hook the agent ran as tmux killed it may still be noting
+            # its event, as in the history.
+            time.sleep(0.5)
+            shutil.rmtree(self.temp.name, ignore_errors=True)
 
     def git(self, *args, cwd=None):
         return roost.git(cwd or self.repo, *args).stdout.strip()
@@ -860,13 +866,55 @@ class Lifecycle(unittest.TestCase):
         self.assertIn(dict(path="new file", untracked=True), files)
         self.assertIn(dict(path="greeting", added=2, deleted=0, uncommitted=True), files)
         # A list cut short keeps the files not yet committed.
-        self.assertEqual([file["path"] for file in roost.changed_files(wt, "main", {"image"}, limit=2)],
+        self.assertEqual([file["path"] for file in roost.changed_files(wt, "main", {"image"}, limit=2)[0]],
                          ["image", "new file"])
         self.assertEqual(roost.status_paths("R  new\0old\0 M a b\0?? c\0"), {"new", "a b", "c"})
         # Like the other statistics, the list is never saved in the record.
         store = roost.Store(str(self.state))
         store.save(dict(store.read(task["id"]), files=files))
         self.assertNotIn("files", store.read(task["id"]))
+
+    def test_a_full_listing_measures_the_size_and_spread_of_the_changes(self):
+        (self.repo / "old").mkdir()
+        (self.repo / "old" / "kept").write_text("kept\n")
+        self.git("add", "old")
+        self.git("commit", "-q", "-m", "Add kept")
+        task = self.create()
+        wt = Path(task["worktree"])
+        (wt / "docs").mkdir()
+        (wt / "docs" / "guide.md").write_text("one\ntwo\nthree\n")
+        self.git("add", "docs", cwd=wt)
+        self.git("commit", "-q", "-m", "Add a guide", cwd=wt)
+        (wt / "hello").write_text("changed\n")
+        # Moved out of a directory, it changes the one it leaves.
+        self.git("mv", "old/kept", "kept", cwd=wt)
+        # Files Git doesn't track yet count their lines, as Git would once
+        # they are added, but a binary one has none.
+        (wt / "src").mkdir()
+        (wt / "src" / "new.py").write_text("a\nb")
+        (wt / "src" / "image").write_bytes(b"\0\1\n")
+        (wt / "src" / "long").write_text("x\n" * 10)
+        listed = self.request("list", full=True)["result"][0]
+        self.assertEqual(listed["size"], dict(added=3 + 1 + 2 + 10, deleted=1, files=6,
+                                              directories=["docs", "old", "src"], topLevel=True))
+        # One too large isn't read, past the first byte too many.
+        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=20), 10)
+        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=19), 0)
+        reads = []
+        real_open = Path.open
+        def opened(path, *args, **kwargs):
+            file = real_open(path, *args, **kwargs)
+            read = file.read
+            file.read = lambda size=-1: reads.append(size) or read(size)
+            return file
+        with patch.object(Path, "open", opened):
+            roost.untracked_lines(wt / "src" / "long", largest=8)
+        self.assertEqual(reads, [9])
+        self.assertEqual(roost.untracked_lines(wt / "src"), 0)
+        # Like the other statistics, it is never saved in the record.
+        store = roost.Store(str(self.state))
+        store.save(dict(store.read(task["id"]), size=listed["size"]))
+        self.assertNotIn("size", store.read(task["id"]))
 
     def test_measuring_takes_no_optional_git_locks(self):
         # git status would refresh the index under its lock, and an agent
@@ -1976,6 +2024,48 @@ class Lifecycle(unittest.TestCase):
         store.save(dict(store.read(task["id"]), looked=dict(looked, commit="0" * 40, head="1" * 40)))
         self.assertIsNone(self.since_looked(task))
 
+    def test_history_notes_each_change_of_status_seen_and_turn(self):
+        started = time.time()
+        task = self.create()
+        record = self.wait(task, "ready")
+        self.assertTrue(self.request("seen", id=task["id"], updatedAt=record["updatedAt"])["ok"])
+        for value in ("to merge", "to merge", None):
+            reply = self.request("turn", id=task["id"], turn=value)
+            self.assertTrue(reply["ok"], reply)
+        # Not an event of the agent's.
+        self.assertEqual(reply["result"]["updatedAt"], record["updatedAt"])
+        self.assertIn("Unknown turn", self.request("turn", id=task["id"], turn="later")["error"])
+        self.request("stop", id=task["id"])
+        self.assertTrue(self.request("retire", id=task["id"])["ok"])
+        reply = self.request("history", since=started)
+        self.assertTrue(reply["ok"], reply)
+        changes = [change for change in reply["result"]["changes"] if change["id"] == task["id"]]
+        self.assertEqual([(change["status"], change.get("seen"), change.get("turn")) for change in changes],
+                         [("starting", False, None), ("ready", False, None), ("ready", True, None),
+                          ("ready", True, "to merge"), ("ready", True, None), ("stopped", True, None),
+                          (None, None, None)])
+        # Each says what it was, so a day's first change tells how the day began.
+        self.assertIsNone(changes[0]["was"])
+        for before, after in zip(changes, changes[1:]):
+            self.assertEqual(after["was"], dict(status=before["status"], seen=before["seen"], turn=before["turn"]))
+        self.assertEqual(changes, sorted(changes, key=lambda change: change["at"]))
+        self.assertEqual(reply["result"]["tasks"], [])
+        self.assertGreaterEqual(reply["result"]["now"], changes[-1]["at"])
+        # It begins with the first change noted, and so for any start asked for.
+        self.assertEqual(reply["result"]["begun"], changes[0]["at"])
+        self.assertEqual(self.request("history", since=0)["result"]["begun"], changes[0]["at"])
+        # Asked from later on, it has none of them.
+        self.assertEqual(self.request("history", since=time.time() + 1)["result"]["changes"], [])
+        self.assertIn("start", self.request("history")["error"])
+
+    def test_history_lists_each_task_as_it_is_now(self):
+        task = self.create()
+        record = self.wait(task, "ready")
+        self.request("seen", id=task["id"], updatedAt=record["updatedAt"])
+        self.request("turn", id=task["id"], turn="conflicts")
+        tasks = self.request("history", since=time.time())["result"]["tasks"]
+        self.assertEqual(tasks, [dict(id=task["id"], status="ready", seen=True, turn="conflicts")])
+
     def test_forget_refuses_a_running_agent_and_never_touches_git(self):
         task = self.create()
         self.assertIn("stop", self.request("forget", id=task["id"])["error"])
@@ -3077,6 +3167,37 @@ elif args[:2] == ["auth", "status"]:
                           task["runId"])
         reply = self.request("list", full=True)["result"][0]["lastMessage"]
         self.assertEqual((reply[:2000], reply[2000:]), ("y" * 2000, "…"))
+        # Cut where a space follows, it still says it was cut.
+        roost.update_hook(store, task["id"], dict(hook_event_name="Stop",
+                                                  last_assistant_message="y" * 2000 + " " + "z" * 100),
+                          task["runId"])
+        reply = self.request("list", full=True)["result"][0]["lastMessage"]
+        self.assertEqual((reply[:2000], reply[2000:]), ("y" * 2000, "…"))
+
+    def test_what_you_last_said_is_kept_for_the_panel_but_not_the_first_prompt(self):
+        # Claude's UserPromptSubmit carries the prompt. The first is the
+        # task's own, which the panel shows already.
+        task = self.create(prompt="Fix the parser")
+        self.wait(task, "ready", "Stop")
+        store = roost.Store(str(self.state))
+        self.assertIsNone(store.read(task["id"]).get("lastPrompt"))
+        hook = lambda **fields: roost.update_hook(store, task["id"], dict(hook_event_name="UserPromptSubmit",
+                                                                          **fields), task["runId"])
+        hook(prompt="  Now add a test\n")
+        roost.update_hook(store, task["id"], dict(hook_event_name="Stop", last_assistant_message="Added"),
+                          task["runId"])
+        # Emacs shows it as is.
+        self.assertEqual(self.request("list")["result"][0]["lastPrompt"], "Now add a test")
+        self.assertEqual(self.request("inspect", id=task["id"])["result"]["lastPrompt"], "Now add a test")
+        hook(prompt="y" * 3000)
+        said = store.read(task["id"])["lastPrompt"]
+        self.assertEqual((said[:2000], said[2000:]), ("y" * 2000, "…"))
+        # Back to the first prompt, or no words at all: nothing more to remind you of.
+        hook(prompt="Fix the parser")
+        self.assertIsNone(store.read(task["id"])["lastPrompt"])
+        hook(prompt="Again")
+        hook()
+        self.assertIsNone(store.read(task["id"])["lastPrompt"])
 
     def test_claudes_transcript_is_read_where_claude_says_it_is(self):
         task = self.create()
@@ -3128,6 +3249,59 @@ elif args[:2] == ["auth", "status"]:
         self.assertTrue(response["ok"])
         self.wait(response["result"], "failed")
         self.assertEqual(self.git("status", "--porcelain"), "")
+
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.temp.name) / "history"
+        self.history = roost.History(self.folder)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_only_changes_are_noted(self):
+        task = dict(status="ready", updatedAt="1", seen=None, name="a")
+        self.history.note("t1", task, dict(task, name="b"))
+        self.assertFalse(self.folder.exists())
+        self.history.note("t1", task, dict(task, seen="1"))
+        self.history.note("t1", dict(task, seen="1"), dict(task, seen="1", updatedAt="2"))
+        changes = self.history.read(0)
+        self.assertEqual([change["seen"] for change in changes], [True, False])
+
+    def test_old_days_are_pruned_and_damaged_lines_skipped(self):
+        self.folder.mkdir()
+        old = time.strftime("%Y-%m-%d", time.gmtime(time.time() - (roost.HISTORY_DAYS + 2) * 86400))
+        recent = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
+        (self.folder / (old + ".jsonl")).write_text(json.dumps(dict(at=1.0, id="t0", status="ready")) + "\n")
+        (self.folder / (recent + ".jsonl")).write_text(
+            json.dumps(dict(at=time.time() - 86400, id="t0", status="running")) + "\n" + '{"at": 1')
+        (self.folder / "notes.txt").write_text("not the history's")
+        self.history.note("t1", None, dict(status="starting"))
+        self.assertFalse((self.folder / (old + ".jsonl")).exists())
+        self.assertTrue((self.folder / "notes.txt").exists())
+        self.assertEqual([change["status"] for change in self.history.read(0)], ["running", "starting"])
+        self.assertEqual([change["status"] for change in self.history.read(time.time() - 3600)], ["starting"])
+
+    def test_a_line_cut_short_today_takes_no_other_with_it(self):
+        self.history.note("t1", None, dict(status="starting"))
+        today = next(self.folder.glob("*.jsonl"))
+        today.write_text(today.read_text() + '{"at": 1, "id": "t1", "sta')
+        self.history.note("t1", dict(status="starting"), dict(status="running"))
+        self.assertEqual([change["status"] for change in self.history.read(0)], ["starting", "running"])
+
+    def test_a_failure_to_note_fails_nothing(self):
+        Path(self.temp.name, "history").write_text("a file where the folder goes")
+        self.history.note("t1", None, dict(status="starting"))
+        self.assertEqual(self.history.read(0), [])
+        self.assertIsNone(self.history.begun())
+
+    def test_it_begins_with_the_oldest_change_kept(self):
+        self.assertIsNone(self.history.begun())
+        self.folder.mkdir()
+        (self.folder / "2026-10-01.jsonl").write_text('{"at": 1\n' + json.dumps(dict(at=5.0, id="t0")) + "\n")
+        (self.folder / "2026-10-02.jsonl").write_text(json.dumps(dict(at=9.0, id="t0")) + "\n")
+        self.assertEqual(self.history.begun(), 5.0)
 
 
 class RemoteGit(unittest.TestCase):
@@ -3690,6 +3864,22 @@ class LastMessage(unittest.TestCase):
             {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "pi says"}]}},
             {"type": "message", "message": {"role": "user", "content": "ok"}}])
         self.assertEqual(roost.last_message(dict(agent="pi", worktree="/w", agentSession=str(path))), "pi says")
+
+    def test_only_agents_whose_hooks_say_what_you_sent_report_it(self):
+        self.assertEqual(roost.ClaudeAgent().observe(
+            dict(hook_event_name="UserPromptSubmit", prompt="Next"))["lastPrompt"], "Next")
+        self.assertEqual(roost.CodexAgent().observe(
+            dict(hook_event_name="UserPromptSubmit", prompt="Next"))["lastPrompt"], "Next")
+        self.assertNotIn("lastPrompt", roost.ClaudeAgent().observe(dict(hook_event_name="Stop")))
+        self.assertNotIn("lastPrompt", roost.PiAgent().observe(dict(event="agent_start")))
+        self.assertNotIn("lastPrompt", roost.OpenCodeAgent().observe(dict(event="status", status="busy"), "ready"))
+        # A task recorded before the field, as by an older helper, has none.
+        self.assertIsNone(roost.later_prompt(dict(prompt="Fix it"), None))
+        self.assertIsNone(roost.later_prompt(dict(prompt="Fix it"), " Fix it\n"))
+        self.assertEqual(roost.later_prompt(dict(prompt=None), "Fix it"), "Fix it")
+        # One that starts as the first did, beyond what the panel shows, is another.
+        said = roost.later_prompt(dict(prompt="x" * 2500 + " and then a"), "x" * 2500 + " and then b")
+        self.assertEqual(said, "x" * 2000 + "…")
 
     def test_missing_or_malformed_transcripts_give_none(self):
         for agent in ("claude", "codex", "pi", "opencode"):

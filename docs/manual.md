@@ -92,7 +92,7 @@ Magit is optional (review falls back to Dired).
   normal state switches ESC between the agents and Evil; setting
   `tmux-control-evil-state` to `emacs` sends it to the agents always.
 - **Other modal setups** (Meow, xah-fly-keys): put `roost-dashboard-mode`,
-  `roost-task-info-mode` and `roost-doctor-mode`, and the drafts
+  `roost-task-info-mode`, `roost-doctor-mode` and `roost-workload-mode`, and the drafts
   `roost-compose-mode`, `roost-send-mode` and `roost-pr-mode`, in your insert or
   Emacs-state list so their keys work.
 - **Completion.** Prompts use `completing-read`, so Vertico, Ivy, Helm and the
@@ -190,7 +190,9 @@ since you last looked at it, if anything (below). A click opens the task,
 quitting any question you left open in the minibuffer, which would hold it back,
 and closing a menu left open. `I` docks a panel at the right of an open task's terminal,
 kept current as the agent works: what to do next, the task's prompt, and the
-files it changed, those not yet committed first. A click or `RET` on a file
+files it changed, those not yet committed first. Once you have sent a Claude or
+Codex agent more, your latest prompt shows under the task's, a reminder of
+where you left off that the terminal may have scrolled away. A click or `RET` on a file
 opens its diff in Magit, where `;` writes a note for the agent (more under
 Review in Magit, below). The terminal shows the agent's replies, so the panel leaves them out
 while the terminal is on screen; `i` shows the same panel in the main area,
@@ -206,6 +208,19 @@ moves between them (so does `C-c C-o`),
 `C-c C-t` shows one at a time, and tmux-control's other pane keys work too. `C-c |` splits off another pane,
 which starts in the worktree; it closes when its program exits, and every
 pane closes when the task stops.
+
+**See how much there is to read.** The task panel says how large a task's
+changes are, counted from where its work leaves the branch it merges into,
+with uncommitted work and new files included: `14 files +540 −88`, then the
+top-level directories they are in, `In docs/, src/, test/ and the top
+level`. A task whose changes reach 400 lines (added and removed together),
+10 files or 3 top-level directories gets a dim `±` after its name in the
+sidebar and dashboard, so you can tell an hour of reading from ten minutes
+before you open Magit; hover over the row for its numbers. The mark only
+gives the size: the task doesn't count as waiting for it. Studies of code
+review find that reviewers catch less, and take longer, as changes grow and
+spread; they support marking large changes more than these exact numbers,
+which you can change with `roost-large-change`.
 
 **Review in Magit.** `r` opens Magit on the task's worktree, through TRAMP for
 remote tasks. Stage, edit and commit as usual. The status names the task,
@@ -289,6 +304,19 @@ Nothing is lost by retiring it with `x`: nothing is left uncommitted, and its
 commits are all in what was merged. Commits made after its pull request merged
 keep it from saying so.
 
+**See how many agents you can keep up with.** `M-x roost-workload` shows, for
+today and each day of the past week, the most agents that worked at once, how
+long they worked, and how long they waited on you: asked you something, ended
+a turn or failed before you looked, or had a pull request or conflict for you,
+added up across agents, with the longest single wait. The last column is that
+waiting for each hour of work. A day with more agents at once should show more
+work; past what you can supervise, it shows more waiting for each hour of work
+instead, as agents queue for you. Thirty minutes with no change on any host,
+as overnight, count as time away and are left out of the waiting. `g` asks
+the hosts again. Each host's helper keeps the history, 30 days of it, under
+`history` in its state directory; an agent started before you upgraded is
+counted once you stop and resume it (`K`, then `s`).
+
 ## Commands
 
 `roost-status` opens the dashboard. In it, and in a task's details panel:
@@ -304,7 +332,7 @@ keep it from saying so.
 | `r` | `roost-review` | Magit in the worktree, showing what changed since you last looked |
 | `D` | `roost-diff` | Diff the task's own changes, including uncommitted ones |
 | `e` | `roost-send` | Paste a prompt into the agent and press Enter |
-| `i` | `roost-task-info` | The task's next step, prompt, latest reply, changes and details |
+| `i` | `roost-task-info` | The task's next step, prompt, your latest prompt, the agent's latest reply, changes and details |
 | `R` | `roost-rename` | Rename the task, in Roost, its tab or perspective, and its agent's tmux window; its branch and worktree keep the name it started with |
 | `l` | `roost-switch-task` | Choose a task by name, waiting tasks first |
 | `/` | `roost-search` | Find messages in your tasks' conversations, retired tasks' too; `RET` opens a live task, `TAB` shows more of a message (its first 1,500 characters) |
@@ -413,6 +441,9 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   then shows at once, and for Claude Code a declined request and Esc too. A
   Codex task is `ready` once you have answered its startup questions, rather
   than at its first turn.
+- `roost-large-change` (`(:lines 400 :files 10 :directories 3)`): when a
+  task's row gets its `±`. Leave one out to mark by the others, as
+  `(:lines 400)`; nil marks none.
 - `roost-notes-file`: review notes not yet sent, kept across sessions.
 - `roost-note-box-lines` (4): how many lines of text the box for writing a
   note shows. Faces `roost-note` and `roost-note-button` color the notes and
@@ -518,6 +549,12 @@ Roost never changes your global agent settings or answers prompts.
 | `exited`, `failed` | The agent exited normally, or the CLI failed; `RET` shows its last output |
 | `crashed` | The agent's tmux pane disappeared |
 | `stopped` | Stopped with `K`; `s` resumes the conversation |
+
+The helper notes each change of a task's status, of whether you've seen its
+agent since its last event, and of what of its pull request or work waits on
+you, in a file a day under `history` in its state directory, and deletes
+files older than 30 days. Only Emacs asks GitHub, so it tells the helper when
+a task's pull request or conflicts come to wait on you, or stop.
 
 A task's identity is its host and ID. A per-pane ownership tag keeps Roost from
 steering or killing an unrelated pane after a tmux restart, and hooks from an
