@@ -449,6 +449,16 @@ def last_message(task):
     return reply if len(reply) <= LAST_MESSAGE_LIMIT else reply[:LAST_MESSAGE_LIMIT].rstrip() + "…"
 
 
+def later_prompt(task, prompt):
+    """PROMPT, which TASK's agent says you sent it, shortened as the task
+    panel shows it, to remind you where you left off: None for none, and
+    for the one the task started with, which the panel shows already."""
+    said = (text(prompt) or "").strip()
+    if not said or said == (text(task.get("prompt")) or "").strip():
+        return None
+    return said if len(said) <= LAST_MESSAGE_LIMIT else said[:LAST_MESSAGE_LIMIT].rstrip() + "…"
+
+
 CLAUDE_FOLDER_LIMIT = 200
 
 
@@ -560,6 +570,8 @@ class ClaudeAgent:
             updates["lastReply"] = reply.strip()[:LAST_MESSAGE_LIMIT + 1]
         elif event == "UserPromptSubmit" or (event == "SessionStart" and payload.get("source") == "clear"):
             updates["lastReply"] = None
+        if event == "UserPromptSubmit":
+            updates["lastPrompt"] = payload.get("prompt")
         # The old claudeSession field serves tasks whose original helper still runs.
         updates.update(reported)
         return updates
@@ -693,6 +705,8 @@ class CodexAgent:
             updates["lastReply"] = reply.strip()[:LAST_MESSAGE_LIMIT + 1]
         elif event == "UserPromptSubmit" or (event == "SessionStart" and payload.get("source") == "clear"):
             updates["lastReply"] = None
+        if event == "UserPromptSubmit":
+            updates["lastPrompt"] = payload.get("prompt")
         return updates
 
     def last_message(self, task):
@@ -3273,6 +3287,8 @@ def update_hook(store, task_id, payload, run_id=None):
                 task["hookAt"] = read_at = time.time()
             # What the agent asks, if its adapter can say better than its payload.
             named = updates.pop("request", None)
+            if "lastPrompt" in updates:
+                updates["lastPrompt"] = later_prompt(task, updates["lastPrompt"])
             task.update(updates)
             request = (named or permission_request(payload, task.get("worktree"))) if asks else None
             if request:

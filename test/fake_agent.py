@@ -143,7 +143,10 @@ for line in sys.stdin:
         report("SessionStart")
         deferred_start = False
     status("working")
-    report("UserPromptSubmit" if codex else "agent_start")
+    if codex:
+        report("UserPromptSubmit", prompt=line)
+    else:
+        report("agent_start")
     if line == "permission" and codex:
         report("PermissionRequest")
     elif line.startswith("ask ") and codex:
