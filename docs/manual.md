@@ -142,6 +142,23 @@ starts the agent in tmux, and opens its terminal.
   `roost-open-task` or `roost-review`, act on it.
 - Select a region first, and the selection becomes the prompt. Code is quoted
   with its file and lines, ready for you to say what to do with it.
+- On an error in a compilation buffer, or a match in a grep buffer, that line
+  becomes the prompt, with its file and line.
+- With [Embark](https://github.com/oantolin/embark), act on a region, a file,
+  a URL or a Flymake diagnostic to start a task about it. Roost leaves
+  Embark's keys alone; to put its actions on `T`:
+
+  ```elisp
+  (with-eval-after-load 'embark
+    (keymap-set embark-region-map "T" #'roost-new-task-from-region)
+    (keymap-set embark-file-map "T" #'roost-new-task-from-file)
+    (keymap-set embark-url-map "T" #'roost-new-task-from-url)
+    (keymap-set embark-flymake-map "T" #'roost-new-task-from-diagnostic))
+  ```
+
+  A file is named from the top of its checkout, and the task goes to that
+  project. A diagnostic is quoted with its file, line and message, then the
+  code it is on. The same commands work with `M-x`.
 - Press `C-c C-t` in the draft to pick one of the project's open GitHub issues.
   Its title and text become the prompt, and the task's pull request will close
   it.
@@ -410,6 +427,29 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   (`server-start`), clicking one opens its task, quitting a question you left
   open in the minibuffer as a click in the sidebar does, and a newer one about
   the same task replaces it.
+- `roost-task-status-functions`, `roost-task-merged-functions`: your own
+  functions to run when a task's status changes, or once its work is merged.
+  Each status function is called with the task, its status before and its
+  status now, as the host records them: `starting`, `running`, `ready` (its
+  turn is over), `permission`, `failed`, `crashed`, `exited` or `stopped`,
+  and, as Roost lets the task go, `retired`, `discarded` or `forgotten`.
+  They run for changes this Emacs sees, not when Roost first sees a task.
+  Each merged function is called with the task and the branch its work went
+  into, when `m` merges it or when Roost sees GitHub merge its pull request.
+  The task is an alist; `alist-get` reads its `name`, `id`, `host` (nil on
+  this machine), `agent`, `branch`, `worktree` and `integrationBranch`. A
+  function that fails is reported in `*Messages*`, and the rest still run.
+  For example, to log each time an agent asks for permission:
+
+  ```elisp
+  (add-hook 'roost-task-status-functions
+            (lambda (task _previous status)
+              (when (equal status "permission")
+                (message "%s asks for permission" (alist-get 'name task)))))
+  ```
+
+  `roost-draft-task` opens the new task draft with a prompt of your own, for
+  commands that start a task from what they show, such as a mail.
 - `roost-watch-interval` (3 s), `roost-watch-unfocused-interval` (15 s),
   `roost-request-timeout` (60 s), `roost-ssh-share-connections`.
 

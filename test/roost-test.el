@@ -1576,6 +1576,67 @@
                (should (string-prefix-p "Make b return 3." (roost--compose-prompt)))))
          (when (get-buffer roost--compose-buffer) (kill-buffer roost--compose-buffer)))))))
 
+(ert-deftest roost-compose-starts-from-errors-files-urls-and-diagnostics ()
+  (roost-test--isolated
+   (let ((default-directory "/tmp/")
+         (checkout (file-name-as-directory (make-temp-file "roost-checkout" t)))
+         (prompt (lambda (command &rest arguments)
+                   (when (get-buffer roost--compose-buffer) (kill-buffer roost--compose-buffer))
+                   (apply command arguments)
+                   (with-current-buffer roost--compose-buffer
+                     (list (roost--compose-prompt) (= (point) roost--compose-body)
+                           (plist-get roost--compose-fields :directory))))))
+     (save-window-excursion
+       (unwind-protect
+           (progn
+             ;; A compilation error, or a grep match, with its place.
+             (with-temp-buffer
+               (compilation-mode)
+               (let ((inhibit-read-only t))
+                 (insert "make: tests\n"
+                         (propertize "src/a.py:3" 'compilation-message t) ": NameError: name 'x'\n"))
+               (goto-char (point-max))
+               (forward-line -1)
+               (should (equal (car (funcall prompt #'roost--compose))
+                              "src/a.py:3: NameError: name 'x'"))
+               ;; Elsewhere in the buffer, nothing is quoted.
+               (goto-char (point-min))
+               (should (equal (car (funcall prompt #'roost--compose)) "")))
+             ;; A file, named from the top of its checkout, whose project it is.
+             (make-directory (expand-file-name ".git" checkout))
+             (make-directory (expand-file-name "src" checkout))
+             (should (equal (funcall prompt #'roost-new-task-from-file (expand-file-name "src/a.py" checkout))
+                            (list "src/a.py" t checkout)))
+             (should (equal (car (funcall prompt #'roost-new-task-from-url "https://example.com/issues/4"))
+                            "https://example.com/issues/4"))
+             (should (equal (funcall prompt #'roost-draft-task "From a mail" checkout)
+                            (list "From a mail" nil checkout)))
+             ;; Each diagnostic on the line, then the line.
+             (require 'flymake)
+             (with-temp-buffer
+               (python-mode)
+               (rename-buffer "roost-test.py" t)
+               (insert "import os\nx = y + z\n")
+               (let* ((flymake-mode t)
+                      (here (save-excursion (goto-char (point-min)) (forward-line 1) (point)))
+                      (diagnostics
+                       (list (flymake-make-diagnostic (current-buffer) (+ here 8) (+ here 9) :error "undefined name 'z' ")
+                             (flymake-make-diagnostic (current-buffer) (+ here 4) (+ here 5) :error "undefined name 'y'"))))
+                 ;; At the start of the line, only by line.
+                 (cl-letf (((symbol-function 'flymake-diagnostics)
+                            (lambda (beg &optional end)
+                              (and (> (line-number-at-pos beg) 1) end diagnostics))))
+                   (goto-char (point-min))
+                   (should-error (roost-new-task-from-diagnostic) :type 'user-error)
+                   (goto-char here)
+                   (let ((name (buffer-name)))
+                     (should (equal (seq-take (funcall prompt #'roost-new-task-from-diagnostic) 2)
+                                    (list (concat name ":2: undefined name 'y'\n"
+                                                  name ":2: undefined name 'z'\n\nx = y + z")
+                                          t))))))))
+         (delete-directory checkout t)
+         (when (get-buffer roost--compose-buffer) (kill-buffer roost--compose-buffer)))))))
+
 (ert-deftest roost-compose-starts-from-a-github-issue ()
   (roost-test--isolated
    (let ((default-directory "/tmp/") created asked)
@@ -5994,6 +6055,56 @@ ssh: connect to host dev port 22: Operation timed out"
        (should (assq 'id params))
        (should-not (assq 'style params))
        (should (string-prefix-p "Merge committed work from fix auth into release" question))))))
+
+(ert-deftest roost-status-functions-see-each-change-once ()
+  (roost-test--isolated
+   (let* (calls
+          (roost-task-status-functions
+           (list (lambda (_task _previous _status) (error "Broken"))
+                 (lambda (task previous status)
+                   (push (list (alist-get 'name task) (alist-get 'host task) previous status) calls))))
+          (inhibit-message t))
+     ;; Not when Roost first sees a task, nor when a poll finds it as it was.
+     (roost--cache-task "dev" (roost-test--task nil "running"))
+     (roost--cache-task "dev" (roost-test--task nil "running"))
+     (should-not calls)
+     ;; A function that fails leaves the others to run.
+     (roost--cache-task "dev" (roost-test--task nil "permission"))
+     (roost--cache-task "dev" (roost-test--task nil "retired"))
+     (should (equal (nreverse calls) '(("fix auth" "dev" "running" "permission")
+                                       ("fix auth" "dev" "permission" "retired")))))))
+
+(ert-deftest roost-merged-functions-run-once-a-merge-lands ()
+  (roost-test--isolated
+   (let* (merges
+          (roost-task-merged-functions
+           (list (lambda (task branch) (push (list (alist-get 'name task) branch) merges))))
+          (open (append '((integrationBranch . "main") (pr (number . 12) (state . "OPEN")))
+                        (roost-test--task)))
+          (merged (append '((integrationBranch . "main") (pr (number . 12) (state . "MERGED")))
+                          (roost-test--task))))
+     ;; A pull request merged before Roost saw the task is no news.
+     (roost--cache-task "dev" (copy-tree merged))
+     (should-not merges)
+     (roost--apply-snapshot "dev" nil)
+     ;; One GitHub merges while Emacs runs is, once.
+     (roost--cache-task "dev" (copy-tree open))
+     (roost--cache-task "dev" (copy-tree merged))
+     (roost--cache-task "dev" (copy-tree merged))
+     (should (equal merges '(("fix auth" "main"))))
+     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+               ((symbol-function 'roost--release-terminal) #'ignore)
+               ((symbol-function 'roost--refresh-host) #'ignore)
+               ((symbol-function 'roost--request)
+                (lambda (_host _action _params success &optional _failure)
+                  (funcall success (append '((status . "retired") (integrationBranch . "release"))
+                                           (roost-test--task))))))
+       ;; Retiring it after the merge on GitHub is not another.
+       (roost-merge-retire (gethash '("dev" "0123456789abcdef") roost--tasks))
+       (should (equal merges '(("fix auth" "main"))))
+       ;; `m' merging one is.
+       (roost-merge-retire (roost--cache-task "dev" (roost-test--task)))
+       (should (equal merges '(("fix auth" "release") ("fix auth" "main"))))))))
 
 (ert-deftest roost-task-commands-are-greyed-out-with-no-tasks ()
   (roost-test--isolated
