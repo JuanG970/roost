@@ -1994,6 +1994,16 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual([file["path"] for file in looked["since"]["files"]], ["mine"])
         # Magit's diff of them leaves out what main changed too.
         self.assertEqual(looked["since"]["paths"], ["mine"])
+        self.assertEqual(looked["since"]["end"], looked["commit"])
+        # Once more from main alone: what changed before keeps both its ends.
+        self.git("commit", "-qam", "Mine, changed", cwd=wt)
+        (self.repo / "more").write_text("main again\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "main again")
+        self.assertTrue(self.request("update", id=task["id"])["result"]["update"]["changed"])
+        again = self.request("look", id=task["id"])["result"]["looked"]
+        self.assertEqual(again["since"], looked["since"])
+        self.assertNotEqual(again["commit"], looked["since"]["end"])
 
     def test_a_look_git_cannot_keep_leaves_the_look_before(self):
         task = self.create()

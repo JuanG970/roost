@@ -5633,8 +5633,27 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
        (roost-review task)
        (cl-incf roost--open-generation)
        (funcall (car reply) (roost-test--task))
+       (should (equal (length opened) 2))
+       ;; Or gone to another buffer meanwhile.
+       (roost-review task)
+       (let ((was (window-buffer)))
+         (unwind-protect
+             (progn
+               (set-window-buffer nil (get-buffer-create " *roost elsewhere*"))
+               (cl-letf (((symbol-function 'message) #'ignore))
+                 (funcall (car reply) (roost-test--task))))
+           (set-window-buffer nil was)
+           (kill-buffer " *roost elsewhere*")))
        (should (equal (length opened) 2)))
      (when provided (setq features (delq 'magit features)))))))
+
+(ert-deftest roost-a-look-from-another-emacs-is-measured-against ()
+  ;; It moves neither the agent's last event nor the task's Git stamp.
+  (roost-test--isolated
+   (roost--cache-task "dev" (append '((looked (at . "2026-10-03T20:00:00+00:00"))) (roost-test--task)))
+   (let ((before (roost--task-states "dev")))
+     (roost--cache-task "dev" (append '((looked (at . "2026-10-03T21:00:00+00:00"))) (roost-test--task)))
+     (should-not (equal (roost--task-states "dev") before)))))
 
 (ert-deftest roost-a-reply-read-before-a-look-keeps-the-look ()
   (roost-test--isolated

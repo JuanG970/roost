@@ -2192,7 +2192,8 @@ def own_changes(worktree, entries, looked, start, base, end=None, env=None):
     now = changed_between(worktree, base, end, env=env, names=True)
     if then is None or now is None:
         return entries, False
-    own = [entry for entry in entries if entry[0] in then | now]
+    either = then | now
+    own = [entry for entry in entries if entry[0] in either]
     return own, len(own) < len(entries)
 
 
@@ -2349,15 +2350,16 @@ def look(store, task_id):
                                      if start else ([], False))
                 since = before.get("since")
                 if entries:
-                    looked["since"] = dict(change_count(entries), start=start, at=before.get("at"),
+                    looked["since"] = dict(change_count(entries), start=start, end=commit, at=before.get("at"),
                                            files=[dict(path=path, added=added, deleted=deleted)
                                                   for path, added, deleted in entries[:LOOK_FILES_LIMIT]])
                     if left_out and len(entries) <= LOOK_PATHS_LIMIT:
                         # Magit's diff of them leaves out the same files.
                         looked["since"]["paths"] = [path for path, _, _ in entries]
-                elif (start and isinstance(since, dict) and look_start(worktree, dict(commit=since.get("start")))):
+                elif (start and isinstance(since, dict) and look_start(worktree, dict(commit=since.get("start")))
+                      and look_start(worktree, dict(commit=since.get("end")))):
                     # Nothing of the task's changed: what changed before
-                    # still did, while Git still has where it changed from.
+                    # still did, while Git still has both ends of it.
                     looked["since"] = since
             task = store.read(task_id)
             current = task.get("looked") if isinstance(task.get("looked"), dict) else {}

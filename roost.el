@@ -1068,17 +1068,20 @@ in `roost--list-requests'; without one, TASKS count as asked for now."
     (remhash host roost--errors)))
 
 (defun roost--task-states (host)
-  "HOST's cached tasks as an alist of ID to (STATUS UPDATED-AT GIT-STAMP PR).
+  "HOST's tasks, cached, as ID to (STATUS UPDATED-AT GIT-STAMP PR LOOKED).
 Each agent hook event, such as finishing a tool, moves UPDATED-AT; Git
 commands in the worktree, such as your commit, change GIT-STAMP.  PR is
 the state its host recorded of its pull request, which another Emacs
-may have changed: closed, it no longer says whether the task conflicts."
+may have changed: closed, it no longer says whether the task conflicts.
+LOOKED is when you last looked at it, from this Emacs or another, which
+what changed since is measured against."
   (let (states)
     (maphash (lambda (key task)
                (when (equal (car key) host)
                  (push (list (cadr key) (roost--field task 'status)
                              (roost--field task 'updatedAt) (roost--field task 'gitStamp)
-                             (alist-get 'state (roost--field task 'pr)))
+                             (alist-get 'state (roost--field task 'pr))
+                             (alist-get 'at (roost--field task 'looked)))
                        states)))
              roost--tasks)
     states))
@@ -3576,7 +3579,8 @@ its own.  See `roost-magit-status-sections'."
               (since (alist-get 'since looked))
               (files (alist-get 'files since))
               (start (alist-get 'start since))
-              (end (alist-get 'commit looked))
+              ;; As recorded by an older helper, the look's own commit.
+              (end (or (alist-get 'end since) (alist-get 'commit looked)))
               ;; Git prunes what a look kept of uncommitted work in time.
               ((magit-rev-verify (concat start "^{commit}")))
               ((magit-rev-verify (concat end "^{commit}"))))
@@ -4669,12 +4673,18 @@ at it, and Magit's status shows what changed since you looked before."
   (if (not (require 'magit nil t))
       (roost--magit-status task)
     (let* ((generation (cl-incf roost--open-generation))
+           (window (if (window-minibuffer-p) (minibuffer-selected-window) (selected-window)))
+           (shown (window-buffer window))
            (open (lambda (&rest _)
                    (roost--when-out-of-minibuffer
                     (lambda ()
-                      ;; Not once you have opened something else.
+                      ;; Not once you have opened something else, or gone
+                      ;; to another window or buffer, as `roost-open-task'.
                       (when (= generation roost--open-generation)
-                        (roost--magit-status task)))))))
+                        (if (not (and (eq (selected-window) window) (eq (window-buffer window) shown)))
+                            (message "Roost: didn't open Magit on %s, as you went to another window or buffer while its host replied"
+                                     (roost--field task 'name))
+                          (roost--magit-status task))))))))
       (if (gethash (roost--field task 'host) roost--errors)
           (funcall open)
         (roost--act task "look" nil open
