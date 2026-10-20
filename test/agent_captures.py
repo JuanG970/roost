@@ -85,10 +85,11 @@ def scrub(entries, task, store_root):
         for pattern, form in IDS:
             line = pattern.sub(lambda match: stand_in(match, form), line)
         entry = json.loads(line)
+        # Unrounded: a report read just before a hook must stay before it.
         if "at" in entry:
-            entry["at"] = round(entry["at"] - start, 3)
+            entry["at"] -= start
         if "report" in entry and "receivedAt" in entry["report"]:
-            entry["report"]["receivedAt"] = round(entry["report"]["receivedAt"] - start, 3)
+            entry["report"]["receivedAt"] -= start
         scrubbed.append(entry)
     return scrubbed
 

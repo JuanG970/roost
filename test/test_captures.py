@@ -28,6 +28,8 @@ class CaptureTest(unittest.TestCase):
     def test_captures_name_nothing_of_this_machine(self):
         from pathlib import Path
         home = str(Path.home())
+        if home == agent_captures.HOME:
+            self.skipTest("this home is the captures' stand-in for one")
         for path in sorted(agent_captures.CAPTURES.glob("*.jsonl")):
             with self.subTest(capture=path.name):
                 self.assertNotIn(home, path.read_text())
