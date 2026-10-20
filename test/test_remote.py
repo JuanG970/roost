@@ -860,13 +860,55 @@ class Lifecycle(unittest.TestCase):
         self.assertIn(dict(path="new file", untracked=True), files)
         self.assertIn(dict(path="greeting", added=2, deleted=0, uncommitted=True), files)
         # A list cut short keeps the files not yet committed.
-        self.assertEqual([file["path"] for file in roost.changed_files(wt, "main", {"image"}, limit=2)],
+        self.assertEqual([file["path"] for file in roost.changed_files(wt, "main", {"image"}, limit=2)[0]],
                          ["image", "new file"])
         self.assertEqual(roost.status_paths("R  new\0old\0 M a b\0?? c\0"), {"new", "a b", "c"})
         # Like the other statistics, the list is never saved in the record.
         store = roost.Store(str(self.state))
         store.save(dict(store.read(task["id"]), files=files))
         self.assertNotIn("files", store.read(task["id"]))
+
+    def test_a_full_listing_measures_the_size_and_spread_of_the_changes(self):
+        (self.repo / "old").mkdir()
+        (self.repo / "old" / "kept").write_text("kept\n")
+        self.git("add", "old")
+        self.git("commit", "-q", "-m", "Add kept")
+        task = self.create()
+        wt = Path(task["worktree"])
+        (wt / "docs").mkdir()
+        (wt / "docs" / "guide.md").write_text("one\ntwo\nthree\n")
+        self.git("add", "docs", cwd=wt)
+        self.git("commit", "-q", "-m", "Add a guide", cwd=wt)
+        (wt / "hello").write_text("changed\n")
+        # Moved out of a directory, it changes the one it leaves.
+        self.git("mv", "old/kept", "kept", cwd=wt)
+        # Files Git doesn't track yet count their lines, as Git would once
+        # they are added, but a binary one has none.
+        (wt / "src").mkdir()
+        (wt / "src" / "new.py").write_text("a\nb")
+        (wt / "src" / "image").write_bytes(b"\0\1\n")
+        (wt / "src" / "long").write_text("x\n" * 10)
+        listed = self.request("list", full=True)["result"][0]
+        self.assertEqual(listed["size"], dict(added=3 + 1 + 2 + 10, deleted=1, files=6,
+                                              directories=["docs", "old", "src"], topLevel=True))
+        # One too large isn't read, past the first byte too many.
+        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=20), 10)
+        self.assertEqual(roost.untracked_lines(wt / "src" / "long", largest=19), 0)
+        reads = []
+        real_open = Path.open
+        def opened(path, *args, **kwargs):
+            file = real_open(path, *args, **kwargs)
+            read = file.read
+            file.read = lambda size=-1: reads.append(size) or read(size)
+            return file
+        with patch.object(Path, "open", opened):
+            roost.untracked_lines(wt / "src" / "long", largest=8)
+        self.assertEqual(reads, [9])
+        self.assertEqual(roost.untracked_lines(wt / "src"), 0)
+        # Like the other statistics, it is never saved in the record.
+        store = roost.Store(str(self.state))
+        store.save(dict(store.read(task["id"]), size=listed["size"]))
+        self.assertNotIn("size", store.read(task["id"]))
 
     def test_measuring_takes_no_optional_git_locks(self):
         # git status would refresh the index under its lock, and an agent

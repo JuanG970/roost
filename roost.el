@@ -298,6 +298,18 @@ as they are."
   :type '(choice (const :tag "Merge commit" merge)
                  (const :tag "One squashed commit" squash)))
 
+(defcustom roost-large-change '(:lines 400 :files 10 :directories 3)
+  "How large a task's changes get before its row is marked ±.
+A task is marked once its changes reach any of these: `:lines', lines
+added and removed together; `:files', files changed; `:directories',
+top-level directories that hold changed files.  They count from where
+the task's work leaves its integration branch, uncommitted work and
+new files included.  Leave one out to mark by the others, or set this
+to nil to mark none.  Reviews of larger and more spread-out changes
+find less and take longer; the numbers are rough."
+  :type '(choice (const :tag "Mark none" nil)
+                 (plist :tag "Mark at" :options ((:lines natnum) (:files natnum) (:directories natnum)))))
+
 (defcustom roost-program-status nil
   "Whether Roost reads the status an agent reports to its terminal.
 Claude Code 2.1.295, Codex 0.163.0 and Pi 1.1.0 and later report
@@ -833,8 +845,8 @@ and a newer notification about TASK replaces it."
         (t (message "%s: %s" title body))))
 
 (defconst roost--measured-fields
-  '(diff dirty files ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging landed
-    conflicts pr)
+  '(diff dirty files size ahead behind update worktreeMissing prStatus unpushed gitStamp agentWork merging
+    landed conflicts pr)
   "A task's fields its host measures for each reply, such as Git statistics.
 They are as new as the reply, whatever its `updatedAt': its pull
 request too, which the host records as it finds one on GitHub.")
@@ -891,8 +903,8 @@ bringing back the old name, which the task's tab and panel no longer have."
     ;; Quiet polls skip Git and the latest reply; keep the last full refresh's.
     ;; Not what GitHub said of a pull request since recorded otherwise, as
     ;; by another Emacs: closed, or another in its place.
-    (dolist (field '(diff dirty files ahead behind worktreeMissing prStatus unpushed lastMessage gitStamp agentWork
-                            merging landed conflicts))
+    (dolist (field '(diff dirty files size ahead behind worktreeMissing prStatus unpushed lastMessage gitStamp
+                            agentWork merging landed conflicts))
       (unless (or (assoc field task)
                   (and (eq field 'prStatus)
                        (not (equal (roost--field task 'pr) (roost--field old 'pr)))))
@@ -5968,28 +5980,86 @@ shows starts it again."
 COMPACT abbreviates commits ahead of and behind the integration branch.
 LISTED non-nil leaves out whether changes are uncommitted, for where
 the files are listed under labels that say so."
-  (let* ((diff (or (roost--field task 'diff) ""))
-         (count (lambda (pattern)
-                  (if (string-match (concat "\\([0-9]+\\) " pattern) diff)
-                      (string-to-number (match-string 1 diff))
-                    0)))
-         (files (funcall count "files? changed"))
-         ;; Git's statistics leave out files it does not track yet.
-         (new (seq-count (lambda (file) (alist-get 'untracked file)) (roost--field task 'files)))
+  (let* ((size (roost--field task 'size))
+         (diff (or (roost--field task 'diff) ""))
+         (count (lambda (field pattern)
+                  (cond (size (alist-get field size 0))
+                        ((string-match (concat "\\([0-9]+\\) " pattern) diff)
+                         (string-to-number (match-string 1 diff)))
+                        (t 0))))
+         (files (funcall count 'files "files? changed"))
+         (added (funcall count 'added "insertions?"))
+         (deleted (funcall count 'deleted "deletions?"))
+         ;; Its size counts every file, but Git's statistics leave out
+         ;; files it does not track yet.
+         (new (if size 0 (seq-count (lambda (file) (alist-get 'untracked file)) (roost--field task 'files))))
          (ahead (or (roost--field task 'ahead) 0))
          (behind (or (roost--field task 'behind) 0))
          (commits (delq nil (list (when (> ahead 0) (format (if compact "↑%d" "%d ahead") ahead))
                                   (when (> behind 0) (format (if compact "↓%d" "%d behind") behind))))))
     (string-join
      (delq nil (list (when (> files 0)
-                       (format "%d file%s +%d −%d" files (if (= files 1) "" "s")
-                               (funcall count "insertions?") (funcall count "deletions?")))
+                       (concat (format "%d file%s" files (if (= files 1) "" "s"))
+                               ;; Not for files with no lines, as a new one
+                               ;; that is empty, or binary.
+                               (unless (and size (= added 0) (= deleted 0))
+                                 (format " +%d −%d" added deleted))))
                      (when (> new 0)
                        (if (> files 0) (format "%d new" new)
                          (format "%d new file%s" new (if (= new 1) "" "s"))))
                      (when (and (roost--field task 'dirty) (not listed)) "uncommitted")
                      (when commits (string-join commits (if compact " " " · ")))))
      " · ")))
+
+(defun roost--large-change-p (task)
+  "Whether TASK's changes reach any of the sizes in `roost-large-change'."
+  (when-let* ((size (roost--field task 'size))
+              ((> (alist-get 'files size 0) 0)))
+    (seq-some (pcase-lambda (`(,key . ,count))
+                (when-let* ((limit (plist-get roost-large-change key)))
+                  (>= count limit)))
+              `((:lines . ,(+ (alist-get 'added size 0) (alist-get 'deleted size 0)))
+                (:files . ,(alist-get 'files size 0))
+                (:directories . ,(length (alist-get 'directories size)))))))
+
+(defun roost--size-summary (task)
+  "TASK's changed lines, files and top-level directories, or nil if none.
+As \"560 lines in 12 files, 4 top-level directories\"."
+  (when-let* ((size (roost--field task 'size))
+              (files (alist-get 'files size 0))
+              ((> files 0)))
+    (let ((lines (+ (alist-get 'added size 0) (alist-get 'deleted size 0)))
+          (directories (length (alist-get 'directories size))))
+      (concat (format "%d line%s in %d file%s" lines (if (= lines 1) "" "s") files (if (= files 1) "" "s"))
+              (when (> directories 0)
+                (format ", %d top-level director%s" directories (if (= directories 1) "y" "ies")))))))
+
+(defun roost--large-change-mark (task)
+  "The dim ± of TASK's row and panel when its changes are large, or nil.
+See `roost-large-change'."
+  (when (roost--large-change-p task)
+    (propertize "±" 'face 'roost-dim
+                'help-echo (concat "roost-large-change marks changes this large: "
+                                   (roost--size-summary task)))))
+
+(defun roost--large-change-echo (task)
+  "A line saying what TASK's ± stands for, for a row's help, or \"\"."
+  (if (roost--large-change-p task) (format "± %s\n" (roost--size-summary task)) ""))
+
+(defun roost--spread (task)
+  "Where TASK's changed files are, as \"In docs/, test/ and the top level\".
+Nil when none are in a directory.  The top level holds those that are
+in none."
+  (when-let* ((size (roost--field task 'size))
+              (directories (alist-get 'directories size)))
+    (let ((top (when (alist-get 'topLevel size) '("the top level"))))
+      (concat "In "
+              (if (> (length directories) 4)
+                  (string-join (cons (format "%d top-level directories" (length directories)) top) " and ")
+                (let ((places (append (mapcar (lambda (directory) (concat directory "/")) directories) top)))
+                  (concat (string-join (butlast places) ", ")
+                          (when (cdr places) " and ")
+                          (car (last places)))))))))
 
 (defconst roost--changed-files-shown 12
   "How many changed files a task panel lists before summing up the rest.")
@@ -6783,7 +6853,11 @@ Windows showing the panel keep their scroll position, and the mark stays."
                             'face 'roost-status-failed))
                ((not (assq 'diff task)) (propertize "Refreshing…" 'face 'roost-dim))
                ((string-empty-p changes) (propertize "No changes yet" 'face 'roost-dim))
-               (t (roost--fontify-changes changes))))
+               (t (concat (when-let* ((mark (roost--large-change-mark task))) (concat mark " "))
+                          (roost--fontify-changes changes)))))
+        (when-let* (((not (roost--field task 'worktreeMissing)))
+                    (spread (roost--spread task)))
+          (roost--insert-indented spread))
         (roost--insert-changed-files task width)
         (if-let* ((notes (roost--notes-summary task)))
             (roost--insert-indented notes)
@@ -7077,8 +7151,10 @@ Refreshes are asynchronous; rendering uses only cached state.
 (defun roost--row-name (task &optional width face)
   "TASK's name in FACE for its row under its project, cut to WIDTH columns.
 When another task in the project has the same name, the start of its ID
-follows, dim, as in `roost-open-task' and tab names; cutting the name to
-fit keeps the ID."
+follows, dim, as in `roost-open-task' and tab names, and then a dim ±
+when its changes are large (`roost-large-change').  Cutting the name to
+fit keeps the ID, and the ± while a column of the name is left beside
+them: a row that narrow keeps its room for an urgent status."
   (let* ((name (roost--field task 'name))
          (id (roost--field task 'id))
          (twin (seq-some (lambda (other)
@@ -7087,7 +7163,11 @@ fit keeps the ID."
                                 (equal (roost--field other 'host) (roost--field task 'host))
                                 (equal (roost--field other 'repo) (roost--field task 'repo))))
                          (roost-tasks)))
-         (suffix (if (and twin id) (concat " " (substring id 0 (min 6 (length id)))) "")))
+         (suffix (if (and twin id) (concat " " (substring id 0 (min 6 (length id)))) ""))
+         (mark (roost--large-change-mark task))
+         (suffix (if (and mark (or (not width) (> width (+ (length suffix) 2))))
+                     (concat suffix " " mark)
+                   suffix)))
     (concat (propertize (if width
                             (truncate-string-to-width name (max 1 (- width (length suffix)))
                                                       nil nil "…")
@@ -7232,7 +7312,10 @@ The mark stays where it was."
             (dolist (task (cdr group))
               (let ((row (list 'roost-task (roost--key task) 'keymap roost--dashboard-row-map)))
                 (insert (apply #'propertize (roost--dashboard-row task layout width)
-                               'mouse-face 'highlight 'help-echo "mouse-1: open · mouse-3: actions" row)
+                               'mouse-face 'highlight
+                               'help-echo (concat (roost--large-change-echo task)
+                                                  "mouse-1: open · mouse-3: actions")
+                               row)
                         ;; Without `mouse-face', so each row lights up alone,
                         ;; but still the task's, for point and clicks there.
                         (apply #'propertize "\n" row))))))))
@@ -7883,10 +7966,11 @@ have seen that waits for nothing."
             (let ((row (list 'roost-task (roost--key task) 'keymap roost--dashboard-row-map)))
               (insert (apply #'propertize (roost--sidebar-row task width)
                              'mouse-face 'highlight
-                             'help-echo (format "%s\n%s · %s\nmouse-1: open · mouse-3: actions"
+                             'help-echo (format "%s\n%s · %s\n%smouse-1: open · mouse-3: actions"
                                                 (roost--field task 'name)
                                                 (roost--host-label host)
-                                                (or repo "?"))
+                                                (or repo "?")
+                                                (roost--large-change-echo task))
                              row)
                       ;; As in the dashboard: unhighlighted, still the task's,
                       ;; and the current task's band reaches the window's edge.

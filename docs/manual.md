@@ -208,6 +208,19 @@ moves between them (so does `C-c C-o`),
 which starts in the worktree; it closes when its program exits, and every
 pane closes when the task stops.
 
+**See how much there is to read.** The task panel says how large a task's
+changes are, counted from where its work leaves the branch it merges into,
+with uncommitted work and new files included: `14 files +540 −88`, then the
+top-level directories they are in, `In docs/, src/, test/ and the top
+level`. A task whose changes reach 400 lines (added and removed together),
+10 files or 3 top-level directories gets a dim `±` after its name in the
+sidebar and dashboard, so you can tell an hour of reading from ten minutes
+before you open Magit; hover over the row for its numbers. The mark only
+gives the size: the task doesn't count as waiting for it. Studies of code
+review find that reviewers catch less, and take longer, as changes grow and
+spread; they support marking large changes more than these exact numbers,
+which you can change with `roost-large-change`.
+
 **Review in Magit.** `r` opens Magit on the task's worktree, through TRAMP for
 remote tasks. Stage, edit and commit as usual. The status names the task,
 keeps the agent's latest reply folded at the top, and lists the commits not
@@ -400,6 +413,9 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
   then shows at once, and for Claude Code a declined request and Esc too. A
   Codex task is `ready` once you have answered its startup questions, rather
   than at its first turn.
+- `roost-large-change` (`(:lines 400 :files 10 :directories 3)`): when a
+  task's row gets its `±`. Leave one out to mark by the others, as
+  `(:lines 400)`; nil marks none.
 - `roost-notes-file`: review notes not yet sent, kept across sessions.
 - `roost-note-box-lines` (4): how many lines of text the box for writing a
   note shows. Faces `roost-note` and `roost-note-button` color the notes and

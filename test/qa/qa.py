@@ -1802,6 +1802,27 @@ def merged(qa, repo):
         ("its branch is gone", lambda s: not qa.git(repo, "branch", "--list", branch))])
 
 
+@journey("A large change")
+def large(qa, repo):
+    """A task whose changes reach roost-large-change's sizes has a dim ± on
+    its row, and its panel says how large they are and where; it waits for
+    nothing more than another task would."""
+    name = new_task(qa, "ask sh -c \"mkdir -p docs src test && seq 450 > src/long.txt"
+                        " && echo a > docs/a.md && echo b > test/b.py\"")
+    answer_yes(qa, name)
+    qa.wait("its size", lambda s: "In docs/, src/ and test/" in panel_text(qa, s))
+    qa.step("Marked", expect=[
+        ("the panel counts the lines of its new files", lambda s: "± 3 files +452 −0" in panel_text(qa, s)),
+        ("its row in the sidebar has the mark", lambda s: "±" in sidebar_row(qa, s, name)),
+        ("and no status, once seen", lambda s: (qa.task(s, name) or {}).get("status") == "idle"
+         and sidebar_row(qa, s, name).endswith("±"))])
+    qa.keys("C-c r S")
+    qa.wait("the dashboard", lambda s: (qa.window(s, "roost-dashboard-mode") or {}).get("selected"))
+    qa.step("The dashboard marks it too", expect=[
+        ("its row has the mark", lambda s: any(name[:12] in line and "±" in line for line in
+                                               qa.window(s, "roost-dashboard-mode")["text"].splitlines()))])
+
+
 def github(qa, **canned):
     """Have the fake GitHub say CANNED: list.json and reviews.json, as JSON."""
     for name, value in canned.items():
@@ -2020,7 +2041,7 @@ def dropped(qa, repo):
 JOURNEYS = [sweep, answer, fold, resize, merge, review, panes, shell,
             dashboard, stop_resume, retire, send, attach, update, conflicts, restart, search, question_left, walk_away,
             frames, org, drafts, tabs,
-            forget, rename, fork, other_branch, merged, pull_request, exits, unreachable, scrollback, fleet, dropped]
+            forget, rename, fork, other_branch, merged, large, pull_request, exits, unreachable, scrollback, fleet, dropped]
 
 
 def main():

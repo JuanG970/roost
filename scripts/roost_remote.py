@@ -43,7 +43,7 @@ ACTIVE = ("starting", "running", "permission", "background")
 # States in which the agent process is known to have ended.
 ENDED = ("stopped", "exited", "failed", "crashed")
 # Computed per request and never persisted in a task record.
-TRANSIENT = ("live", "diff", "dirty", "files", "ahead", "behind", "update", "worktreeMissing",
+TRANSIENT = ("live", "diff", "dirty", "files", "size", "ahead", "behind", "update", "worktreeMissing",
              "prStatus", "unpushed", "lastMessage", "gitStamp", "agentWork", "merging", "landed", "conflicts")
 LAST_MESSAGE_TAIL = 256 * 1024
 LAST_MESSAGE_LIMIT = 2000
@@ -1835,10 +1835,13 @@ def status_paths(porcelain):
 
 def changed_files(worktree, base, uncommitted=frozenset(), limit=50):
     """The task's changed files since BASE, committed or not, at most
-    LIMIT of them. Line counts are absent for binary files, and untracked
-    files are marked so, as are files among UNCOMMITTED, those with changes
-    not yet committed; both come first."""
+    LIMIT of them, and the size of all of them: see `change_size`. Line
+    counts are absent for binary files, and untracked files are marked
+    so, as are files among UNCOMMITTED, those with changes not yet
+    committed; both come first."""
     files = []
+    # Where files were moved from: a move changes the directory it leaves.
+    moved = []
     fields = iter(read_git(worktree, "diff", "--numstat", "-z", base).stdout.split("\0"))
     for entry in fields:
         if not entry:
@@ -1846,7 +1849,7 @@ def changed_files(worktree, base, uncommitted=frozenset(), limit=50):
         added, deleted, path = entry.split("\t", 2)
         if not path:
             # A rename: its old and new paths follow.
-            next(fields, None)
+            moved.append(next(fields, ""))
             path = next(fields, "")
         file = dict(path=path)
         if added != "-":
@@ -1856,9 +1859,47 @@ def changed_files(worktree, base, uncommitted=frozenset(), limit=50):
         files.append(file)
     untracked = read_git(worktree, "ls-files", "--others", "--exclude-standard", "-z")
     files += [dict(path=path, untracked=True) for path in untracked.stdout.split("\0") if path]
+    size = change_size(worktree, files, moved)
     # The panel lists them first, so a long list keeps them.
     files.sort(key=lambda file: not (file.get("uncommitted") or file.get("untracked")))
-    return files[:limit]
+    return files[:limit], size
+
+
+def change_size(worktree, files, moved=()):
+    """How much FILES, all of a task's changed files, give you to read:
+    lines added and removed, how many files, and the top-level directories
+    they are in, or MOVED from. Whether any file is at the top level
+    itself is kept apart: it isn't a directory of its own. Git's own
+    statistics leave out files it doesn't track yet, so their lines are
+    counted here."""
+    added = sum(file.get("added", 0) for file in files)
+    deleted = sum(file.get("deleted", 0) for file in files)
+    added += sum(untracked_lines(worktree / file["path"]) for file in files if file.get("untracked"))
+    paths = [file["path"] for file in files] + [path for path in moved if path]
+    return dict(added=added, deleted=deleted, files=len(files),
+                directories=sorted({path.split("/", 1)[0] for path in paths if "/" in path}),
+                topLevel=any("/" not in path for path in paths))
+
+
+def untracked_lines(path, largest=1 << 20):
+    """Lines in PATH, a file Git doesn't track yet, as Git would count them
+    once added: none for a binary file, or a directory, such as a
+    repository inside this one. One over LARGEST bytes counts none, and
+    no more than that is read, though its agent may be writing it."""
+    try:
+        if path.is_symlink():
+            return 1  # Git keeps the path it points to.
+        if not path.is_file():
+            return 0
+        with path.open("rb") as file:
+            data = file.read(largest + 1)
+    except OSError:
+        return 0
+    if len(data) > largest:
+        return 0
+    if b"\0" in data[:8000]:
+        return 0  # Where Git looks to tell a binary file.
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1950,7 +1991,7 @@ def add_git_stats(tasks):
         dirty = read_git(worktree, "status", "--porcelain", "-z")
         task["diff"] = stats.stdout.strip()
         task["dirty"] = bool(dirty.stdout)
-        task["files"] = changed_files(worktree, base, status_paths(dirty.stdout))
+        task["files"], task["size"] = changed_files(worktree, base, status_paths(dirty.stdout))
         # A merge under way, as when an update conflicted, with its files in
         # conflict; null otherwise, so Emacs forgets one that has finished.
         task["merging"] = (dict(conflicts=read_git(worktree, "diff", "--name-only",
