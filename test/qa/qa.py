@@ -882,6 +882,63 @@ def tabs_shown(screen):
     return next((w["tabs"] for w in terminals(screen, selected["terminal"]) if w.get("tabs")), "")
 
 
+@journey("Drafts from an error, a file and a URL")
+def drafts(qa, repo):
+    """Where the work is starts the draft, and cancelling it goes back
+    there: a compilation error, and as Embark acts on them, a file and a
+    URL, which leave a draft you have written in alone."""
+    qa.keys("C-x C-f")
+    qa.type(str(repo / "notes.py") + "\r")
+    qa.wait("notes.py", lambda s: s["selected"] == "notes.py")
+    # Or `compile' asks to save what other journeys left modified, as
+    # the Org heading that records its task.
+    qa.emacs.eval("(save-some-buffers t)")
+    qa.keys("M-x")
+    qa.type("compile\r")
+    qa.wait("the compile command", lambda s: (s["prompt"] or "").startswith("Compile command"))
+    qa.keys("C-a C-k")
+    qa.type("printf 'notes.py:7: NameError: name NOTE is not defined\\n'; false\r")
+    qa.wait("the compilation", lambda s: qa.emacs.eval(
+        '(when-let* ((buffer (get-buffer "*compilation*"))) (with-current-buffer buffer'
+        ' (and (not (get-buffer-process buffer)) (string-match-p "exited abnormally" (buffer-string)) t)))') == "t")
+    qa.keys("C-x b")
+    qa.type("*compilation*\r")
+    qa.keys("M-<")
+    qa.keys("n")
+    qa.keys("C-c r c")
+    qa.wait("the draft", lambda s: (qa.window(s, "roost-compose-mode") or {}).get("selected"))
+    qa.step("The error as the prompt", expect=[
+        ("its line, with its place",
+         lambda s: "notes.py:7: NameError: name NOTE is not defined" in qa.window(s, "roost-compose-mode")["text"]),
+        ("in the project", lambda s: re.search(r"Project .*/notes\b", qa.window(s, "roost-compose-mode")["text"]))])
+    qa.keys("C-c C-k")
+    qa.wait("whether to discard it", lambda s: (s["prompt"] or "").startswith("Discard this task draft"))
+    qa.type("y")
+    qa.step("Cancelled", expect=[
+        ("back in the compilation", lambda s: s["selected"] == "*compilation*"),
+        ("no draft shown", lambda s: not qa.window(s, "roost-compose-mode"))])
+    qa.keys("C-x b")
+    qa.type("notes.py\r")
+    qa.keys("M-x")
+    qa.type("roost-new-task-from-file\r")
+    qa.wait("which file", lambda s: (s["prompt"] or "").startswith("New task about"))
+    qa.keys("C-a C-k")
+    qa.type(str(repo / "notes.py") + "\r")
+    qa.wait("the draft", lambda s: (qa.window(s, "roost-compose-mode") or {}).get("selected"))
+    qa.type("Explain add")
+    qa.step("A draft about the file", expect=[
+        ("named from the top of its checkout, under what you wrote",
+         lambda s: "Explain add\n\nnotes.py" in qa.window(s, "roost-compose-mode")["text"])])
+    qa.keys("M-x")
+    qa.type("roost-new-task-from-url\r")
+    qa.wait("which URL", lambda s: (s["prompt"] or "").startswith("New task about"))
+    qa.type("https://example.com/issues/4\r")
+    qa.wait("the draft", lambda s: (qa.window(s, "roost-compose-mode") or {}).get("selected"))
+    qa.step("The written draft kept", expect=[
+        ("what you wrote", lambda s: "Explain add" in qa.window(s, "roost-compose-mode")["text"]),
+        ("and not the URL", lambda s: "example.com" not in qa.window(s, "roost-compose-mode")["text"])])
+
+
 def new_task(qa, prompt):
     """Start a task with PROMPT from the menu; return its name once listed."""
     before = {t["name"] for t in qa.screen()["tasks"]}
@@ -1881,7 +1938,7 @@ def dropped(qa, repo):
 
 JOURNEYS = [sweep, answer, fold, resize, merge, review, panes, shell,
             dashboard, stop_resume, retire, send, update, conflicts, restart, search, question_left, walk_away,
-            frames, org, tabs,
+            frames, org, drafts, tabs,
             forget, rename, fork, other_branch, merged, pull_request, exits, unreachable, scrollback, fleet, dropped]
 
 

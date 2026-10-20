@@ -602,6 +602,7 @@ agent, use the dashboard, stop and
 resume an agent, retire a task or discard its work, send a prompt, bring a
 task up to date, restart Emacs with agents at work, search the
 conversations, work in a second frame, start a task from an Org heading,
+draft one from a compilation error, a file and a URL,
 keep a tab per task, two of the same name among them, forget a task, fork
 one's commits, follow a pull request from GitHub's checks and review to
 its merge, resume an agent that exited, see a host it can't reach,

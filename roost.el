@@ -264,7 +264,8 @@ still run."
 (defcustom roost-task-merged-functions nil
   "Functions called with TASK and BRANCH once TASK's work is merged into BRANCH.
 That is when `m' merges it, or when Roost sees GitHub merge its pull
-request while Emacs runs.  TASK is an alist, as for
+request while Emacs runs, into the branch the pull request went to.
+Each merge is reported once, though both can see it.  TASK is an alist, as for
 `roost-task-status-functions'.  A function that fails is reported, and
 the rest still run."
   :type 'hook)
@@ -930,8 +931,25 @@ bringing back the old name, which the task's tab and panel no longer have."
     (when (and previous (not (equal previous status)))
       (roost--run-task-hook 'roost-task-status-functions task previous status))
     (when (and old (not had-merged) (eq (roost--pr-state task) 'merged))
-      (roost--run-task-hook 'roost-task-merged-functions task (roost--field task 'integrationBranch)))
+      (let ((status (or (roost--field task 'prStatus) (roost--field task 'pr))))
+        ;; Into the branch the pull request went to, which an agent's own
+        ;; can choose.
+        (roost--report-merge task (alist-get 'head status)
+                             (or (alist-get 'base status) (roost--field task 'integrationBranch)))))
     task))
+
+(defvar roost--merges-reported (make-hash-table :test 'equal)
+  "The commit at which each task's merge was last reported, by task key.")
+
+(defun roost--report-merge (task commit branch)
+  "Run `roost-task-merged-functions' for TASK, merged at COMMIT into BRANCH.
+Once for each COMMIT: a merge on GitHub and `m' can both see one, as
+when a poll finds its pull request merged while `m' runs.  Commits made
+after a pull request merged, which `m' then merges, are another."
+  (let ((key (roost--key task)))
+    (unless (and commit (equal (gethash key roost--merges-reported) commit))
+      (when commit (puthash key commit roost--merges-reported))
+      (roost--run-task-hook 'roost-task-merged-functions task branch))))
 
 (defun roost--run-task-hook (hook &rest arguments)
   "Call each function on HOOK with ARGUMENTS, reporting any that fails.
@@ -4884,11 +4902,9 @@ comes in as one squashed commit, or a merge commit; see `roost-merge-style'."
                 (lambda (merged)
                   (roost--retired-workspace merged)
                   (roost--kill-worktree-buffers merged)
-                  ;; Its pull request's merge on GitHub ran them already.
-                  (unless (eq (roost--pr-state task) 'merged)
-                    (roost--run-task-hook 'roost-task-merged-functions merged
-                                          (or (roost--field merged 'integrationBranch)
-                                              (roost--field task 'integrationBranch))))
+                  (roost--report-merge merged (roost--field merged 'retiringCommit)
+                                       (or (roost--field merged 'integrationBranch)
+                                           (roost--field task 'integrationBranch)))
                   ;; The other tasks are measured against the branch that moved.
                   (roost--refresh-host (roost--field merged 'host) nil)
                   (message (if (eq roost-merge-style 'squash)

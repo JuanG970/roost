@@ -1428,7 +1428,7 @@ def first_failure(rollup):
     return min(times, key=parse_time) if times and all(parse_time(t) for t in times) else None
 
 
-PULL_REQUEST_FIELDS = "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"
+PULL_REQUEST_FIELDS = "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,baseRefName"
 # Seconds that asking GitHub about every task's pull requests may take.
 PULL_REQUEST_DEADLINE = 20
 # What `gh pr list` leaves out, for each of a repository's open pull
@@ -1645,7 +1645,8 @@ def check_pull_requests(store, tasks):
         except (AttributeError, TypeError):
             checks = failed = None
         task["prStatus"] = dict(state=pr.get("state"), draft=bool(pr.get("isDraft")),
-                                review=pr.get("reviewDecision") or None, checks=checks, head=pr.get("headRefOid"))
+                                review=pr.get("reviewDecision") or None, checks=checks, head=pr.get("headRefOid"),
+                                base=pr.get("baseRefName"))
         if pr.get("state") == "OPEN":
             task["prStatus"].update(reviews.get(pr.get("url"), {}), failedAt=failed, checkedAt=checked)
             task["unpushed"] = unpushed(task, pr.get("headRefOid"), tip)
