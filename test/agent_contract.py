@@ -228,8 +228,8 @@ class CodexSession(claude_contract.Session):
     def __init__(self, program_status=False):
         super().__init__(program_status)
         config = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
-        # Trusting the repository and Roost's hooks writes to Codex's config:
-        # put it back as it was.
+        # Trusting the repository and Roost's hooks writes to Codex's config;
+        # those tables are put back as they were, and the rest left alone.
         self.config = (config, config.read_text() if config.is_file() else None)
 
     def startup(self):
@@ -291,11 +291,13 @@ class CodexSession(claude_contract.Session):
 
     def clean_up(self):
         super().clean_up()
-        path, text = self.config
-        if text is None:
-            path.unlink(missing_ok=True)
-        else:
-            path.write_text(text)
+        path, before = self.config
+        if path.is_file():
+            after = restore_codex_tables(path.read_text(), before, self.repo)
+            if after.strip() or before is not None:
+                path.write_text(after)
+            else:
+                path.unlink()
 
 
 class PiSession(claude_contract.Session):
@@ -324,6 +326,40 @@ class PiSession(claude_contract.Session):
         record = self.until(lambda: self.record().get("lastEvent") == "Stop" and self.record(), 180, "the reply")
         self.check("PING" in (record.get("lastReply") or self.listed(full=True).get("lastMessage") or ""),
                    "the reply is read", record.get("lastReply"))
+
+
+# A TOML table's header, on a line of its own.
+TOML_HEADER = re.compile(r"\[\[?[^\]=]+\]\]?\s*(#.*)?")
+
+
+def toml_tables(text):
+    """TEXT as (header, text) pairs, a table's header and the lines it
+    holds, the first of them without a header."""
+    tables = [[None, ""]]
+    for line in text.splitlines(keepends=True):
+        if TOML_HEADER.fullmatch(line.strip()):
+            tables.append([line.strip(), ""])
+        tables[-1][1] += line
+    return [tuple(table) for table in tables]
+
+
+def restore_codex_tables(after, before, repo):
+    """AFTER, Codex's config, with the tables a contract run makes as they
+    were in BEFORE, or gone if BEFORE had none: the scratch repository's
+    trust, and the review of hooks given on the command line, which Codex
+    keys by event alone, so a run replaces the review of Roost's real hooks.
+    Whatever else changed meanwhile, as another Codex's, stays."""
+    def ours(header):
+        return bool(header) and ((header.startswith("[projects.") and str(repo) in header)
+                                 or header.startswith('[hooks.state."/<session-flags>/'))
+    kept = {header: text for header, text in toml_tables(before or "") if ours(header)}
+    result = []
+    for header, text in toml_tables(after):
+        if ours(header):
+            text = kept.pop(header, "")
+        result.append(text)
+    result.extend(kept.values())
+    return "".join(result)
 
 
 SESSIONS = {"claude": claude_contract.Session, "codex": CodexSession, "pi": PiSession}

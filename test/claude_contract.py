@@ -241,15 +241,16 @@ class Session:
 
     def run(self):
         print("Live session of %s in %s" % (self.agent, self.repo))
-        self.task = self.rpc("create", directory=str(self.repo), name="contract", socket=self.socket,
-                             agent=self.agent, prompt="Reply with the single word PONG.",
-                             command=self.command, programStatus=self.program_status)
-        self.step("a first turn, from the task's prompt")
+        # However it ends, Ctrl-C too, the agent and its tmux server go.
         try:
-            self.steps()
-        except Exception as error:  # A failed step ends the session; clean up after it.
-            self.check(False, "%s: %s" % (type(error).__name__, error))
-        try:
+            self.task = self.rpc("create", directory=str(self.repo), name="contract", socket=self.socket,
+                                 agent=self.agent, prompt="Reply with the single word PONG.",
+                                 command=self.command, programStatus=self.program_status)
+            self.step("a first turn, from the task's prompt")
+            try:
+                self.steps()
+            except Exception as error:  # A failed step ends the session.
+                self.check(False, "%s: %s" % (type(error).__name__, error))
             # Only a run that went as it should replaces the capture.
             if not self.failures:
                 path = agent_captures.save(self.store, self.store.read(self.task["id"]),

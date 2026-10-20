@@ -46,7 +46,8 @@ runs on the Mac, each passing every check:
 - Codex 0.163.0, its default model, read-only with approval on request,
   with and without the relay. A fresh repository asks to trust it and then
   to review Roost's eight hooks, both before the task's prompt runs; the
-  driver answers both, and puts `~/.codex/config.toml` back afterwards.
+  driver answers both, and afterwards puts back the tables of
+  `~/.codex/config.toml` they wrote, leaving the rest as Codex left it.
   Relayed, a declined request reports `working` 85 ms before its `Interrupt`
   hook, so it shows as approved for that long.
 - Pi 1.3.0 on LM Studio's qwen3.6-35b-a3b (49152 tokens of context): a turn,

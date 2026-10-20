@@ -42,6 +42,9 @@ STATE = "/state"
 HOME = "/home/user"
 TASK_ID = "0123456789abcdef"
 RUN_ID = "run"
+# When a replay starts: times in a capture count from its first event, and
+# the helper takes a time of 0 for one it never noted.
+EPOCH = 1e9
 # What each event's `then` records of the task.
 FIELDS = ("status", "lastEvent", "request", "error", "lastReply", "agentSession")
 # Ids an agent makes up, as a pattern and the stand-in's form.
@@ -78,7 +81,7 @@ def scrub(entries, task, store_root):
     for entry in entries:
         line = json.dumps(entry, ensure_ascii=False)
         for real, replacement in paths:
-            line = line.replace(json.dumps(real)[1:-1], replacement)
+            line = line.replace(json.dumps(real, ensure_ascii=False)[1:-1], replacement)
         for pattern, form in IDS:
             line = pattern.sub(lambda match: stand_in(match, form), line)
         entry = json.loads(line)
@@ -95,7 +98,7 @@ def replay(meta, entries):
     in order by a task of META's agent: the `then` of each, or None for a
     step. Times are the capture's, so a report and a hook are weighed by
     when each came, as the live helper weighed them."""
-    clock = [0.0]
+    clock = [EPOCH]
     results = []
     with tempfile.TemporaryDirectory() as root, \
             mock.patch.object(roost.time, "time", lambda: clock[0]):
@@ -107,13 +110,16 @@ def replay(meta, entries):
         store.save(task)
         for entry in entries:
             if "hook" in entry:
-                clock[0] = entry["at"]
+                clock[0] = EPOCH + entry["at"]
                 roost.update_hook(store, TASK_ID, entry["hook"], RUN_ID)
             elif "report" in entry:
-                clock[0] = entry["at"]
+                clock[0] = EPOCH + entry["at"]
+                report = dict(entry["report"])
+                if "receivedAt" in report:
+                    report["receivedAt"] += EPOCH
                 with store.locked():
                     task = store.read(TASK_ID)
-                    if roost.apply_program_status(task, entry["report"], RUN_ID):
+                    if roost.apply_program_status(task, report, RUN_ID):
                         store.save(task)
             else:
                 results.append(None)
