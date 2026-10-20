@@ -1481,7 +1481,7 @@ def first_failure(rollup):
     return min(times, key=parse_time) if times and all(parse_time(t) for t in times) else None
 
 
-PULL_REQUEST_FIELDS = "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid"
+PULL_REQUEST_FIELDS = "number,url,state,isDraft,reviewDecision,statusCheckRollup,headRefOid,baseRefName"
 # Seconds that asking GitHub about every task's pull requests may take.
 PULL_REQUEST_DEADLINE = 20
 # What `gh pr list` leaves out, for each of a repository's open pull
@@ -1698,16 +1698,29 @@ def check_pull_requests(store, tasks):
         except (AttributeError, TypeError):
             checks = failed = None
         task["prStatus"] = dict(state=pr.get("state"), draft=bool(pr.get("isDraft")),
-                                review=pr.get("reviewDecision") or None, checks=checks, head=pr.get("headRefOid"))
+                                review=pr.get("reviewDecision") or None, checks=checks, head=pr.get("headRefOid"),
+                                base=pr.get("baseRefName"))
         if pr.get("state") == "OPEN":
             task["prStatus"].update(reviews.get(pr.get("url"), {}), failedAt=failed, checkedAt=checked)
             task["unpushed"] = unpushed(task, pr.get("headRefOid"), tip)
         record = dict(number=pr["number"], url=pr.get("url"), state=pr.get("state"), head=pr.get("headRefOid"))
+        # Where it merges, for views that ask GitHub nothing.
+        if pr.get("baseRefName"):
+            record["base"] = pr["baseRefName"]
         # Shown or not, as when an open one goes to another base, or listed
         # or not, as when the branch has had more than a page of them.
-        if (any(other.get("state") == "MERGED" and other.get("headRefOid") == tip for other in prs)
-                or recorded_merge_at(task, tip)):
+        merged = [other for other in prs if other.get("state") == "MERGED" and other.get("headRefOid") == tip]
+        if merged or recorded_merge_at(task, tip):
             record["mergedHead"] = tip
+            # And each branch it went to, which the one shown need not say,
+            # those recorded included, as a later lookup can list them no more.
+            recorded = recorded_pull_request(task)
+            bases = list(recorded.get("mergedBases") or []) if recorded.get("mergedHead") == tip else []
+            for other in merged:
+                if other.get("baseRefName") and other["baseRefName"] not in bases:
+                    bases.append(other["baseRefName"])
+            if bases:
+                record["mergedBases"] = bases
         try:
             with store.locked():
                 current = store.read(task["id"])
