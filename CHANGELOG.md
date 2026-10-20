@@ -6,6 +6,12 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- [OpenCode](https://opencode.ai) is a fourth agent, `"opencode"` in
+  `roost-agent-commands` and `roost-default-agent`. Its tasks show the
+  same statuses as the others, from a plugin Roost names in OpenCode's
+  inline config, beside your own config. Roost also looks for agents in
+  `~/.opencode/bin`, where OpenCode's installer puts it. If you set
+  `roost-agent-commands` yourself, add `("opencode" "opencode")` to use it.
 - A task started from a branch merges into that branch: `m`, `u`, `P` and
   the `↑`/`↓` counts use it, and the new task draft says "merges into
   release" next to the starting ref, as does `m`'s question. A
