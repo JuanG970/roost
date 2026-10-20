@@ -200,12 +200,105 @@ def atomic_json(path, data):
     atomic_text(path, json.dumps(data, ensure_ascii=False) + "\n")
 
 
+# How many days of status changes the history keeps.
+HISTORY_DAYS = 30
+HISTORY_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def history_state(task):
+    """What the history keeps of TASK, a record or None: its status, whether
+    you have seen its agent since its last event, and its `turn`, what of
+    its pull request or work waits on you as Emacs last said."""
+    if task is None:
+        return None
+    return dict(status=task.get("status"),
+                seen=bool(task.get("updatedAt")) and task.get("seen") == task.get("updatedAt"),
+                turn=text(task.get("turn")))
+
+
+class History:
+    """Each change to what `history_state` keeps of a task, as a line of
+    JSON in a file for each day (UTC), with what it was before. Emacs
+    measures from it how long agents worked and waited on you."""
+
+    def __init__(self, folder):
+        self.folder = folder
+
+    def note(self, task_id, before, after):
+        """Note that a task's record changed from BEFORE to AFTER, either None
+        when there was none. A failure to note it fails nothing else."""
+        was, state = history_state(before), history_state(after)
+        if was == state:
+            return
+        # To the millisecond below, so never after a time read later.
+        at = int(time.time() * 1000) / 1000
+        day = time.strftime("%Y-%m-%d", time.gmtime(at))
+        entry = dict(at=at, id=task_id, **(state or dict(status=None)), was=was)
+        with contextlib.suppress(OSError):
+            self.folder.mkdir(mode=0o700, exist_ok=True)
+            path = self.folder / (day + ".jsonl")
+            new = not path.exists()
+            line = (json.dumps(entry, ensure_ascii=False) + "\n").encode()
+            # One short line, written whole: hooks note changes at once.
+            with path.open("a+b") as log:
+                # A line cut short, as by a full disk, ends here, rather
+                # than taking this one with it.
+                if log.seek(0, os.SEEK_END):
+                    log.seek(-1, os.SEEK_END)
+                    if log.read(1) != b"\n":
+                        line = b"\n" + line
+                log.write(line)
+            if new:
+                self.prune(at)
+
+    def days(self):
+        """The history's files, oldest first, each (DAY . PATH)."""
+        with contextlib.suppress(OSError):
+            return sorted((path.stem, path) for path in self.folder.glob("*.jsonl")
+                          if HISTORY_DAY.fullmatch(path.stem))
+        return []
+
+    def prune(self, at):
+        oldest = time.strftime("%Y-%m-%d", time.gmtime(at - HISTORY_DAYS * 86400))
+        for day, path in self.days():
+            if day < oldest:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+
+    def entries(self, path):
+        """The changes noted in PATH, a day's file, as written."""
+        with contextlib.suppress(OSError):
+            for line in path.read_text(errors="replace").splitlines():
+                # A line cut short, as by a full disk, is left out.
+                with contextlib.suppress(ValueError):
+                    entry = json.loads(line)
+                    if isinstance(entry, dict) and isinstance(entry.get("at"), (int, float)):
+                        yield entry
+
+    def begun(self):
+        """When the history kept begins, in seconds since the epoch, or None
+        without one: before then, nothing was noted, as before this helper."""
+        for _, path in self.days():
+            for entry in self.entries(path):
+                return entry["at"]
+        return None
+
+    def read(self, since):
+        """The changes noted since SINCE, in seconds since the epoch, oldest first."""
+        first = time.strftime("%Y-%m-%d", time.gmtime(since))
+        changes = [entry for day, path in self.days() if day >= first
+                   for entry in self.entries(path) if entry["at"] >= since]
+        changes.sort(key=lambda entry: entry["at"])
+        return changes
+
+
 class Store:
     def __init__(self, root):
         self.root = Path(root).expanduser().absolute()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.tasks_dir = self.root / "tasks"
         self.tasks_dir.mkdir(mode=0o700, exist_ok=True)
+        self.history = History(self.root / "history")
 
     @contextlib.contextmanager
     def locked(self):
@@ -253,9 +346,19 @@ class Store:
         recorded_integration(task)
         return task
 
+    def recorded(self, task_id):
+        """TASK_ID's record as saved, or None."""
+        with contextlib.suppress(OSError, ValueError):
+            record = json.loads(self.path(task_id).read_text())
+            if isinstance(record, dict):
+                return record
+        return None
+
     def save(self, task):
-        atomic_json(self.path(task["id"]),
-                    {key: value for key, value in task.items() if key not in TRANSIENT})
+        before = self.recorded(task["id"])
+        record = {key: value for key, value in task.items() if key not in TRANSIENT}
+        atomic_json(self.path(task["id"]), record)
+        self.history.note(task["id"], before, record)
 
     def remove(self, task_id):
         """Delete a task's record and hook settings. Conversations are kept,
@@ -263,13 +366,15 @@ class Store:
         also for tasks created before Roost noted it."""
         path = self.path(task_id)
         shutil.rmtree(self.attachments(task_id), ignore_errors=True)
-        with contextlib.suppress(OSError, ValueError, AttributeError):
-            repo = json.loads(path.read_text()).get("repo")
-            if isinstance(repo, str):
-                remember_repository(self, repo)
+        before = self.recorded(task_id)
+        if before and isinstance(before.get("repo"), str):
+            with contextlib.suppress(OSError, ValueError):
+                remember_repository(self, before["repo"])
         for stale in (path, path.with_suffix(".settings"), path.with_suffix(".removing")):
             with contextlib.suppress(FileNotFoundError):
                 stale.unlink()
+        if before:
+            self.history.note(task_id, before, None)
 
     def all(self):
         tasks = []
@@ -2060,6 +2165,40 @@ def seen(store, task, updated):
     return task
 
 
+TURNS = ("ci failed", "comments", "to merge", "conflicts")
+
+
+def turn(store, task, value):
+    """Record what of TASK's pull request or work waits on you, as Emacs
+    sees it: one of TURNS, or None. Emacs alone asks GitHub and judges it,
+    and the history notes it beside what the agent does. Not an event of
+    the agent's, so its `updatedAt` stays as it was."""
+    if value is not None and value not in TURNS:
+        raise RoostError("Unknown turn: %r" % (value,))
+    if task.get("turn") != value:
+        if value is None:
+            task.pop("turn", None)
+        else:
+            task["turn"] = value
+        store.save(task)
+    return task
+
+
+def history(store, request):
+    """How tasks' statuses changed since SINCE, in seconds since the epoch,
+    each task as it is now, and when the history begins, for Emacs to
+    measure how long agents worked and waited on you. Read under the lock,
+    as records and the history change together: a task that changed
+    between the two would seem to have been as it is now all along."""
+    since = request.get("since")
+    if not isinstance(since, (int, float)) or isinstance(since, bool):
+        raise RoostError("A history starts at a time")
+    with store.locked():
+        return dict(now=time.time(), begun=store.history.begun(), changes=store.history.read(since),
+                    tasks=[dict(id=task["id"], **history_state(task)) for task in store.all()
+                           if isinstance(task.get("id"), str) and task.get("status") != "retired"])
+
+
 def rename(store, task, name):
     """Name TASK NAME, here and on its agent's tmux window. Its branch and
     worktree keep the name it started with: a pull request, or the agent's
@@ -3771,7 +3910,7 @@ def require_not_removing(store, task, action):
     refuse all but finishing the task. And while work keeps the worktree,
     such as a push for its pull request, refuse to finish the task, before
     its agent is stopped or its branch merged."""
-    if action in ("seen", "inspect") or not (task.get("removing") or action in FINISHING):
+    if action in ("seen", "turn", "inspect") or not (task.get("removing") or action in FINISHING):
         return
     holder = worktree_holder(store, task)
     if holder == "removal":
@@ -3805,6 +3944,7 @@ TASK_ACTIONS = {
     "attach": lambda store, task, request: attach(store, task, request.get("files")),
     "inspect": lambda store, task, request: inspect(store, task),
     "seen": lambda store, task, request: seen(store, task, request.get("updatedAt")),
+    "turn": lambda store, task, request: turn(store, task, text(request.get("turn"))),
     "rename": lambda store, task, request: rename(store, task, request.get("name")),
     "retire": lambda store, task, request: retire(store, task, merged_head=request.get("mergedHead")),
     "merge": lambda store, task, request: retire(store, task, merge=True, merged_head=request.get("mergedHead"),
@@ -3826,6 +3966,8 @@ def rpc(request):
             return {"ok": True, "result": doctor(store, request)}
         if action == "issues":
             return {"ok": True, "result": issues(request)}
+        if action == "history":
+            return {"ok": True, "result": history(store, request)}
         if action == "search":
             # Records are written whole, and reading transcripts takes a
             # while: hooks must not wait on the registry lock meanwhile.

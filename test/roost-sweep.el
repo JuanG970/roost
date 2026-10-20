@@ -292,6 +292,24 @@ Host \"gone\" failed to search."
         (setq found pos)))
     found))
 
+(defun roost-sweep--workload-setup (state)
+  "Make the current buffer Roost's workload, for a day STATE's task worked in.
+It ran for most of an hour, until ten minutes ago, and is as it is since."
+  (let* ((task (gethash (roost-sweep--key state) roost--tasks))
+         (now (+ (roost--day-start (float-time)) 43200))
+         (id (roost--field task 'id))
+         (running '((status . "running") (seen) (turn)))
+         (since `((status . ,(roost--field task 'status)) (seen . ,(roost--seen-p task))
+                  (turn . ,(roost--turn task)))))
+    (setq roost--workload
+          (list :since (roost--day-start now (- 1 roost--workload-days)) :now now
+                :replies `((,(roost--field task 'host)
+                            (now . ,now) (begun . ,(- now 7200))
+                            (changes ((at . ,(- now 3600)) (id . ,id) ,@running (was))
+                                     ((at . ,(- now 600)) (id . ,id) ,@since (was . ,running)))
+                            (tasks ((id . ,id) ,@since))))))
+    (roost--workload-compute)))
+
 (defvar roost-sweep--views
   '((panel :mode roost-task-info-mode :render roost--render-task-info :widths (40 100)
            :layouts (selected none other both) :setup roost-sweep--panel-setup)
@@ -301,14 +319,19 @@ Host \"gone\" failed to search."
              :layouts (selected none other both) :point roost-sweep--row :sized t)
     (search :mode roost-search-mode :render roost--render-search :buffer "*roost search*"
             :layouts (selected none other both) :setup roost-sweep--search-setup :point roost-sweep--hit
-            :sized t))
+            :sized t)
+    (workload :mode roost-workload-mode :render roost--render-workload :buffer "*roost workload*"
+              :layouts (selected none other both) :setup roost-sweep--workload-setup
+              :keys (roost-workload)))
   "Roost's views, each (NAME . PLIST).
 :mode makes the buffer, :setup gives it what it shows for a state,
 :render draws it, :point finds the state's task in it, and :buffer names
 it.  :widths are the task panel's widths to try, and :layouts the
 windows to show it in, the first as actions are tried: see
 `roost-sweep--draw'.  :sized means it fits the window it is in, so with
-none it draws for a width of its own, and isn't compared with the rest.")
+none it draws for a width of its own, and isn't compared with the rest.
+:keys are the commands of a view with few keys, which the sweep must
+reach; for one without, it must reach more than six.")
 
 (defun roost-sweep--view (view property)
   "PROPERTY of VIEW in `roost-sweep--views'."
@@ -676,7 +699,10 @@ Return them as (PROBLEM . PLACES), PLACES naming the view, state and width."
                       "probe" "the report" "https://example.com/ci" "+"))
        (should (member label buttons)))
      (dolist (view (mapcar #'car roost-sweep--views))
-       (should (length> (seq-filter (lambda (key) (eq (car key) view)) keys) 6))))
+       (let ((found (seq-filter (lambda (key) (eq (car key) view)) keys)))
+         (if-let* ((commands (roost-sweep--view view :keys)))
+             (dolist (command commands) (should (member (cons view command) found)))
+           (should (length> found 6))))))
    (pcase-dolist (`(,view ,state ,width ,action)
                   '((panel "running" 40 (button "Show the whole prompt" . 0))
                     (panel "after a later prompt" 40 (button "Show the whole prompt" . 0))
@@ -709,6 +735,19 @@ Return them as (PROBLEM . PLACES), PLACES naming the view, state and width."
    ;; the prompt says "the report" too.
    (let ((link (roost-sweep--try 'panel "permission" 40 '((button "the report" . 0)))))
      (should (equal (cdr (assq 'browse-url (plist-get link :outside))) '("https://example.com/report"))))))
+
+(ert-deftest roost-sweep-history-waits-on-you-as-the-views-say ()
+  ;; The workload counts what waited on you from what hosts note of each
+  ;; task, and Emacs's `turn': it must agree with what Roost shows.  A
+  ;; task starting waits after a grace the history counts from its start.
+  (roost-sweep--world
+    (dolist (state (mapcar #'car roost-sweep--gallery))
+      (let ((task (gethash (roost-sweep--key state) roost--tasks)))
+        (unless (equal (roost--field task 'status) "starting")
+          (should (equal (list state (and (roost--waiting-p task) t))
+                         (list state (and (roost--history-waiting-p (roost--field task 'status) (roost--seen-p task)
+                                                                    (roost--turn task))
+                                          t)))))))))
 
 (ert-deftest roost-sweep-views-draw-the-same-each-time ()
   (roost-test--isolated

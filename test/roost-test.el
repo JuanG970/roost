@@ -6,6 +6,9 @@
 (defvar persp-modestring-dividers nil)
 (defvar evil-want-keybinding)
 
+(defconst roost-test--report-turn (symbol-function 'roost--report-turn)
+  "Roost's `roost--report-turn', which `roost-test--isolated' stubs.")
+
 (defmacro roost-test--isolated (&rest body)
   (let ((scratch (make-symbol "scratch")))
     ;; Removed afterwards: the sweep runs thousands of tests, and Roost's
@@ -25,6 +28,8 @@
          (roost--pr-verdicts (make-hash-table :test 'equal))
          (roost--merges-reported (make-hash-table :test 'equal))
          (roost--seen (make-hash-table :test 'equal))
+         (roost--turns-sent (make-hash-table :test 'equal))
+         (roost--workload nil)
          (roost--errors (make-hash-table :test 'equal))
          (roost--installed (make-hash-table :test 'equal))
          (roost--refreshing (make-hash-table :test 'equal))
@@ -40,8 +45,10 @@
          (roost--requests nil) (roost-notify nil) (roost--current-task nil) (roost--next-unblocked nil)
          (roost--perspectives (make-hash-table :test 'equal)))
      (set-frame-parameter nil 'roost-task nil)
-     ;; Seeing an agent is recorded on its host too; tests that check it say so.
+     ;; Seeing an agent is recorded on its host too, and so is what of its
+     ;; pull request or work waits on you; tests that check it say so.
      (cl-letf (((symbol-function 'roost--record-seen) #'ignore)
+               ((symbol-function 'roost--report-turn) #'ignore)
                ;; A question nobody stubbed would wait for input forever.
                ((symbol-function 'y-or-n-p) (lambda (prompt &rest _) (error "Unexpected question: %s" prompt)))
                ((symbol-function 'yes-or-no-p) (lambda (prompt) (error "Unexpected question: %s" prompt))))
@@ -7681,6 +7688,253 @@ With INITIAL, the box must start out holding it."
       ;; Every line of the file is there.
       (dolist (number (number-sequence 1 10))
         (roost-test--goto-line-text (format "line %d" number))))))
+
+;;;; Workload
+
+(defun roost-test--history (since now changes &rest tasks)
+  "A host's history reply from SINCE to NOW, of CHANGES and TASKS as they are.
+Each change is (AT ID STATUS SEEN TURN); its `was' is the change before
+it of the same ID's, or nil for the first."
+  (let (last)
+    `((now . ,now)
+      (begun . ,since)
+      (changes
+       ,@(mapcar (pcase-lambda (`(,at ,id ,status ,seen ,turn))
+                   (let ((change `((at . ,at) (id . ,id) (status . ,status) (seen . ,seen) (turn . ,turn)
+                                   (was . ,(cdr (assoc id last))))))
+                     (setf (alist-get id last nil nil #'equal)
+                           (and status `((status . ,status) (seen . ,seen) (turn . ,turn))))
+                     change))
+                 changes))
+      (tasks ,@(mapcar (pcase-lambda (`(,id ,status ,seen ,turn))
+                         `((id . ,id) (status . ,status) (seen . ,seen) (turn . ,turn)))
+                       tasks)))))
+
+(ert-deftest roost-history-spans-say-when-agents-worked-and-waited ()
+  (let* ((roost-startup-grace 15)
+         (reply (roost-test--history
+                 1000 5000
+                 '((1100 "a" "starting" nil nil)
+                   (1110 "a" "running" nil nil)
+                   ;; Done, then seen 10 minutes later.
+                   (2000 "a" "ready" nil nil)
+                   (2600 "a" "ready" t nil)
+                   ;; Asked, answered, done, and its pull request to merge.
+                   (3000 "a" "running" nil nil)
+                   (3500 "a" "permission" nil nil)
+                   (3700 "a" "background" nil nil)
+                   (3800 "a" "ready" nil nil)
+                   (3900 "a" "ready" t nil)
+                   (3950 "a" "ready" t "to merge")
+                   (4400 "a" nil nil nil)
+                   ;; Stuck starting, then at work beside the rest.
+                   (1500 "b" "starting" nil nil)
+                   (1600 "b" "running" nil nil)
+                   ;; Running before the history begins.
+                   (1200 "c" "ready" nil nil))
+                 ;; As it is now, the same since.
+                 '("d" "running" nil nil)
+                 '("e" "ready" t nil))))
+    ;; c's first change says what it was: running, from the start.
+    (setf (alist-get 'was (seq-find (lambda (change) (equal (alist-get 'id change) "c"))
+                                    (alist-get 'changes reply)))
+          '((status . "running") (seen) (turn)))
+    (should (equal (sort (roost--history-spans reply 1000)
+                         (lambda (a b) (or (< (nth 1 a) (nth 1 b))
+                                           (and (= (nth 1 a) (nth 1 b)) (< (nth 2 a) (nth 2 b))))))
+                   '((work 1000 1200) (work 1000 5000)
+                     (work 1110 2000) (wait 1200 5000) (wait 1515 1600) (work 1600 5000)
+                     (wait 2000 2600) (work 3000 3500) (wait 3500 3700) (work 3700 3800)
+                     (wait 3800 3900) (wait 3950 4400))))
+    ;; Without a start in sight, waiting starts where the history does.
+    (should (equal (roost--history-spans (roost-test--history 1000 1100 nil '("s" "starting" nil nil)) 1000)
+                   '((wait 1015 1100))))
+    ;; Nor before the host's history begins, as when its helper was updated
+    ;; today: an agent at work then is counted from then.
+    (let ((today (roost-test--history 1000 5000 '((4000 "r" "ready" nil nil)) '("w" "running" nil nil))))
+      (setf (alist-get 'begun today) 3000
+            (alist-get 'was (car (alist-get 'changes today))) '((status . "running") (seen) (turn)))
+      (should (equal (sort (roost--history-spans today 1000)
+                           (lambda (a b) (or (< (nth 1 a) (nth 1 b))
+                                             (and (= (nth 1 a) (nth 1 b)) (< (nth 2 a) (nth 2 b))))))
+                     '((work 3000 4000) (work 3000 5000) (wait 4000 5000))))
+      ;; With no history at all, nothing.
+      (setf (alist-get 'begun today) nil (alist-get 'changes today) nil)
+      (should-not (roost--history-spans today 1000)))))
+
+(ert-deftest roost-history-waits-on-you-as-roost-waiting-p-has-it ()
+  (roost-test--isolated
+   (let ((updated "2026-10-03T20:00:00+00:00"))
+     (dolist (status '("running" "background" "permission" "ready" "failed" "crashed" "exited" "stopped"))
+       (dolist (seen '(nil t))
+         (dolist (live '(nil t))
+           (let ((task (roost--cache-task "dev" (append `((live . ,live) (seen . ,(and seen updated)))
+                                                        (roost-test--task nil status)))))
+             (should (eq (and (roost--waiting-p task) t)
+                         (and (roost--history-waiting-p status seen nil) t))))))))))
+
+(ert-deftest roost-time-away-is-left-out-of-waiting ()
+  (let ((roost--away 1800))
+    (should (equal (roost--workload-present '(100 50 400 3000 3100) 3200)
+                   '((50 . 400) (3000 . 3200))))
+    (should (equal (roost--workload-present '(100) 5000) nil))
+    (let ((tally (roost--workload-tally '((wait 200 3200) (wait 3050 3060) (work 0 500) (work 500 900)
+                                          (work 600 700))
+                                        '((50 . 400) (3000 . 3200)) 0 4000)))
+      ;; 200 waited while you were here, then 200 more after you came back.
+      (should (equal (plist-get tally :wait) 410))
+      (should (equal (plist-get tally :longest) 400))
+      (should (equal (plist-get tally :work) 1000))
+      ;; One agent's work ending as another's begins is one at a time.
+      (should (equal (plist-get tally :peak) 2)))
+    ;; Within a day, only what falls in it.
+    (should (equal (roost--workload-tally '((work 0 500) (wait 100 300)) '((0 . 1000)) 200 400)
+                   '(:peak 1 :work 200 :wait 100 :longest 100)))))
+
+(ert-deftest roost-days-start-at-midnight ()
+  (let ((now (float-time)))
+    (dotimes (day 9)
+      (let ((start (roost--day-start now (- day))))
+        (should (equal (format-time-string "%H:%M:%S" start) "00:00:00"))
+        (should (equal (format-time-string "%F" start)
+                       (format-time-string "%F" (- (roost--day-start now (- 1 day)) 1))))))))
+
+(ert-deftest roost-workload-shows-today-and-the-week ()
+  (roost-test--isolated
+   (let* ((today (roost--day-start (float-time)))
+          ;; Noon, with the morning's changes before it.
+          (now (+ today 43200))
+          (float-time (symbol-function 'float-time))
+          (roost--away 1800)
+          asked)
+     (cl-letf (((symbol-function 'float-time) (lambda (&optional time) (if time (funcall float-time time) now)))
+               ((symbol-function 'roost--hosts) (lambda () '(nil "gone")))
+               ((symbol-function 'roost--request)
+                (lambda (host action parameters success failure)
+                  (push (list host action (alist-get 'since parameters)) asked)
+                  (if host
+                      (funcall failure "ssh: connect to host gone\nConnection refused")
+                    (funcall success
+                             (roost-test--history
+                              (alist-get 'since parameters) now
+                              `((,(- now 3600) "a" "running" nil nil)
+                                (,(- now 3000) "a" "ready" nil nil)
+                                (,(- now 2700) "a" "ready" t nil)
+                                ;; Away for an hour, with b waiting.
+                                (,(- now 2640) "b" "ready" nil nil)
+                                (,(- now 300) "b" "ready" t nil)
+                                (,(- now 240) "a" "running" nil nil))))))))
+       (save-window-excursion
+         (roost-workload)
+         (with-current-buffer "*roost workload*"
+           (should (derived-mode-p 'roost-workload-mode))
+           (let ((text (buffer-string)))
+             (should (string-match-p "^Today +1 +14m +5m +5m +21m$" text))
+             (should (string-match-p "^Week +1 +14m +5m +5m +21m$" text))
+             (should (string-match-p "gone didn't answer, so it isn't counted: Connection refused" text))
+             (should (= (length (seq-filter (lambda (line) (string-match-p "^[A-Z][a-z]+ .*–$" line))
+                                            (split-string text "\n")))
+                        6)))
+           (should (equal (mapcar #'cadr asked) '("history" "history")))
+           ;; From before the week, to tell whether you were here as it began.
+           (should (= (nth 2 (car asked)) (- (roost--day-start now -6) roost--away)))
+           (kill-buffer)))))))
+
+(ert-deftest roost-waiting-across-the-start-of-the-week-counts-from-there ()
+  ;; A task that waited from before the week began, with you there, waited
+  ;; on you from its first moment; work and waiting before it aren't counted.
+  (roost-test--isolated
+   (let* ((roost--away 1800)
+          (roost--workload
+           (list :since 100000 :asked 98200 :now 100700
+                 :replies `((nil . ,(roost-test--history 98200 100700
+                                                         '((99000 "a" "running" nil nil)
+                                                           (99400 "a" "ready" nil nil)
+                                                           (100600 "a" "ready" t nil))))))))
+     (roost--workload-compute)
+     (should (equal (plist-get roost--workload :week) '(:peak 0 :work 0 :wait 600 :longest 600))))))
+
+(ert-deftest roost-workload-takes-only-the-replies-to-its-latest-request ()
+  ;; `g' while hosts are answering asks again: an earlier answer, coming
+  ;; late, must not replace a later one.
+  (roost-test--isolated
+   (let ((roost--workload-generation 0) replies)
+     (cl-letf (((symbol-function 'roost--hosts) (lambda () '(nil)))
+               ((symbol-function 'roost--request)
+                (lambda (_host _action parameters success failure)
+                  (push (list success failure (alist-get 'since parameters)) replies))))
+       (save-window-excursion
+         (roost-workload)
+         (roost-workload)
+         (pcase-let ((`((,_ ,latest-failure ,_) (,early ,_ ,since)) replies))
+           (funcall latest-failure "ssh: gone")
+           (funcall early (roost-test--history since (+ since 60) nil '("a" "running" nil nil)))
+           (should (eq (car (cdr (assoc nil (plist-get roost--workload :replies)))) 'error))
+           ;; The earlier answer's minute of work isn't counted.
+           (should (= (plist-get (plist-get roost--workload :week) :work) 0)))
+         (kill-buffer "*roost workload*"))))))
+
+(ert-deftest roost-what-waits-on-you-of-a-pull-request-is-told-its-host ()
+  (roost-test--isolated
+   (let (sent fail)
+     (cl-letf (((symbol-function 'roost--report-turn) roost-test--report-turn)
+               ((symbol-function 'roost--request)
+                (lambda (host action parameters _success failure)
+                  (push (list host action (alist-get 'turn parameters)) sent)
+                  (when fail (funcall failure "offline")))))
+       (let ((conflicting `((seen . "2026-10-03T20:00:00+00:00") (integrationBranch . "main")
+                            (landed) (conflicts "ledger.py") ,@(roost-test--task))))
+         ;; Not before its host has measured it.
+         (roost--cache-task "dev" (assq-delete-all 'landed (copy-tree conflicting)))
+         (should-not sent)
+         (roost--cache-task "dev" conflicting)
+         (roost--cache-task "dev" conflicting)
+         (should (equal sent '(("dev" "turn" "conflicts"))))
+         ;; Once its record says so, it's told nothing more.
+         (roost--cache-task "dev" (cons '(turn . "conflicts") conflicting))
+         (roost--cache-task "dev" (cons '(turn . "conflicts") conflicting))
+         (should (= (length sent) 1))
+         ;; Its agent at work again, it no longer waits on you.
+         (setq sent nil)
+         (roost--cache-task "dev" `((turn . "conflicts") (status . "running")
+                                    ,@(assq-delete-all 'status (copy-tree conflicting))))
+         (should (equal sent '(("dev" "turn" nil))))
+         ;; Sent again with its next news when the host didn't answer.
+         (setq sent nil fail t)
+         (roost--cache-task "dev" conflicting)
+         (roost--cache-task "dev" conflicting)
+         (should (equal sent '(("dev" "turn" "conflicts") ("dev" "turn" "conflicts")))))
+       ;; An open pull request waits for what GitHub says.
+       (setq sent nil fail nil)
+       (roost--cache-task "dev" `((landed) (pr (number . 12)) ,@(roost-test--task "1111111111111111")))
+       (should-not sent)))))
+
+(ert-deftest roost-a-turn-another-emacs-changed-is-told-again ()
+  ;; Its host takes the last word, as from another Emacs, or a reply out of
+  ;; order: the next poll that says otherwise is answered.
+  (roost-test--isolated
+   (let (sent replies)
+     (cl-letf (((symbol-function 'roost--report-turn) roost-test--report-turn)
+               ((symbol-function 'roost--request)
+                (lambda (_host _action parameters success _failure)
+                  (push (alist-get 'turn parameters) sent)
+                  (push success replies))))
+       (let ((conflicting `((seen . "2026-10-03T20:00:00+00:00") (integrationBranch . "main")
+                            (landed) (conflicts "ledger.py") ,@(roost-test--task))))
+         (roost--cache-task "dev" conflicting)
+         ;; Its host has it now, and the reply says so.
+         (funcall (pop replies) (cons '(turn . "conflicts") (roost-test--task)))
+         (should (equal (roost--field (car (roost-tasks)) 'turn) "conflicts"))
+         (should (zerop (hash-table-count roost--turns-sent)))
+         (roost--cache-task "dev" (cons '(turn . "conflicts") conflicting))
+         (should (equal sent '("conflicts")))
+         ;; Another Emacs, with older news, said there was none.
+         (roost--cache-task "dev" (cons '(turn) conflicting))
+         (should (equal sent '("conflicts" "conflicts")))
+         ;; A reply to an earlier request, late, leaves the later one to come.
+         (puthash (roost--key (car (roost-tasks))) nil roost--turns-sent)
+         (funcall (pop replies) (cons '(turn . "conflicts") (roost-test--task)))
+         (should (equal (gethash (roost--key (car (roost-tasks))) roost--turns-sent 'none) nil)))))))
 
 (provide 'roost-test)
 
