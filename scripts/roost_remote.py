@@ -2327,10 +2327,11 @@ def seen(store, task, updated):
     return task
 
 
-def look(store, task_id):
-    """Record where TASK_ID's work stands as where you last looked at it,
-    as when you open it in Magit or send its agent your notes. When it
-    changed since the look before, the record says what changed, for
+def prepare_look(store, task_id):
+    """Where TASK_ID's work stands, to record as where you last looked at
+    it with `record_look`, as when you open it in Magit or send its agent
+    your notes; and the look it was measured against, as (BEFORE, LOOKED).
+    When it changed since the look before, it says what changed, for
     Magit: the files, and the two commits to compare. A look at what you
     looked at before keeps that. Git runs without the registry lock."""
     with store.locked():
@@ -2375,16 +2376,30 @@ def look(store, task_id):
                     # Nothing of the task's changed: what changed before
                     # still did, while Git still has both ends of it.
                     looked["since"] = since
-            task = store.read(task_id)
-            current = task.get("looked") if isinstance(task.get("looked"), dict) else {}
-            if current != before:
-                # Another look, as from another Emacs, was recorded meanwhile.
-                looked = current
-            else:
-                task["looked"] = looked
-                store.save(task)
+    return before, looked
+
+
+def record_look(store, task_id, before, looked):
+    """Record LOOKED, from `prepare_look`, as where you last looked at
+    TASK_ID, unless another look than BEFORE, as from another Emacs, was
+    recorded meanwhile, which stands. Nothing changed since a look this
+    records; since the other, that is measured next."""
+    with store.locked():
+        task = store.read(task_id)
+        require_not_removing(store, task, "look")
+        current = task.get("looked") if isinstance(task.get("looked"), dict) else {}
+        if current != before:
+            return task
+        task["looked"] = looked
+        store.save(task)
     task["sinceLooked"] = dict(count=0, added=0, deleted=0, at=looked.get("at"))
     return task
+
+
+def look(store, task_id):
+    """Record where TASK_ID's work stands as where you last looked at it;
+    see `prepare_look`."""
+    return record_look(store, task_id, *prepare_look(store, task_id))
 
 
 TURNS = ("ci failed", "comments", "to merge", "conflicts")
@@ -4217,12 +4232,13 @@ def rpc(request):
             return {"ok": True, "result": outgoing(task)}
         if action == "look":
             return {"ok": True, "result": outgoing(look(store, request["id"]))}
-        looked = None
+        prepared = None
         if action == "send" and request.get("look") is True:
             # Where the work stands as you send your notes, before the agent
-            # can act on them. They go whether or not that can be recorded.
+            # can act on them, recorded once they are sent. They go whether
+            # or not that can be.
             with contextlib.suppress(RoostError, OSError):
-                looked = look(store, request["id"])
+                prepared = prepare_look(store, request["id"])
         if action in ("retire", "merge"):
             # Ask GitHub without the lock; retire then trusts only this answer.
             with store.locked():
@@ -4267,8 +4283,12 @@ def rpc(request):
                         task["landed"] = False
         elif action in ("retire", "merge") and result.pop("remoteCleanup", None):
             delete_remote_branch(result["repo"], result["branch"])
-        elif looked:
-            result["sinceLooked"] = looked["sinceLooked"]
+        elif prepared:
+            with contextlib.suppress(RoostError, OSError):
+                looked = record_look(store, request["id"], *prepared)
+                result["looked"] = looked.get("looked")
+                if "sinceLooked" in looked:
+                    result["sinceLooked"] = looked["sinceLooked"]
         return {"ok": True, "result": outgoing(result)}
     except (RoostError, OSError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}

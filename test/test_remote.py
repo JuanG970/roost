@@ -2023,6 +2023,14 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(roost.Store(str(self.state)).read(task["id"])["looked"], before)
         self.assertEqual(self.since_looked(task)["count"], 1)
 
+    def test_notes_that_fail_to_go_record_no_look(self):
+        task = self.create()
+        (Path(task["worktree"]) / "hello").write_text("edited\n")
+        self.request("stop", id=task["id"])
+        reply = self.request("send", id=task["id"], text="Note", look=True)
+        self.assertFalse(reply["ok"], reply)
+        self.assertNotIn("looked", roost.Store(str(self.state)).read(task["id"]))
+
     def test_a_look_git_cannot_compare_leaves_the_look_before(self):
         task = self.create()
         self.request("look", id=task["id"])
@@ -2050,6 +2058,8 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(store.read(task["id"])["looked"], meanwhile[0])
         self.assertEqual(reply["result"]["looked"], meanwhile[0])
+        # What changed since that look is for the next measurement to say.
+        self.assertNotIn("sinceLooked", reply["result"])
 
     def test_what_changed_before_goes_once_git_has_pruned_where_from(self):
         task = self.create()
@@ -2072,6 +2082,7 @@ class Lifecycle(unittest.TestCase):
         record = self.wait(task, "permission")
         self.assertEqual(self.git("show", record["looked"]["commit"] + ":hello", cwd=task["worktree"]), "edited")
         self.assertNotIn("sinceLooked", record, "measured, not recorded")
+        self.assertEqual(reply["result"]["looked"], record["looked"])
         # Without notes, a prompt is no look.
         again = self.request("send", id=task["id"], text="interrupt", force=True)
         self.assertNotIn("sinceLooked", again["result"])
@@ -2083,7 +2094,7 @@ class Lifecycle(unittest.TestCase):
         (wt / "data").write_bytes(b"x" * (roost.LOOK_FILE_LIMIT + 1))
         (wt / "small").write_text("small\n")
         looked = self.request("look", id=task["id"])["result"]["looked"]
-        self.assertNotEqual(roost.git(wt, "cat-file", "-e", looked["commit"] + ":small", check=False).returncode, 1)
+        self.assertEqual(roost.git(wt, "cat-file", "-e", looked["commit"] + ":small", check=False).returncode, 0)
         self.assertNotEqual(roost.git(wt, "cat-file", "-e", looked["commit"] + ":data", check=False).returncode, 0)
         (wt / "data").write_bytes(b"y" * (roost.LOOK_FILE_LIMIT + 1))
         self.assertEqual(self.since_looked(task)["count"], 0)
