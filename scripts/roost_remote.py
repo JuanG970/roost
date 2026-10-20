@@ -230,9 +230,10 @@ class History:
         was, state = history_state(before), history_state(after)
         if was == state:
             return
-        at = time.time()
+        # To the millisecond below, so never after a time read later.
+        at = int(time.time() * 1000) / 1000
         day = time.strftime("%Y-%m-%d", time.gmtime(at))
-        entry = dict(at=round(at, 3), id=task_id, **(state or dict(status=None)), was=was)
+        entry = dict(at=at, id=task_id, **(state or dict(status=None)), was=was)
         with contextlib.suppress(OSError):
             self.folder.mkdir(mode=0o700, exist_ok=True)
             path = self.folder / (day + ".jsonl")
