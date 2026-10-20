@@ -1899,12 +1899,14 @@ def large(qa, repo):
     name = new_task(qa, "ask sh -c \"mkdir -p docs src test && seq 450 > src/long.txt"
                         " && echo a > docs/a.md && echo b > test/b.py\"")
     answer_yes(qa, name)
+    # Its name gives way in the sidebar to the mark and what you haven't looked at.
+    row = lambda s: sidebar_row(qa, s, name[:10])
     qa.wait("its size", lambda s: "In docs/, src/ and test/" in panel_text(qa, s))
     qa.step("Marked", expect=[
         ("the panel counts the lines of its new files", lambda s: "± 3 files +452 −0" in panel_text(qa, s)),
-        ("its row in the sidebar has the mark", lambda s: "±" in sidebar_row(qa, s, name)),
-        ("and no status, once seen", lambda s: (qa.task(s, name) or {}).get("status") == "idle"
-         and sidebar_row(qa, s, name).endswith("±"))])
+        ("its row in the sidebar has the mark", lambda s: "±" in row(s)),
+        ("and no status, once seen, but that you haven't looked at it",
+         lambda s: (qa.task(s, name) or {}).get("status") == "idle" and row(s).endswith("± not looked at"))])
     qa.keys("C-c r S")
     qa.wait("the dashboard", lambda s: (qa.window(s, "roost-dashboard-mode") or {}).get("selected"))
     qa.step("The dashboard marks it too", expect=[
