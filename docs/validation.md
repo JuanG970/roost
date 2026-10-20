@@ -49,7 +49,11 @@ runs on the Mac, each passing every check:
   driver answers both, and afterwards puts back the tables of
   `~/.codex/config.toml` they wrote, leaving the rest as Codex left it.
   Relayed, a declined request reports `working` 85 ms before its `Interrupt`
-  hook, so it shows as approved for that long.
+  hook, so it shows as approved for that long. With Codex's memories on, its
+  memory agent runs as a session of its own in the same Codex, in
+  `~/.codex/memories`, and Roost's hooks report it too: its `SessionStart`
+  showed the task ready in the middle of a turn, and its events took over
+  the task's session. That is not fixed yet; the relayed capture keeps it.
 - Pi 1.3.0 on LM Studio's qwen3.6-35b-a3b (49152 tokens of context): a turn,
   Esc and another turn.
 

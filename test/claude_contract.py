@@ -287,7 +287,9 @@ class Session:
         ask = "Run `python3 contract_check.py` once with your Bash tool, in the foreground, and reply with its output."
         self.step("approve a command")
         self.send(ask)
-        record = self.until(lambda: self.record()["status"] == "permission" and self.record(), 60, "a permission request")
+        # With the relay, its report can say it waits before the hook says why.
+        record = self.until(lambda: (lambda task: task["status"] == "permission" and task.get("request") and task)(
+            self.record()), 60, "a permission request")
         self.check(record.get("request") == "Asks to run python3 contract_check.py", "the request says what it asks",
                    record.get("request"))
         self.until(lambda: "Do you want to proceed" in self.pane(), 20, "the permission dialog")

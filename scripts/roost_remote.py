@@ -3168,14 +3168,14 @@ def beside_program_status(updates, before, reports_turns=True):
             if key not in ("status", "updatedAt", "lastEvent", "error")}
 
 
-def capture(store, task_id, entry):
-    """Note ENTRY, what TASK_ID's agent reported, in the store's captures
-    folder if it has one: test/agent_contract.py makes one, to record a
-    real session for test/captures."""
+def capture(store, task_id, entry, at=None):
+    """Note ENTRY, what TASK_ID's agent reported, read AT or now, in the
+    store's captures folder if it has one: test/agent_contract.py makes
+    one, to record a real session for test/captures."""
     folder = store.root / "captures"
     if folder.is_dir():
         with contextlib.suppress(OSError), (folder / (task_id + ".jsonl")).open("a") as file:
-            file.write(json.dumps(dict(entry, at=time.time()), ensure_ascii=False) + "\n")
+            file.write(json.dumps(dict(entry, at=time.time() if at is None else at), ensure_ascii=False) + "\n")
 
 
 def update_hook(store, task_id, payload, run_id=None):
@@ -3185,8 +3185,10 @@ def update_hook(store, task_id, payload, run_id=None):
             return
         if task["status"] in ("stopped", "retired"):
             return
-        capture(store, task_id, {"hook": payload})
         before = task["status"]
+        # Status reports read before hookAt are older news than this hook;
+        # its capture keeps that time, so a replay weighs them alike.
+        read_at = None
         made = agent_worktree(task, payload.get("cwd"))
         if made and made not in (task.get("agentWorktrees") or []):
             task["agentWorktrees"] = (task.get("agentWorktrees") or []) + [made]
@@ -3199,7 +3201,7 @@ def update_hook(store, task_id, payload, run_id=None):
             if relayed:
                 updates = beside_program_status(updates, before, agent.reports_turns)
             if not agent.reports_turns and "status" in updates:
-                task["hookAt"] = time.time()
+                task["hookAt"] = read_at = time.time()
             # What the agent asks, if its adapter can say better than its payload.
             named = updates.pop("request", None)
             task.update(updates)
@@ -3223,6 +3225,7 @@ def update_hook(store, task_id, payload, run_id=None):
                 task.pop("request", None)
                 task.pop("requestCommand", None)
             store.save(task)
+        capture(store, task_id, {"hook": payload}, read_at)
 
 
 def agent_path(inherited):

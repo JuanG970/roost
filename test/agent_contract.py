@@ -261,8 +261,8 @@ class CodexSession(claude_contract.Session):
         ask = "Create an empty file named approved.txt with the shell command `touch approved.txt`, then reply DONE."
         self.step("approve a command")
         self.send(ask)
-        record = self.until(lambda: self.record()["status"] == "permission" and self.record(), 120,
-                            "a permission request")
+        record = self.until(lambda: (lambda task: task["status"] == "permission" and task.get("request") and task)(
+            self.record()), 120, "a permission request")
         self.check(bool(record.get("request")), "the request says what it asks", record.get("request"))
         time.sleep(2)
         self.keys("Enter")
@@ -359,7 +359,9 @@ def restore_codex_tables(after, before, repo):
             text = kept.pop(header, "")
         result.append(text)
     result.extend(kept.values())
-    return "".join(result)
+    # A table that ended its file may have no newline before the next.
+    return "".join(text if text.endswith("\n") or i == len(result) - 1 else text + "\n"
+                   for i, text in enumerate(result) if text)
 
 
 SESSIONS = {"claude": claude_contract.Session, "codex": CodexSession, "pi": PiSession}
