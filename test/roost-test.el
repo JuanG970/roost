@@ -7757,8 +7757,23 @@ it of the same ID's, or nil for the first."
                                             (split-string text "\n")))
                         6)))
            (should (equal (mapcar #'cadr asked) '("history" "history")))
-           (should (= (nth 2 (car asked)) (roost--day-start now -6)))
+           ;; From before the week, to tell whether you were here as it began.
+           (should (= (nth 2 (car asked)) (- (roost--day-start now -6) roost--away)))
            (kill-buffer)))))))
+
+(ert-deftest roost-waiting-across-the-start-of-the-week-counts-from-there ()
+  ;; A task that waited from before the week began, with you there, waited
+  ;; on you from its first moment; work and waiting before it aren't counted.
+  (roost-test--isolated
+   (let* ((roost--away 1800)
+          (roost--workload
+           (list :since 100000 :asked 98200 :now 100700
+                 :replies `((nil . ,(roost-test--history 98200 100700
+                                                         '((99000 "a" "running" nil nil)
+                                                           (99400 "a" "ready" nil nil)
+                                                           (100600 "a" "ready" t nil))))))))
+     (roost--workload-compute)
+     (should (equal (plist-get roost--workload :week) '(:peak 0 :work 0 :wait 600 :longest 600))))))
 
 (ert-deftest roost-workload-takes-only-the-replies-to-its-latest-request ()
   ;; `g' while hosts are answering asks again: an earlier answer, coming

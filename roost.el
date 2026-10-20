@@ -8229,8 +8229,10 @@ such stretches out of the time they waited on you.")
 
 (defvar roost--workload nil
   "What `roost-workload' shows, as a plist.
-:since and :now bound it, in seconds since the epoch; :replies has
-each host's history, as (HOST . REPLY), REPLY being `pending' or
+:since and :now bound it, in seconds since the epoch, and :asked is
+when the histories asked for begin, `roost--away' before :since, to
+tell whether you were here at its start; :replies has each host's
+history, as (HOST . REPLY), REPLY being `pending' or
 \(error . MESSAGE) until it comes; :days and :week are what
 `roost--workload-tally' makes of it, :days as (START . TALLY) for each
 day, today first.")
@@ -8350,7 +8352,10 @@ longest any waited on you at a time while you were here."
          (replies (seq-keep (lambda (entry) (and (consp (cdr entry)) (not (eq (cadr entry) 'error))
                                                  (cdr entry)))
                             (plist-get roost--workload :replies)))
-         (spans (mapcan (lambda (reply) (roost--history-spans reply since)) replies))
+         ;; From before SINCE; the tallies count only what follows it.
+         (spans (mapcan (lambda (reply)
+                          (roost--history-spans reply (or (plist-get roost--workload :asked) since)))
+                        replies))
          (present (roost--workload-present
                    (mapcan (lambda (reply) (mapcar (lambda (change) (alist-get 'at change))
                                                    (alist-get 'changes reply)))
@@ -8465,7 +8470,7 @@ here: see `roost--away'."
          (now (float-time))
          (since (roost--day-start now (- 1 roost--workload-days)))
          (generation (cl-incf roost--workload-generation)))
-    (setq roost--workload (list :since since :now now
+    (setq roost--workload (list :since since :asked (- since roost--away) :now now
                                 :replies (mapcar (lambda (host) (cons host 'pending)) hosts)))
     (with-current-buffer (get-buffer-create "*roost workload*")
       (unless (derived-mode-p 'roost-workload-mode) (roost-workload-mode)))
@@ -8473,7 +8478,7 @@ here: see `roost--away'."
     (roost--render-workload)
     (pop-to-buffer "*roost workload*")
     (dolist (host hosts)
-      (roost--request host "history" `((since . ,since))
+      (roost--request host "history" `((since . ,(- since roost--away)))
                       (lambda (reply) (roost--workload-reply generation host reply))
                       (lambda (err) (roost--workload-reply generation host (cons 'error err)))))))
 
