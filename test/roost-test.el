@@ -3012,6 +3012,61 @@ Read from the layout transient keeps, whose form varies by version."
        (should (window-live-p opened-in))
        (should-not (window-parameter opened-in 'window-side))))))
 
+(ert-deftest roost-another-tasks-draft-steps-aside-and-comes-back ()
+  ;; A prompt half written to one task stayed below the next task's
+  ;; terminal, beside its panel, once you opened that task.
+  (roost-test--isolated
+   (save-window-excursion
+     (delete-other-windows)
+     (let* ((roost-workspace nil)
+            (a (roost--cache-task "dev" (roost-test--task "1111111111111111")))
+            (b (roost--cache-task "dev" (roost-test--task "2222222222222222")))
+            (code (generate-new-buffer "code.py"))
+            (draft (generate-new-buffer "*roost send: a*")))
+       (unwind-protect
+           (progn
+             (with-current-buffer draft
+               (roost-send-mode)
+               (setq roost--send-task a)
+               (insert "Half a thought"))
+             (switch-to-buffer code)
+             (set-frame-parameter nil 'roost-task (roost--key a))
+             (let ((top (selected-window)))
+               (set-window-buffer (split-window) draft)
+               ;; A's own: it stays.
+               (roost--activate-workspace a)
+               (should (get-buffer-window draft))
+               ;; B takes the frame: A's draft goes, kept as written.
+               (roost--activate-workspace b)
+               (should-not (get-buffer-window draft))
+               (should (equal (with-current-buffer draft (buffer-string)) "Half a thought"))
+               (should (equal (frame-parameter nil 'roost-task) (roost--key b)))
+               ;; Not for B, but for A, it comes back, the window you were
+               ;; in still selected.
+               (roost--bring-back-drafts b)
+               (should-not (get-buffer-window draft))
+               (roost--activate-workspace a)
+               (roost--bring-back-drafts a)
+               (should (get-buffer-window draft))
+               (should (eq (selected-window) top))
+               ;; Once only: closed again, it stays closed.
+               (delete-window (get-buffer-window draft))
+               (roost--bring-back-drafts a)
+               (should-not (get-buffer-window draft))
+               ;; In the frame's only window, what was there before shows.
+               (switch-to-buffer draft)
+               (roost--activate-workspace b)
+               (should (eq (window-buffer) code))
+               ;; With workspaces, the task's workspace keeps it.
+               (switch-to-buffer draft)
+               (set-frame-parameter nil 'roost-task (roost--key a))
+               (cl-letf (((symbol-function 'roost--workspace-backend) (lambda () 'perspective))
+                         ((symbol-function 'persp-switch) #'ignore)
+                         ((symbol-function 'roost--rename-perspective) #'ignore))
+                 (roost--activate-workspace b))
+               (should (eq (window-buffer) draft))))
+         (mapc #'kill-buffer (list code draft)))))))
+
 (ert-deftest roost-request-wait-returns-results-and-signals-failures ()
   (cl-letf (((symbol-function 'roost--request)
              (lambda (_host _action _params success &optional _failure)

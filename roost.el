@@ -1566,6 +1566,9 @@ started or gone since."
        (tab-bar-rename-tab (roost--tab-name task)))))
   (setq roost--current-task (roost--key task))
   ;; Without workspaces, the frame's task panel follows the last task used.
+  (unless (or (roost--workspace-backend)
+              (equal (frame-parameter nil 'roost-task) (roost--key task)))
+    (roost--set-aside-drafts task))
   (set-frame-parameter nil 'roost-task (roost--key task))
   (roost--leave-side-window))
 
@@ -1733,6 +1736,8 @@ not another task's: they keep their grid."
       (tmux-control-send-command (format "select-window -t %s" window))
       (tmux-control-select-pane pane)))
   (roost--mark-seen (or (gethash (roost--key task) roost--tasks) task))
+  (unless (roost--workspace-backend)
+    (roost--bring-back-drafts task))
   (roost--watch-layout)
   (roost--sync-side-windows)
   ;; The sidebar marks the task now, rather than once its host replies.
@@ -1742,6 +1747,46 @@ not another task's: they keep their grid."
         (roost--render-visible #'roost--render-sidebar))))
   (when (roost--task-panel-window)
     (roost--refresh-host (roost--field task 'host) nil)))
+
+(defvar-local roost--set-aside nil
+  "The frame this draft was taken off when another task took that frame.")
+
+(defun roost--draft-task (buffer)
+  "The task BUFFER is a prompt or pull request draft for, or nil."
+  (or (buffer-local-value 'roost--send-task buffer)
+      (buffer-local-value 'roost--pr-task buffer)))
+
+(defun roost--set-aside-drafts (task)
+  "Take the drafts for tasks other than TASK off the selected frame.
+For when TASK takes the frame: without workspaces a frame shows one
+task.  A prompt or pull request draft for another task stays as it is,
+unseen, until that task is opened in the frame again: see
+`roost--bring-back-drafts'.  Its window closes, or, as the frame's last,
+shows what it did before, though not another task's terminal or draft."
+  (let ((switch-to-prev-buffer-skip
+         (lambda (_window buffer _bury-or-kill)
+           (or (roost--terminal-task buffer) (roost--draft-task buffer)))))
+    (dolist (window (roost--main-windows))
+      (let* ((buffer (window-buffer window))
+             (other (roost--draft-task buffer)))
+        (when (and other (not (equal (roost--key other) (roost--key task))))
+          (with-current-buffer buffer
+            (setq roost--set-aside (selected-frame)))
+          (if (eq (window-deletable-p window) t)
+              (delete-window window)
+            (switch-to-prev-buffer window)))))))
+
+(defun roost--bring-back-drafts (task)
+  "Show TASK's drafts again that another task took off the selected frame.
+Beside its terminal, which stays selected."
+  (dolist (buffer (buffer-list))
+    (when (eq (buffer-local-value 'roost--set-aside buffer) (selected-frame))
+      (when-let* ((own (roost--draft-task buffer))
+                  ((equal (roost--key own) (roost--key task))))
+        (with-current-buffer buffer
+          (setq roost--set-aside nil))
+        (unless (get-buffer-window buffer)
+          (display-buffer buffer '(nil (inhibit-same-window . t))))))))
 
 (defvar roost--held-for-minibuffer 0
   "How many things Roost holds back until the minibuffer is done.

@@ -557,6 +557,10 @@ question from another of the same prompt asked after it."
                           (selected . ,(if (eq window (selected-window)) t :json-false))
                           (side . ,(window-parameter window 'window-side))
                           (terminal . ,(qa--terminal buffer))
+                          ;; The task a prompt or pull request draft is for.
+                          (draft . ,(when-let* ((task (roost--draft-task buffer)))
+                                      (format "%s/%s" (or (roost--field task 'host) "local")
+                                              (roost--field task 'id))))
                           (history . ,(qa--history-shown window))
                           (pane . ,(with-current-buffer buffer
                                      (and (derived-mode-p 'tmux-control-mode) (fboundp 'tmux-control-active-pane)

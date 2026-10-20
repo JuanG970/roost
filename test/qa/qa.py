@@ -1142,6 +1142,23 @@ def send(qa, repo):
     qa.step("The panel shows what you last said", expect=[
         ("under the task's prompt", lambda s: latest(s) and panel_text(qa, s).index("Say hi")
          < panel_text(qa, s).index("Your latest prompt"))])
+    # Half a prompt, then another task: the draft waits for its task.
+    other = start_task(qa, "Say bye")
+    open_task(qa, name)
+    qa.keys("M-x")
+    qa.wait("the question", lambda s: s["prompt"])
+    qa.type("roost-send\r")
+    qa.wait("the draft", lambda s: (qa.window(s, "roost-send-mode") or {}).get("selected"))
+    qa.type("Half a thought")
+    open_task(qa, other)
+    kept = ("the draft is kept", lambda s: any(
+        "Half a thought" in draft for draft in qa.emacs.json("(json-encode (vconcat (qa-drafts)))")))
+    qa.step("Another task: the draft waits", expect=[
+        ("it isn't on screen", lambda s: not qa.window(s, "roost-send-mode")), kept])
+    open_task(qa, name)
+    qa.step("Back: the draft too", expect=[
+        ("beside its terminal, which is selected", lambda s: shows(qa, name)(s)
+         and "Half a thought" in (qa.window(s, "roost-send-mode") or {}).get("text", ""))])
 
 
 def attached(text, name):
@@ -1488,6 +1505,13 @@ def shows(qa, name, shell=False):
     return check
 
 
+def drafts_own(screen):
+    """Whether each prompt or pull request draft on screen is for its
+    frame's task: one for another waits until that task is opened."""
+    task = (screen.get("task") or {}).get("key")
+    return all(window.get("draft") in (None, task) for window in screen["windows"])
+
+
 # Each: what you do, whose task it opens (None: none, you stay), and with
 # which pane.
 WALK_INTERRUPTERS = [
@@ -1540,7 +1564,7 @@ def walk_away(qa, repo):
                 qa.keys("C-g")
                 pair += ", and that question quit"
                 qa.until(opens[1], timeout)
-            expect = [opens]
+            expect = [opens, ("no other task's draft beside it", drafts_own)]
             if leave is leave_opening:
                 # Once the first task's late reply has come, which must not
                 # take the place of what you went to.
