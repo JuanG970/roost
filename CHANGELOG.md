@@ -6,6 +6,11 @@ What each release changes, and what to do when upgrading. Newest first.
 
 Since 0.9.0:
 
+- The box for writing a note opens in a window below the line under pgtk
+  (Wayland), not in a child frame. There, closing the child frame left its
+  parent without keyboard input, so Magit seemed frozen after a note.
+  `roost-note-box-style` chooses `frame` or `window` for any display, and
+  `auto` is the default. Nothing to do when upgrading.
 - Without workspaces, `r`, `f` and `D` on another task's row open that task
   first, as `RET` does, then its Magit, files or diff, as from its own
   terminal. They opened beside the terminal on screen, another task's, and

@@ -435,6 +435,10 @@ and `C-c C-k` cancels. A failed creation keeps the draft.
 - `roost-note-box-lines` (4): how many lines of text the box for writing a
   note shows. Faces `roost-note` and `roost-note-button` color the notes and
   the `+`.
+- `roost-note-box-style` (`auto`): where that box opens in a graphic frame,
+  `frame` for a child frame under the line, `window` for a window below it.
+  `auto` is a window under pgtk (Wayland), where closing a child frame can
+  leave its parent frame without keyboard input, and a child frame elsewhere.
 - `roost-magit-status-sections` (t): whether Magit's status of a task's
   worktree names the task and folds in its agent's latest reply.
 - `roost-branch-prefix`: topic branches are `PREFIX<name>-<id>`; default `roost/`.

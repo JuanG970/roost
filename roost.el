@@ -3950,6 +3950,24 @@ while you wrote, gets no note."
   "How many lines of text the box for writing a review note shows."
   :type 'natnum)
 
+(defcustom roost-note-box-style 'auto
+  "Where the box for writing a review note opens, in a graphic frame.
+`frame' is a child frame over room left under the line, `window' a window
+below it, and `auto' a window under pgtk and a child frame elsewhere.  Under
+pgtk, closing a child frame can leave its parent without keyboard input.  A
+text terminal always gets the window."
+  :type '(choice (const :tag "Window under pgtk, child frame elsewhere" auto)
+                 (const :tag "Child frame" frame)
+                 (const :tag "Window below the line" window)))
+
+(defun roost--note-box-frame-p ()
+  "Whether the note box opens as a child frame, by `roost-note-box-style'."
+  (and (display-graphic-p)
+       (pcase roost-note-box-style
+         ('frame t)
+         ('window nil)
+         (_ (not (eq (window-system) 'pgtk))))))
+
 (defvar-keymap roost-note-box-mode-map
   :doc "Keys for writing a review note."
   "C-c C-c" #'roost-note-box-save
@@ -3972,7 +3990,8 @@ while you wrote, gets no note."
 (defun roost--note-box (task place old)
   "Open the box for writing TASK's note on PLACE, or editing note OLD.
 It opens under the line, from the selected window: in a child frame,
-over room left for it, where Emacs shows them, or in a window below."
+over room left for it, or in a window below, as `roost-note-box-style'
+says."
   (let ((buffer (get-buffer-create "*roost note*")))
     (setq roost--note-box (list :buffer buffer :task task :place (or old place) :old old
                                 :window (selected-window) :source (current-buffer)
@@ -3983,7 +4002,7 @@ over room left for it, where Emacs shows them, or in a window below."
       (insert (or (alist-get 'text old) ""))
       (set-buffer-modified-p nil)
       (setq header-line-format '(:eval (roost--note-box-header))))
-    (if (display-graphic-p)
+    (if (roost--note-box-frame-p)
         (roost--note-box-float)
       (select-window (display-buffer buffer `((display-buffer-below-selected)
                                               (window-height . ,(+ roost-note-box-lines 2))

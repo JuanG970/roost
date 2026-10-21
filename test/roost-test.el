@@ -7206,6 +7206,18 @@ With INITIAL, the box must start out holding it."
       (magit-refresh)
       (should (equal (roost-test--shown-notes) '(("-line 5" . "Removed?")))))))
 
+(ert-deftest roost-the-note-box-opens-in-a-window-under-pgtk ()
+  (cl-letf (((symbol-function 'display-graphic-p) #'always))
+    (dolist (case '((auto pgtk nil) (auto x t) (auto ns t) (frame pgtk t) (window x nil)))
+      (pcase-let ((`(,style ,system ,frame) case))
+        (cl-letf (((symbol-function 'window-system) (lambda (&rest _) system))
+                  (roost-note-box-style style))
+          (should (eq (roost--note-box-frame-p) frame))))))
+  ;; A text terminal gets the window, whatever the style.
+  (cl-letf (((symbol-function 'display-graphic-p) #'ignore)
+            (roost-note-box-style 'frame))
+    (should-not (roost--note-box-frame-p))))
+
 (ert-deftest roost-the-note-box-cancels-and-keeps-what-you-wrote ()
   (roost-test--with-magit-task
     (roost-test--write-lines "a.txt" (number-sequence 1 10) "new line\n")
