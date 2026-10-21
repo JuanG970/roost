@@ -2057,6 +2057,27 @@ class Lifecycle(unittest.TestCase):
         self.assertIsNone(listed["result"][0]["sinceLooked"])
         self.assertEqual(self.since_looked(task)["count"], 1)
 
+    def test_a_look_counts_a_submodules_commit_not_what_is_uncommitted_in_it(self):
+        task = self.create()
+        wt = Path(task["worktree"])
+        library = self.root / "library"
+        library.mkdir()
+        self.git("init", "-q", "-b", "main", cwd=library)
+        (library / "lib").write_text("lib\n")
+        self.git("add", ".", cwd=library)
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "lib", cwd=library)
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "lib", cwd=wt)
+        self.git("commit", "-qm", "Add lib", cwd=wt)
+        (wt / "lib" / "lib").write_text("edited inside\n")
+        self.assertTrue(self.request("look", id=task["id"])["ok"])
+        self.assertEqual(self.since_looked(task)["count"], 0)
+        # A new commit there is a change, as the task's own commit of it would be.
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "more", cwd=wt / "lib")
+        self.assertEqual(self.since_looked(task)["count"], 1)
+        # Its worktree can't go with a submodule checked out.
+        shutil.rmtree(wt / "lib")
+        self.git("rm", "-q", "--cached", "lib", cwd=wt)
+
     def test_a_look_git_cannot_compare_leaves_the_look_before(self):
         task = self.create()
         self.request("look", id=task["id"])

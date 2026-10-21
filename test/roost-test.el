@@ -5726,9 +5726,17 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
                   (lambda (format &rest args) (push (apply #'format-message format args) messages)))
                  ((symbol-function 'roost--request)
                   (lambda (_host _action _params success &rest _)
-                    (funcall success (cons '(pushed . 2) (roost-test--pr-task))))))
+                    (funcall success (cons '(pushed . 2) task)))))
          (roost-pr task)
-         (should (member "Roost: Pushed 2 commits to #12; 3 files changed since you looked" messages))))
+         (should (member "Roost: Pushed 2 commits to #12; 3 files changed since you looked" messages))
+         ;; As the task is once pushed: looked at meanwhile, it says nothing.
+         (setq messages nil)
+         (cl-letf (((symbol-function 'roost--request)
+                    (lambda (_host _action _params success &rest _)
+                      (funcall success (append '((pushed . 2) (sinceLooked (count . 0) (at . "2026-10-03T19:00:00+00:00")))
+                                               task)))))
+           (roost-pr task))
+         (should (member "Roost: Pushed 2 commits to #12" messages))))
      (should (string-match-p "^ Pull request for fix auth (3 files changed since you looked) · "
                              (roost--pr-header task))))))
 

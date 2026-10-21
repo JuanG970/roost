@@ -5091,7 +5091,8 @@ only open it."
          (lambda (updated)
            (let ((pushed (or (alist-get 'pushed updated) 0))
                  (number (alist-get 'number pr))
-                 (since (if-let* ((text (roost--since-looked-text task))) (concat "; " text) "")))
+                 ;; As the task is now: you may have looked during the push.
+                 (since (if-let* ((text (roost--since-looked-text updated))) (concat "; " text) "")))
              (if (zerop pushed)
                  (message "Roost: #%s is up to date%s" number since)
                (message "Roost: Pushed %d commit%s to #%s%s"

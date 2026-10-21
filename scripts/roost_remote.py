@@ -2160,8 +2160,10 @@ def changed_between(worktree, start, end=None, env=None, names=False):
     or else WORKTREE as ENV stages it, each as (PATH, ADDED, DELETED), the
     counts None for a binary file; with NAMES, a set of their paths. A
     renamed file is one removed and one added. None if Git can't tell."""
+    # A look keeps a submodule's commit, not what is uncommitted inside it.
     result = git(worktree, *SCRATCH_INDEX_GIT, "diff", "--name-only" if names else "--numstat", "-z",
-                 "--no-renames", "--no-textconv", start, *([end] if end else []), "--", check=False, env=env)
+                 "--no-renames", "--no-textconv", "--ignore-submodules=dirty",
+                 start, *([end] if end else []), "--", check=False, env=env)
     if result.returncode:
         return None
     if names:
