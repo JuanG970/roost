@@ -1511,7 +1511,10 @@ WALK_STARTERS = [
 
 
 def to_sidebar(qa):
-    """Click the sidebar where no task is: on the project's heading."""
+    """Click the sidebar where no task is: on the project's heading, which
+    many tasks can scroll out of sight, as when a menu takes the frame's
+    bottom, so scrolled into it first, as with the mouse wheel."""
+    qa.emacs.eval("(qa-sidebar-to-top)")
     qa.click_text(qa.host_label + " · ", "roost-sidebar-list-mode")
 
 
