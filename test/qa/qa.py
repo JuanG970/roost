@@ -1140,6 +1140,16 @@ def stop_resume(qa, repo):
     qa.status(name, "stopped")
     qa.step("Stopped", expect=[
         ("the panel says how to resume", lambda s: "resumes its conversation" in panel_text(qa, s))])
+    # From its row, with another task's terminal on screen: with no
+    # terminal of its own, it takes the frame without one.
+    other = start_task(qa, "Keep me company")
+    open_task(qa, other)
+    go_files(qa, name)
+    files = shows_view(qa, name, "dired-mode")
+    qa.wait("its files", files)
+    qa.step("Its files, from its row", expect=[
+        ("in its frame", files),
+        ("beside its panel", lambda s: panel_text(qa, s).startswith(name))])
     # In the panel, as it says: elsewhere, such as a dashboard row, s is
     # that row's task's.
     qa.click_text(name, "roost-task-info-mode")
@@ -1528,23 +1538,46 @@ def go_shell(qa, target):
     qa.keys("t")
 
 
-def go_review(qa, target):
-    """Open TARGET in Magit from its sidebar row, with `r`: it waits for the
-    task's host to record that you looked."""
+def go_view(key, needs_magit=False):
+    """Press KEY on TARGET's row in the sidebar, to show something of
+    TARGET's: its Magit or its files."""
+    def go(qa, target):
+        if needs_magit and (qa.host or qa.emacs.eval("(and (require 'magit nil t) t)") != "t"):
+            # Magit over TRAMP's ssh method is too slow on a host this far away.
+            raise NotApplicable()
+        to_sidebar(qa)
+        if qa.emacs.eval("(qa-goto-row %s)" % lisp(target)) != "t":
+            raise Stuck("No row for %s in the sidebar" % target)
+        qa.keys(key)
+    return go
+
+
+go_review = go_view("r", needs_magit=True)
+go_files = go_view("f")
+
+
+def go_changed_file(qa, target):
+    """Click the file TARGET changed, in its panel, which `i' on its row
+    shows beside the terminal on screen."""
     if qa.host or qa.emacs.eval("(and (require 'magit nil t) t)") != "t":
+        # Magit over TRAMP's ssh method is too slow on a host this far away.
         raise NotApplicable()
     to_sidebar(qa)
     if qa.emacs.eval("(qa-goto-row %s)" % lisp(target)) != "t":
         raise Stuck("No row for %s in the sidebar" % target)
-    qa.keys("r")
+    qa.keys("i")
+    qa.wait("its changed file", lambda s: qa.emacs.eval('(and (qa--find-button "notes.py" 0) t)') == "t")
+    qa.click("notes.py")
 
 
-def shows_magit(qa, name):
-    """Whether the screen shows Magit's status of NAME's worktree, selected."""
+def shows_view(qa, name, mode):
+    """Whether the screen shows a MODE buffer of NAME's worktree, selected,
+    in NAME's frame.  Where its terminal went, Magit or Dired chose: the
+    frame's rules say whether another task's is on screen."""
     def check(screen):
-        window = qa.window(screen, "magit-status-mode") or {}
-        return bool(window.get("selected")
-                    and re.search(r"^Task: +%s," % re.escape(name), window.get("text", ""), re.M))
+        window = qa.window(screen, mode) or {}
+        return bool((screen.get("task") or {}).get("name") == name and window.get("selected")
+                    and qa.emacs.json("(json-encode (qa-selected-task))") == name)
     return check
 
 
@@ -1579,9 +1612,11 @@ WALK_INTERRUPTERS = [
     ("l in the sidebar", go_switch, "other"),
     ("n in the sidebar", go_next, "waiting"),
     ("t on another task's row", go_shell, "other"),
-    # Its own task's: without workspaces, Magit on another task opens
-    # beside the terminal on screen, whoever's it is.
-    ("r on its row", go_review, "home"),
+    # Its terminal first, in place of the one on screen: a frame shows one
+    # task.
+    ("r on another task's row", go_review, "other"),
+    ("f on another task's row", go_files, "other"),
+    ("a click on a file in another task's panel", go_changed_file, "other"),
     ("a click on a notification", go_notification, "other"),
     ("a click in the terminal", go_terminal, None),
 ]
@@ -1595,6 +1630,12 @@ def walk_away(qa, repo):
     or kept, and nothing waits unseen."""
     home = start_task(qa, "Sort the notes")
     other = start_task(qa, "Tally the notes")
+    # A change of its own, a file its panel lists.
+    open_task(qa, other)
+    qa.keys("C-c r e")
+    qa.wait("the prompt", lambda s: s["prompt"])
+    qa.type("ask echo '# Tallied' >> notes.py\r")
+    answer_yes(qa, other)
     waiting = new_task(qa, "ask git log")
     qa.status(waiting, "permission")
     timeout = 15 if qa.host else 8
@@ -1617,9 +1658,15 @@ def walk_away(qa, repo):
                 qa.step(pair, expect=[(str(stuck), lambda s: False)])
                 continue
             shell = go is go_shell
-            opens = ((target + "'s Magit opens", shows_magit(qa, target)) if go is go_review
-                     else (target + "'s " + ("shell" if shell else "terminal") + " opens", shows(qa, target, shell))
-                     if target else (home + "'s terminal stays", shows(qa, home)))
+            if go is go_review:
+                opens = (target + "'s Magit opens", shows_view(qa, target, "magit-status-mode"))
+            elif go is go_files:
+                opens = (target + "'s files open", shows_view(qa, target, "dired-mode"))
+            elif go is go_changed_file:
+                opens = (target + "'s diff of the file opens", shows_view(qa, target, "magit-diff-mode"))
+            else:
+                opens = ((target + "'s " + ("shell" if shell else "terminal") + " opens", shows(qa, target, shell))
+                         if target else (home + "'s terminal stays", shows(qa, home)))
             screen = qa.until(opens[1], timeout)
             if go is go_notification and screen["in-question"]:
                 # You are answering a question: the task waits until you are done.
@@ -1733,6 +1780,17 @@ def tabs(qa, repo):
         qa.step("Retired, with its tab", expect=[
             ("its tab is gone", lambda s: qa.host_label + "/" + first not in s["workspaces"]),
             ("the other's is still there", lambda s: len(s["workspaces"]) == 2)])
+        # A task whose tab you closed: a new tab starts with the terminal
+        # you were in, which its own takes the place of.
+        untabbed = start_task(qa, "Close my tab")
+        qa.emacs.eval("(tab-bar-close-tab-by-name %s)" % lisp(qa.host_label + "/" + untabbed))
+        qa.wait("its tab to go", lambda s: qa.host_label + "/" + untabbed not in s["workspaces"])
+        go_files(qa, untabbed)
+        files = shows_view(qa, untabbed, "dired-mode")
+        qa.wait("its files", files)
+        qa.step("Its files, from its row, in a tab again", expect=[
+            ("in its tab", lambda s: s["workspace"] == qa.host_label + "/" + untabbed),
+            ("its files there", files)])
     finally:
         qa.emacs.eval("(progn (tab-bar-close-other-tabs) (tab-bar-rename-tab \"\") (tab-bar-mode -1) "
                       "(setq roost-workspace '%s))" % workspace)

@@ -1754,13 +1754,68 @@ not another task's: they keep their grid."
   (roost--mark-seen (or (gethash (roost--key task) roost--tasks) task))
   (roost--watch-layout)
   (roost--sync-side-windows)
-  ;; The sidebar marks the task now, rather than once its host replies.
+  (roost--mark-in-sidebar)
+  (when (roost--task-panel-window)
+    (roost--refresh-host (roost--field task 'host) nil)))
+
+(defun roost--mark-in-sidebar ()
+  "Draw the sidebar again, so that it marks the task opened now.
+Rather than once its host replies."
   (when-let* ((sidebar (get-buffer roost--sidebar-buffer)))
     (with-current-buffer sidebar
       (when (derived-mode-p 'roost-sidebar-list-mode)
-        (roost--render-visible #'roost--render-sidebar))))
-  (when (roost--task-panel-window)
-    (roost--refresh-host (roost--field task 'host) nil)))
+        (roost--render-visible #'roost--render-sidebar)))))
+
+(defun roost--other-terminal-window (task)
+  "A window of the selected frame showing another task's terminal, or nil.
+Nil, too, when the frame shows TASK's own terminal."
+  (unless (roost--task-terminal-window task)
+    (roost--terminal-window-for task)))
+
+(defun roost--in-task-frame (task view)
+  "Call VIEW to show something of TASK's, such as Magit, in TASK's frame.
+A frame shows one task: with workspaces, VIEW shows in TASK's.  Where
+another task's terminal is on screen, TASK's terminal takes its place
+first, as \\[roost-open-task] does, and VIEW shows beside it once TASK's
+host replies.  A task without a terminal, as once stopped, takes the
+frame without one: see `roost--take-frame'."
+  (when (roost--workspace-backend)
+    ;; Whose terminal its workspace shows: a new tab shows the one you
+    ;; were in.
+    (roost--activate-workspace task))
+  (if (and (roost--other-terminal-window task)
+           (roost--field task 'windowId)
+           (not (gethash (roost--field task 'host) roost--errors)))
+      (progn
+        ;; TASK's workspace is TASK's already: the other task's terminal
+        ;; goes now, rather than stay there if you go elsewhere before
+        ;; the host replies.  Without workspaces, the frame is the other
+        ;; task's until then.
+        (when (roost--workspace-backend)
+          (roost--put-away-other-terminals task))
+        (roost--open task view))
+    (roost--take-frame task)
+    (funcall view)))
+
+(defun roost--put-away-other-terminals (task)
+  "Put away the terminals of tasks other than TASK in the selected frame.
+Each window goes back to what it showed before, never to another task's
+terminal."
+  (let ((switch-to-prev-buffer-skip
+         (lambda (_window buffer _bury-or-kill) (roost--terminal-task buffer))))
+    (dolist (window (roost--main-windows))
+      (when-let* ((shown (roost--terminal-task (window-buffer window))))
+        (unless (or (equal (roost--key shown) (roost--key task))
+                    (switch-to-prev-buffer window))
+          (set-window-buffer window (get-scratch-buffer-create)))))))
+
+(defun roost--take-frame (task)
+  "Make the selected frame TASK's, as for a view of it, without its terminal.
+Another task's terminal there goes back to what its window showed
+before, but not to another task's terminal."
+  (roost--put-away-other-terminals task)
+  (roost--activate-workspace task)
+  (roost--mark-in-sidebar))
 
 (defvar roost--held-for-minibuffer 0
   "How many things Roost holds back until the minibuffer is done.
@@ -1830,7 +1885,13 @@ back, unseen, until you answered them."
     (let ((task (or task (roost--task-at-point))))
       (roost--quit-questions-left-open
        (lambda () (roost-open-task (or task (roost--read-task "Task: ")))))))
-  (setq task (roost--choose task))
+  (roost--open (roost--choose task)))
+
+(defun roost--open (task &optional view)
+  "Show TASK's terminal, once its host confirms that Roost owns it.
+VIEW, if given, then shows something of TASK's beside it, such as
+Magit: for a task whose agent's window is gone, VIEW shows without the
+terminal, rather than Roost asking to resume the task."
   (let* ((generation (cl-incf roost--open-generation))
          (window (if (window-minibuffer-p) (minibuffer-selected-window) (selected-window)))
          (shown (window-buffer window))
@@ -1841,7 +1902,17 @@ back, unseen, until you answered them."
          (timer (run-at-time roost--opening-delay nil
                              (lambda ()
                                (when (= generation roost--open-generation)
-                                 (message "%s" opening))))))
+                                 (message "%s" opening)))))
+         ;; Unless you have opened another task since, or shown something
+         ;; else, such as tmux-control's pager.
+         (still-wanted (lambda ()
+                         (and (= generation roost--open-generation)
+                              (or (and (eq (selected-window) window)
+                                       (eq (window-buffer window) shown))
+                                  (progn
+                                    (message "Roost: didn't open %s, as you went to another window or buffer while its host replied"
+                                             name)
+                                    nil))))))
     (roost--request (roost--field task 'host) "inspect"
                     (list (cons 'id (roost--field task 'id)))
                     (lambda (current)
@@ -1853,20 +1924,15 @@ back, unseen, until you answered them."
                       (roost--redraw)
                       (roost--when-out-of-minibuffer
                        (lambda ()
-                         (when (= generation roost--open-generation)
-                           ;; Unless you have shown something else since,
-                           ;; such as tmux-control's pager.
-                           (if (not (and (eq (selected-window) window)
-                                         (eq (window-buffer window) shown)))
-                               (message "Roost: didn't open %s, as you went to another window or buffer while its host replied"
-                                        name)
-                             (when (equal (current-message) opening)
-                               (message nil))
-                             (roost--display-task current)
-                             (when (and (assq 'live current) (not (roost--field current 'live)))
-                               (message "%s's agent has %s; its last output is shown. Resume with `s'."
-                                        (roost--field current 'name)
-                                        (roost--field current 'status))))))))
+                         (when (funcall still-wanted)
+                           (when (equal (current-message) opening)
+                             (message nil))
+                           (roost--display-task current)
+                           (cond (view (funcall view))
+                                 ((and (assq 'live current) (not (roost--field current 'live)))
+                                  (message "%s's agent has %s; its last output is shown. Resume with `s'."
+                                           (roost--field current 'name)
+                                           (roost--field current 'status))))))))
                     (lambda (err)
                       (cancel-timer timer)
                       ;; Stopped, or its tmux server gone, as after a crash:
@@ -1874,22 +1940,32 @@ back, unseen, until you answered them."
                       ;; any question you are answering is done, too.
                       (roost--when-out-of-minibuffer
                        (lambda ()
-                         (if (and (= generation roost--open-generation)
-                                  (string-prefix-p "The agent's tmux window is gone" err))
-                             ;; Asked from a timer, not from this reply's
-                             ;; sentinel, and only if you haven't moved on
-                             ;; or started a question since: a prompt nobody
-                             ;; saw held every later switch behind it.
-                             (run-at-time
-                              0 nil #'roost--when-out-of-minibuffer
-                              (lambda ()
-                                (when (= generation roost--open-generation)
-                                  ;; You know now; `n' moves on to the next.
-                                  (roost--mark-seen (or (gethash (roost--key task) roost--tasks) task))
-                                  (when (y-or-n-p (format "%s's agent isn't running.  Resume its conversation? "
-                                                          (roost--field task 'name)))
-                                    (roost-resume task)))))
-                           (message "Roost %s: %s" (roost--host-label (roost--field task 'host)) err))))))))
+                         (cond
+                          ((not view)
+                           (if (and (= generation roost--open-generation)
+                                    (string-prefix-p "The agent's tmux window is gone" err))
+                               ;; Asked from a timer, not from this reply's
+                               ;; sentinel, and only if you haven't moved on
+                               ;; or started a question since: a prompt nobody
+                               ;; saw held every later switch behind it.
+                               (run-at-time
+                                0 nil #'roost--when-out-of-minibuffer
+                                (lambda ()
+                                  (when (= generation roost--open-generation)
+                                    ;; You know now; `n' moves on to the next.
+                                    (roost--mark-seen (or (gethash (roost--key task) roost--tasks) task))
+                                    (when (y-or-n-p (format "%s's agent isn't running.  Resume its conversation? "
+                                                            (roost--field task 'name)))
+                                      (roost-resume task)))))
+                             (message "Roost %s: %s" (roost--host-label (roost--field task 'host)) err)))
+                          ;; A view of the task shows without its terminal.
+                          ((funcall still-wanted)
+                           (when (equal (current-message) opening)
+                             (message nil))
+                           (unless (string-prefix-p "The agent's tmux window is gone" err)
+                             (message "Roost %s: %s" (roost--host-label (roost--field task 'host)) err))
+                           (roost--take-frame task)
+                           (funcall view)))))))))
 
 ;;;###autoload
 (defun roost-switch-task ()
@@ -4622,34 +4698,39 @@ The note shows in Magit, under its line, with point on the line:
 (defun roost--goto-note (task note)
   "Show TASK's NOTE in Magit, with point on its line.
 A Magit buffer already showing it is used, else Magit's status of the
-task's worktree, else a diff of the note's file since the task began."
-  (let* ((find (lambda ()
-                 (seq-find (lambda (buffer) (roost--note-shown-overlay note buffer))
-                           (cons (current-buffer)
-                                 (seq-filter (lambda (buffer)
-                                               (buffer-local-value 'roost-magit-mode buffer))
-                                             (buffer-list))))))
-         (buffer (or (funcall find)
-                     (progn (roost--magit-status task) (funcall find))
-                     ;; Committed changes show in the diff since the
-                     ;; task's fork point.
-                     (progn (roost--diff-file task `((path . ,(alist-get 'file note))))
-                            (funcall find))
-                     (user-error "The note's line is no longer in the task's changes"))))
-    (if-let* ((window (get-buffer-window buffer)))
-        (select-window window)
-      (pop-to-buffer-same-window buffer))
-    (with-current-buffer buffer
-      (let ((overlay (roost--note-shown-overlay note)))
-        (goto-char (overlay-start overlay))
-        ;; Its hunk and file may be folded away.
-        (let ((section (magit-current-section)))
-          (while section
-            (magit-section-show section)
-            (setq section (roost--slot section 'parent))))
-        (goto-char (overlay-start overlay))
-        (beginning-of-line)
-        (when (eq (window-buffer) buffer) (recenter))))))
+task's worktree, else a diff of the note's file since the task began.
+For a task other than the frame's, its terminal opens first, as
+\\[roost-open-task] does."
+  (roost--in-task-frame
+   task
+   (lambda ()
+     (let* ((find (lambda ()
+                    (seq-find (lambda (buffer) (roost--note-shown-overlay note buffer))
+                              (cons (current-buffer)
+                                    (seq-filter (lambda (buffer)
+                                                  (buffer-local-value 'roost-magit-mode buffer))
+                                                (buffer-list))))))
+            (buffer (or (funcall find)
+                        (progn (roost--magit-status-here task) (funcall find))
+                        ;; Committed changes show in the diff since the
+                        ;; task's fork point.
+                        (progn (roost--diff-file task `((path . ,(alist-get 'file note))))
+                               (funcall find))
+                        (user-error "The note's line is no longer in the task's changes"))))
+       (if-let* ((window (get-buffer-window buffer)))
+           (select-window window)
+         (pop-to-buffer-same-window buffer))
+       (with-current-buffer buffer
+         (let ((overlay (roost--note-shown-overlay note)))
+           (goto-char (overlay-start overlay))
+           ;; Its hunk and file may be folded away.
+           (let ((section (magit-current-section)))
+             (while section
+               (magit-section-show section)
+               (setq section (roost--slot section 'parent))))
+           (goto-char (overlay-start overlay))
+           (beginning-of-line)
+           (when (eq (window-buffer) buffer) (recenter))))))))
 
 ;;;###autoload
 (defun roost-diff-whole-file ()
@@ -4673,8 +4754,10 @@ nothing to compare, opens as it is; stage it from Magit's status."
   "Open Magit on TASK's worktree, through TRAMP for remote tasks.
 Its host first records where the task stands as where you last looked
 at it, and Magit's status shows what changed since you looked before.
-With QUIT-QUESTIONS, as when you give a command, first quit the
-questions you left open in the minibuffer, as `roost-open-task' does."
+For a task other than the frame's, its terminal opens first, as
+\\[roost-open-task] does, and Magit beside it.  With QUIT-QUESTIONS, as
+when you give a command, first quit the questions you left open in the
+minibuffer, as `roost-open-task' does."
   (interactive (list nil t))
   (when (and quit-questions (roost--questions-left-open))
     (let ((task (or task (roost--task-at-point))))
@@ -4707,8 +4790,13 @@ questions you left open in the minibuffer, as `roost-open-task' does."
                       (funcall open)))))))
 
 (defun roost--magit-status (task)
-  "Open Magit's status of TASK's worktree now, or Dired without Magit."
-  (roost--activate-workspace task)
+  "Open Magit's status of TASK's worktree in TASK's frame.
+Without Magit, Dired.  See `roost--in-task-frame'."
+  (roost--in-task-frame task (lambda () (roost--magit-status-here task))))
+
+(defun roost--magit-status-here (task)
+  "Open Magit's status of TASK's worktree now, where you are.
+Without Magit, Dired."
   (if (not (require 'magit nil t))
       (dired (roost--remote-directory task))
     (add-hook 'magit-post-refresh-hook #'roost--magit-refreshed)
@@ -4737,12 +4825,18 @@ stamp, so polls would not notice it."
     (roost--measure-task-in buffer-file-name)))
 
 ;;;###autoload
-(defun roost-files (&optional task)
-  "Browse TASK's worktree with Dired."
-  (interactive)
+(defun roost-files (&optional task quit-questions)
+  "Browse TASK's worktree with Dired.
+For a task other than the frame's, its terminal opens first, as
+\\[roost-open-task] does.  With QUIT-QUESTIONS, as when you give a
+command, first quit the questions you left open in the minibuffer."
+  (interactive (list nil t))
+  (when (and quit-questions (roost--questions-left-open))
+    (let ((task (or task (roost--task-at-point))))
+      (roost--quit-questions-left-open
+       (lambda () (roost-files (or task (roost--read-task "Task: ")))))))
   (setq task (roost--choose task))
-  (roost--activate-workspace task)
-  (dired (roost--remote-directory task)))
+  (roost--in-task-frame task (lambda () (dired (roost--remote-directory task)))))
 
 ;;;###autoload
 (defun roost-shell (&optional task quit-questions)
@@ -4802,17 +4896,26 @@ questions you left open in the minibuffer, as `roost-open-task' does."
               (select-window window)))))))))
 
 ;;;###autoload
-(defun roost-diff (&optional task)
-  "Diff TASK's tracked files against where its own work begins."
-  (interactive)
+(defun roost-diff (&optional task quit-questions)
+  "Diff TASK's tracked files against where its own work begins.
+For a task other than the frame's, its terminal opens first, as
+\\[roost-open-task] does, and the diff beside it.  With QUIT-QUESTIONS,
+as when you give a command, first quit the questions you left open in
+the minibuffer."
+  (interactive (list nil t))
+  (when (and quit-questions (roost--questions-left-open))
+    (let ((task (or task (roost--task-at-point))))
+      (roost--quit-questions-left-open
+       (lambda () (roost-diff (or task (roost--read-task "Task: ")))))))
   (setq task (roost--choose task))
   (unless (require 'magit nil t)
     (user-error (substitute-command-keys
                  "The diff needs Magit; \\[roost-review] opens the worktree in Dired instead")))
   (roost--magit-setup)
-  (roost--activate-workspace task)
-  (let ((default-directory (roost--remote-directory task)))
-    (magit-diff-working-tree (roost--fork-point task))))
+  (roost--in-task-frame
+   task (lambda ()
+          (let ((default-directory (roost--remote-directory task)))
+            (magit-diff-working-tree (roost--fork-point task))))))
 
 ;;;###autoload
 (defun roost-update (&optional task)
@@ -6374,7 +6477,12 @@ own.  Each button shows all the file's changes since the task began."
                           path)
                         'follow-link t 'face 'roost-field
                         'help-echo (concat path "\nmouse-1: show its changes")
-                        'action (lambda (_) (roost--diff-file task file)))
+                        'action (lambda (_)
+                                  ;; As for a command you give: a question
+                                  ;; you left open would hold it back.
+                                  (roost--quit-questions-left-open
+                                   (lambda () (roost--diff-file task file)))
+                                  (roost--diff-file task file)))
     (insert "  " counts "\n")))
 
 (defun roost--agent-work-left (task)
@@ -6412,13 +6520,14 @@ Claude Code makes them for its EnterWorktree tool and isolated subagents."
 (defun roost--diff-file (task file)
   "Show how TASK has changed FILE, an entry of its `files'.
 An untracked file, with nothing to compare, is opened instead."
-  (roost--activate-workspace task)
-  (let ((default-directory (roost--remote-directory task))
-        (path (alist-get 'path file)))
-    (if (and (not (alist-get 'untracked file)) (require 'magit nil t))
-        (progn (roost--magit-setup)
-               (magit-diff-working-tree (roost--fork-point task) nil (list path)))
-      (find-file (expand-file-name path)))))
+  (roost--in-task-frame
+   task (lambda ()
+          (let ((default-directory (roost--remote-directory task))
+                (path (alist-get 'path file)))
+            (if (and (not (alist-get 'untracked file)) (require 'magit nil t))
+                (progn (roost--magit-setup)
+                       (magit-diff-working-tree (roost--fork-point task) nil (list path)))
+              (find-file (expand-file-name path)))))))
 
 (defun roost--fontify-changes (changes)
   "Highlight the line counts and pending work in CHANGES."
