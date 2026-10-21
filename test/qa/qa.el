@@ -237,6 +237,12 @@ Return nil when it isn't there."
     (set-window-point (selected-window) row)
     t))
 
+(defun qa-selected-task ()
+  "The name of the task whose worktree holds the selected window's buffer, or nil."
+  (with-current-buffer (window-buffer (selected-window))
+    (when-let* ((task (roost--task-in-directory default-directory)))
+      (roost--field task 'name))))
+
 (defvar qa--slow-opens nil
   "(COUNT . SECONDS): hold the replies to the next COUNT tasks opened, SECONDS each.")
 
