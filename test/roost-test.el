@@ -3098,6 +3098,50 @@ the stubbed requests, `roost--display-task' and `dired' were asked."
      (should (equal (cadr events) '(workspace "2222222222222222")))
      (should-not (member "inspect" events)))))
 
+(ert-deftest roost-a-tab-made-for-a-view-shows-no-other-tasks-terminal ()
+  ;; A new tab starts with the terminal you were in.  Going to the sidebar
+  ;; before the host replied left Y's tab showing X's terminal, beside
+  ;; Y's panel.
+  (roost-test--isolated
+   (let* ((roost-workspace 'tab-bar)
+          (x (roost--cache-task "dev" (roost-test--task "1111111111111111")))
+          (y (roost--cache-task "dev" (append '((name . "other") (session . "roost-other") (windowId . "@10"))
+                                              (roost-test--task "2222222222222222"))))
+          (terminal (generate-new-buffer "x's terminal"))
+          (code (generate-new-buffer "x's code.py"))
+          (sidebar (get-buffer-create roost--sidebar-buffer))
+          (original-tab-bar-mode tab-bar-mode)
+          (shows-terminal (lambda () (get-buffer-window terminal)))
+          reply displayed opened)
+     (unwind-protect
+         (roost-test--with-tmux-buffers
+          (with-current-buffer terminal
+            (setq major-mode 'tmux-control-mode
+                  roost-test--tmux (list :host "dev" :socket "main" :session (roost--field x 'session))))
+          (cl-letf (((symbol-function 'roost--request)
+                     (lambda (_host _action _params success &optional _failure) (setq reply success)))
+                    ((symbol-function 'roost--display-task) (lambda (&rest _) (setq displayed t)))
+                    ((symbol-function 'dired) (lambda (&rest _) (setq opened t))))
+            (delete-other-windows)
+            (roost--activate-workspace x)
+            (switch-to-buffer code)
+            (switch-to-buffer terminal)
+            (roost-files y)
+            ;; Y's tab, waiting for its host, without X's terminal.
+            (should (equal (roost--current-workspace) "dev/other"))
+            (should reply)
+            (should-not (funcall shows-terminal))
+            ;; You go to the sidebar before the host replies: nothing opens.
+            (select-window (display-buffer-in-side-window sidebar '((side . left) (window-width . 20))))
+            (funcall reply (copy-tree y))
+            (should-not displayed)
+            (should-not opened)
+            (should (equal (roost--current-workspace) "dev/other"))
+            (should-not (funcall shows-terminal))))
+       (while (cdr (roost--tabs)) (tab-bar-close-tab))
+       (unless original-tab-bar-mode (tab-bar-mode -1))
+       (mapc #'kill-buffer (list terminal code sidebar))))))
+
 (ert-deftest roost-request-wait-returns-results-and-signals-failures ()
   (cl-letf (((symbol-function 'roost--request)
              (lambda (_host _action _params success &optional _failure)

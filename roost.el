@@ -1767,21 +1767,34 @@ frame without one: see `roost--take-frame'."
   (if (and (roost--other-terminal-window task)
            (roost--field task 'windowId)
            (not (gethash (roost--field task 'host) roost--errors)))
-      (roost--open task view)
+      (progn
+        ;; TASK's workspace is TASK's already: the other task's terminal
+        ;; goes now, rather than stay there if you go elsewhere before
+        ;; the host replies.  Without workspaces, the frame is the other
+        ;; task's until then.
+        (when (roost--workspace-backend)
+          (roost--put-away-other-terminals task))
+        (roost--open task view))
     (roost--take-frame task)
     (funcall view)))
 
-(defun roost--take-frame (task)
-  "Make the selected frame TASK's, as for a view of it, without its terminal.
-Another task's terminal there goes back to what its window showed
-before, but not to another task's terminal."
+(defun roost--put-away-other-terminals (task)
+  "Put away the terminals of tasks other than TASK in the selected frame.
+Each window goes back to what it showed before, never to another task's
+terminal."
   (let ((switch-to-prev-buffer-skip
          (lambda (_window buffer _bury-or-kill) (roost--terminal-task buffer))))
     (dolist (window (roost--main-windows))
       (when-let* ((shown (roost--terminal-task (window-buffer window))))
         (unless (or (equal (roost--key shown) (roost--key task))
                     (switch-to-prev-buffer window))
-          (set-window-buffer window (get-scratch-buffer-create))))))
+          (set-window-buffer window (get-scratch-buffer-create)))))))
+
+(defun roost--take-frame (task)
+  "Make the selected frame TASK's, as for a view of it, without its terminal.
+Another task's terminal there goes back to what its window showed
+before, but not to another task's terminal."
+  (roost--put-away-other-terminals task)
   (roost--activate-workspace task)
   (roost--mark-in-sidebar))
 
