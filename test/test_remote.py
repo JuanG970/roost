@@ -2031,6 +2031,27 @@ class Lifecycle(unittest.TestCase):
         self.assertFalse(reply["ok"], reply)
         self.assertNotIn("looked", roost.Store(str(self.state)).read(task["id"]))
 
+    def test_what_git_cannot_stage_since_a_look_is_unknown_not_unchanged(self):
+        task = self.create()
+        self.request("look", id=task["id"])
+        (Path(task["worktree"]) / "new").write_text("new\n")
+        real = roost.execute
+
+        def execute(argv, **kw):
+            if "--intent-to-add" not in argv:
+                return real(argv, **kw)
+            # As Git fails when it can't write its empty file.
+            failed = real(["sh", "-c", "echo 'error: insufficient permission' >&2; exit 128"], check=False)
+            if kw.get("check", True):
+                raise roost.RoostError(failed.stderr.strip())
+            return failed
+
+        with patch.object(roost, "execute", execute):
+            listed = self.request("list", full=[task["id"]])
+        self.assertTrue(listed["ok"], listed)
+        self.assertIsNone(listed["result"][0]["sinceLooked"])
+        self.assertEqual(self.since_looked(task)["count"], 1)
+
     def test_a_look_git_cannot_compare_leaves_the_look_before(self):
         task = self.create()
         self.request("look", id=task["id"])

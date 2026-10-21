@@ -2111,8 +2111,9 @@ def scratch_index(worktree, untracked, intent):
     """The environment for Git to stage in a copy of WORKTREE's index, so
     the one you and its agent use stays as it is, with UNTRACKED files
     added: with INTENT, as intent to add, which writes nothing in the
-    repository, or else whole, and then a file Git can't add is an error,
-    rather than a look that leaves it out. The copy is removed after."""
+    repository but, if it isn't there yet, Git's empty file; or else
+    whole. A file Git can't add is an error, rather than a comparison
+    that leaves it out. The copy is removed after."""
     index = read_git(worktree, "rev-parse", "--git-path", "index").stdout.strip()
     folder = tempfile.mkdtemp(prefix="roost-look-")
     try:
@@ -2126,7 +2127,7 @@ def scratch_index(worktree, untracked, intent):
         for start in range(0, len(untracked), LOOK_ADD_BATCH):
             git(worktree, *SCRATCH_INDEX_GIT, "--literal-pathspecs", "add",
                 *(["--intent-to-add"] if intent else []), "--", *untracked[start:start + LOOK_ADD_BATCH],
-                check=not intent, env=env)
+                env=env)
         yield env
     finally:
         shutil.rmtree(folder, ignore_errors=True)
@@ -2217,13 +2218,18 @@ def since_looked(task, worktree, base):
     if not start:
         return None
     kept, large = untracked_files(worktree)
-    with scratch_index(worktree, kept, intent=True) as env:
-        entries = changed_between(worktree, start, env=env)
-        if entries is None:
-            return None
-        # One that grew too large since a look kept it is still there.
-        entries = [entry for entry in entries if entry[0] not in large]
-        entries, _ = own_changes(worktree, entries, looked, start, base, env=env)
+    try:
+        with scratch_index(worktree, kept, intent=True) as env:
+            entries = changed_between(worktree, start, env=env)
+            if entries is None:
+                return None
+            # One that grew too large since a look kept it is still there.
+            entries = [entry for entry in entries if entry[0] not in large]
+            entries, _ = own_changes(worktree, entries, looked, start, base, env=env)
+    except RoostError:
+        # Unknown, as when a file went before Git could add it, rather
+        # than nothing changed: the next measurement tries again.
+        return None
     return dict(change_count(entries), at=looked.get("at"))
 
 
