@@ -2050,6 +2050,11 @@ class Lifecycle(unittest.TestCase):
             listed = self.request("list", full=[task["id"]])
         self.assertTrue(listed["ok"], listed)
         self.assertIsNone(listed["result"][0]["sinceLooked"])
+        # Nor does a temporary folder with no room fail the listing.
+        with patch.object(roost.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            listed = self.request("list", full=[task["id"]])
+        self.assertTrue(listed["ok"], listed)
+        self.assertIsNone(listed["result"][0]["sinceLooked"])
         self.assertEqual(self.since_looked(task)["count"], 1)
 
     def test_a_look_git_cannot_compare_leaves_the_look_before(self):

@@ -2226,9 +2226,10 @@ def since_looked(task, worktree, base):
             # One that grew too large since a look kept it is still there.
             entries = [entry for entry in entries if entry[0] not in large]
             entries, _ = own_changes(worktree, entries, looked, start, base, env=env)
-    except RoostError:
-        # Unknown, as when a file went before Git could add it, rather
-        # than nothing changed: the next measurement tries again.
+    except (RoostError, OSError):
+        # Unknown, as when a file went before Git could add it, or there
+        # is no room for the copy of the index, rather than nothing
+        # changed: the next measurement tries again.
         return None
     return dict(change_count(entries), at=looked.get("at"))
 
