@@ -18,6 +18,18 @@ ideas add what you need when you don't read every line, such as when a
 decision is yours and what it rests on, and take nothing from review in
 Magit.
 
+[A look through research](research.md) on supervising many agents at once
+(2026-10-20), from drones and process control to interruptions, code review
+and the first studies of people running coding agents in parallel, orders
+several of them. Most people run two to four agents, and the one controlled
+trial of a dashboard for them raised that by about one
+([ParallelPilot](https://arxiv.org/html/2609.33113v1)). Roost's noticing of
+which agent needs you mostly matches the evidence. What limits how many
+agents one person keeps up with now is the time it takes to judge each
+change, whether you read every line or judge by the evidence, and keeping
+tasks out of each other's files. So the ideas that cut those come first, and
+more work on noticing after them.
+
 ## Most likely first
 
 Small, and probably worth the most.
@@ -26,9 +38,49 @@ Small, and probably worth the most.
   with [the recipes and their status](melpa.md) current, and send them,
   tmux-control first, once people ask for them there. Features don't wait
   for it.
-- **[When a merge is your turn](#when-a-merge-is-your-turn)**, its first
-  two parts: a pull request waiting on you counts as waiting, and conflicts
-  before merge time.
+- **[When a merge is your turn](#when-a-merge-is-your-turn)**, its next
+  part: evidence beside the files.
+- **Notifications by urgency.** Each change to ready, permission, failed,
+  crashed or exited sends a notification of its own, all alike, and only a
+  newer one about the same task replaces it. A permission request would
+  still go alone and at once, since its agent can do nothing until you
+  answer. The rest, finished turns, failures and pull requests or conflicts
+  that wait on you, would gather across tasks for up to a minute into one
+  notification that names the most urgent and counts the others. Titles
+  would start with the task and its status rather than "Roost:", and the
+  mode line's count stays. At two agents this changes little. Five that
+  each end a turn every ten minutes already send more than the one or two
+  per ten minutes that process-control guidance calls manageable
+  ([ISA-18.2](https://www.yokogawa.com/ro/library/resources/media-publications/implementing-alarm-management-per-the-ansi-isa-182-standard-control-engineering/)),
+  and people come to answer an alarm about as often as it has turned out
+  to matter ([Bliss et al. 1995](https://stars.library.ucf.edu/scopus1990/1980)),
+  so finished turns mixed in slow the answer to a permission request.
+  From the cockpit, where one alert sounds at a time and a message counts
+  the rest ([FAA](https://hfcc.dot.gov/publications/docs/GeneralGuidance/zz_FAA_GeneralGuidanceDoc_Chapter_04_Section_01.html)).
+- **A warning in the draft when another task changes its files.** When a
+  new task's draft quotes a file, as one started from a region, a file, a
+  diagnostic or a compilation error does, it names the project's running
+  tasks that already change that file ("ledger totals already changes
+  report.py"), from the overlaps the task panel finds. Starting it anyway,
+  waiting, or giving the work to that task stays your choice. Tasks that
+  share files aren't independent: replayed merges of agents' concurrent
+  pull requests conflicted in 20% of pairs from one agent and 42% across
+  agents ([Xu et al.](https://arxiv.org/pdf/2607.04697)), and in
+  ParallelPilot's trial, seeing which tasks shared files was the help whose
+  gains tracked how much got done
+  ([ParallelPilot](https://arxiv.org/html/2609.33113v1)). It's the draft's
+  side of [other tasks' changes in your file buffers](#worth-trying).
+- **`n` says where it went and why.** `n` opens the next task waiting,
+  permission requests first, without saying why it chose that one, so you
+  arrive somewhere you didn't pick and catch up. The echo area could say
+  "permission · ledger: Asks to run make test; 2 more waiting". When none
+  is left it says so already; it could also offer the way back to where
+  you pressed the first `n`. In a rescue-robot simulation, operators sent
+  to a robot they hadn't chosen took longer over each
+  ([Crandall et al. 2011](https://faculty.cs.byu.edu/~crandall/papers/Crandall_tsma2011.pdf)),
+  and a clear sign that interruptions were over raised how often people
+  went back to the task they had set aside from 52% to 90%
+  ([Dodhia and Dismukes 2009](https://interruptions.net/literature/Dodhia-ApplCognitPsychol09.pdf)).
 - **`.worktreeinclude`.** Copy the ignored files it lists, such as `.env`,
   into new worktrees, as Claude Code and Conductor do. Today that takes
   `roost-setup-command`.
@@ -45,48 +97,31 @@ Small, and probably worth the most.
 
 These ideas answer one question about each task: is a merge your turn, and
 what would it rest on? They share the places where Roost already says what
-a task needs: the next step at the top of the task panel and the menu (for
-an open pull request, today it only says that `P` pushes new commits), the
+a task needs: the next step at the top of the task panel and the menu, the
 status word in the sidebar, and `n`. Each adds a line or a status there
-rather than a view of its own. The first two are among the most likely;
-the last two are worth trying once those show what the panel has room for.
-What changed since you last looked, once among them, is in Roost now.
+rather than a view of its own. The first is among the most likely; the
+other is worth trying once it shows what the panel has room for. Three that
+came before them are in Roost now: a pull request that waits on you
+counts as waiting, conflicts show before merge time, and each task says what
+changed since you last looked.
 
-- **A pull request waiting on you counts as waiting.** Roost asks GitHub
-  about pushed tasks every two minutes and shows `#12` with its checks and
-  review, but `n` and the status lights follow only the agent, and a pull
-  request that's ready for you gives the agent nothing to say. It's your
-  turn to merge when the pull request is open at the branch's tip, every
-  check passed, no requested review is still pending (Copilot's included),
-  no thread is unresolved, and the agent neither works nor asks. It's your
-  turn to nudge when a check failed or a thread is open and, a minute or
-  two later, the agent still hasn't started a turn: an agent that watches
-  its own pull request starts one and never gets here, and one that
-  doesn't, does, so Roost needn't know which kind it runs. Most of this
-  comes with the `gh pr list` Roost already runs, asking also for
-  `mergeable`, `mergeStateStatus` and `reviewRequests`; unresolved threads
-  take a GraphQL query. Copilot only comments, so `reviewDecision` doesn't
-  move for it; its threads and a pending re-review do. The agent still
-  does the fixing; Roost says when it's your turn. From the Claude Code
-  team's review, in which people step in only where the checks can't
-  settle a change.
-- **Conflicts before merge time.** Roost finds a conflict only when `m`
-  refuses. GitHub already says when a pushed task's pull request conflicts
-  (`mergeable`, in the query above). For the rest, running `git merge-tree`
-  against the integration branch whenever either tip moves lets the panel
-  say "conflicts with main in foo.py" while `u` is still cheap. That covers
-  committed work; the changed files Roost already lists for each task,
-  committed or not, can say "task X also changes foo.py". From Calyx's
-  Mission Map, which marks agents that edited the same file within five
-  minutes.
 - **Evidence beside the files in the task panel.** Show what a decision can
-  rest on without opening the diff: the pull request's checks, the
-  reviewer's findings still open, and any paths marked as risky (below),
-  beside the size of the change, which it gives already. That's enough to finish a small change that
+  rest on without opening the diff, as facts in the order they're easiest to
+  check: the pull request's checks, or a local check command's
+  (in [Worth trying](#worth-trying)), saying which, with "no CI results"
+  looking different from "passed"; the reviewer's findings still open, with
+  file and line; and the agent's latest reply, labelled as its own account.
+  With the size of the change, which the panel gives already, and any paths
+  marked as risky (below), that's enough to finish a small change that
   passed everything, or to pick the one worth reading closely; the file list
-  and Magit stay as they are. Before a pull request, the agent's own test
-  output stays in its terminal. From the Claude Code team's review, where
-  people judge a change by its evidence more than by its lines.
+  and Magit stay as they are. No badge, score or "ready to merge" line: "no
+  CI results" beside a reply that says the tests pass shows that only the
+  agent vouches for them, without Roost judging either. Before a pull
+  request, the agent's own test output stays in its terminal. From the
+  Claude Code team's review, where people judge a change by its evidence
+  more than by its lines, and from studies in which an explanation made
+  people accept advice whether or not it was right
+  ([Bansal et al.](https://arxiv.org/abs/2006.14779)).
 - **Marks for risky changes.** Large changes have theirs: a dim `±` on the
   row once a task's changes reach 400 lines, 10 files or 3 top-level
   directories (`roost-large-change`), with the size in the task panel.
@@ -104,6 +139,17 @@ What changed since you last looked, once among them, is in Roost now.
 
 ## Worth trying
 
+- **A quiet word for a stalled task.** The task panel and dashboard say how
+  long since an agent's last event ("for 14m"); the sidebar doesn't. A dim
+  `quiet` there, for a working task far past its own usual gap between
+  events, would point at an agent that hangs or loops, without counting it
+  as waiting. Going by the task's own gaps rather than one fixed time
+  spares a task whose tests always take a while. An unexpected delay was
+  one of the four signs ParallelPilot's developers watched their agents
+  for, and its dashboard marks one
+  ([ParallelPilot](https://arxiv.org/html/2609.33113v1)); slow, hung or
+  runaway work is behind 17% of the times people interrupt Claude
+  ([Anthropic](https://www.anthropic.com/research/measuring-agent-autonomy)).
 - **Pushes only when you're away.** Point `CLAUDE_CLIENT_PRESENCE_FILE` on
   each host at a file Roost keeps while Emacs has focus, so Remote Control
   stops pushing while you're at Emacs. Claude counts you present whenever
@@ -125,6 +171,20 @@ What changed since you last looked, once among them, is in Roost now.
   Conductor (setup, run and archive scripts, ten ports per workspace),
   workmux (`pre_merge` and `pre_remove` hooks that can stop the operation),
   Superset and agent-deck.
+- **Notifications held while you review.** While you review or merge one
+  task, in its Magit status or notes, or write it a prompt, notifications
+  from other tasks that don't block an agent could wait, a few minutes at
+  most, and come grouped when you leave; permission requests still go at
+  once, and the mode line's count still moves. Interruptions of a few
+  seconds doubled to tripled the mistakes people made in keeping their
+  place in a sequence of steps
+  ([Altmann et al. 2014](https://www.interruptions.net/literature/Altmann-JExpPsycholGen14.pdf)),
+  and holding notifications until the next break cut frustration by a fifth
+  ([Iqbal and Bailey 2010](https://www.interruptions.net/literature/Iqbal-TOCHI10.pdf)).
+  That system had to guess when a break came, and was right about 40% of
+  the time; Roost knows when you're in Magit or a merge, but nobody has
+  tried this with Roost's events. After
+  [notifications by urgency](#most-likely-first).
 - **An Org entry's TODO state follows its task.** A linked entry
   (`ROOST_TASK`) moves through its keywords as the task starts, waits for
   review and merges, so the agenda becomes the board; off by default.
@@ -141,7 +201,7 @@ What changed since you last looked, once among them, is in Roost now.
 - **Since you last looked, in the fringe.** Point diff-hl at the commit
   Roost keeps of where you last looked, in a task's worktree, so a file
   shows only what changed since, in your own buffer.
-- **Looking without Magit.** Only `r` and notes sent with `@` record a
+- **Looking without Magit.** Only `r` and the notes you send record a
   look, so someone who reads the diffs in the agent's terminal, or judges
   by evidence, sees `not looked at` until they open Magit. A key in the
   task panel could record one, and `D` could count as one.
@@ -168,7 +228,10 @@ What changed since you last looked, once among them, is in Roost now.
 - **Several attempts at one prompt.** A count, or several agents, in the
   draft makes sibling tasks; compare them in Magit, merge one, and finish
   the rest. From Orca ("fan one prompt across 5 agents"), dmux and workmux
-  (`-a`, `-n`).
+  (`-a`, `-n`). Of the ideas here, it and
+  [agents that start tasks](#exploring) add the most to review without
+  making any of it quicker to judge, so it fits where attempts are cheap to
+  compare, as with Ediff (above).
 - **Better task names.** Names come from a prompt's first words, and `R`
   renames a task. Claude Code titles its sessions itself, in an `ai-title`
   line of the transcript (or the name its `/rename` gave), which `R` could
@@ -196,7 +259,12 @@ Larger, or undecided.
   into tasks you still review and merge. The busiest idea in the field:
   herdr's `agent start`, `prompt`, `wait` and `read`, workmux's
   `/coordinator` skill, Superset's MCP server, agent-deck's conductor. It
-  pulls toward an orchestration Roost may not want.
+  pulls toward an orchestration Roost may not want, and like several
+  attempts at one prompt, it makes more to review without making any of it
+  quicker to judge. In ParallelPilot's trial, the developer saw and could
+  change the planner's split before any agent started
+  ([ParallelPilot](https://arxiv.org/html/2609.33113v1)), so a split here
+  would wait for your yes too.
 - **A map of the agent's work** beside its terminal: the files it reads and
   edits over time, drawn with Emacs 32's canvas images. Prototype on branch
   `work-map`.
@@ -214,6 +282,14 @@ Larger, or undecided.
   user's repository, if only under a private ref, which sits uneasily with
   never committing their work. Claude Code's `/rewind` and Conductor's
   checkpoints keep such snapshots themselves.
+- **How often merged work came back.** For each agent, or each kind of
+  task, how often its merged work was reverted or fixed again soon after,
+  perhaps in `M-x roost-workload`. Feedback on how things turned out is the
+  best-supported remedy in research on vigilance, and people who had seen
+  automation fail checked it more afterwards
+  ([Bahner et al. 2008](https://doi.org/10.1016/j.ijhcs.2008.06.001)). But
+  whether such rates teach anyone how far to trust an agent's code is
+  unknown, and "fixed soon after" needs a definition Git can answer.
 - **Rex in place of tmux.** [Rex](https://www.superlogical.com/rex/docs),
   from Superlogical, is a terminal and multiplexer built on Ghostty's
   engine, in beta on macOS since 2026-10-05. Its server API covers what the
@@ -293,8 +369,38 @@ Larger, or undecided.
   `P`, the `#12` line with checks and review, and `x` once it merges; when
   the agent's watcher sets it to work, the status lights show it like any
   other turn. Saying when a pull request waits on you is Roost's
-  ([above](#when-a-merge-is-your-turn)), whether or not the agent watches;
+  (`to merge`, `ci failed`, `comments`), whether or not the agent watches;
   fixing what it finds is the agent's.
+- **`n` picking by a reckoning of its own.** `n` keeps a plain order,
+  permission requests first, and would say where it went and why
+  ([above](#most-likely-first)) rather than choose more cleverly out of
+  sight. In a rescue-robot simulation, a key that chose the next robot for
+  the operator added time to each visit, as operators caught up with a
+  robot they hadn't picked, raised no score, and was the mode two thirds
+  of them liked least
+  ([Crandall et al. 2011](https://faculty.cs.byu.edu/~crandall/papers/Crandall_tsma2011.pdf)).
+- **Predicted finish times.** Agents' run times vary too much to predict,
+  and operators given probabilistic predictions of their schedule did
+  worse than those given none
+  ([Cummings and Mitchell 2005](https://doi.org/10.2514/6.2005-7060)). How
+  long a task has worked or waited is certain, and Roost shows it.
+- **Generated recaps as the main view.** Roost quotes the agent's own reply
+  and lists what it changed, for Magit to show. ParallelPilot's
+  model-written logs were its least valued part, below the live status
+  view ([ParallelPilot](https://arxiv.org/html/2609.33113v1)), and agents'
+  accounts of their own work are often wrong: claiming a success that
+  didn't happen was nearly a quarter of the misbehaviour found in 20,574
+  sessions ([How Coding Agents Fail Their Users](https://arxiv.org/abs/2605.29442)).
+- **A "safe to merge" verdict, or merging on green.** Roost shows what a
+  merge would rest on and leaves the decision, and the merge, to you. Aids
+  that choose an action cost most when they're wrong, more than aids that
+  only inform
+  ([Onnasch et al. 2014](https://depositonce.tu-berlin.de/items/7df9879f-d77b-4f2b-8760-f0e3d174ca67/full)),
+  and a verdict beside the evidence would be read in place of it.
+- **A cap on how many agents you run.** No study gives a number: it
+  depends on how long your agents run alone and how long their work takes
+  to judge. `M-x roost-workload` shows how long yours waited on you, to
+  find your own.
 - **A docked review column.** Magit, opened with `r`, stages and takes
   notes; see [the Orca comparison](orca-comparison.md#review-notes-and-staging-in-magit).
 - **Built-in browsers and design modes** (Orca, cmux, Superset), **a kanban
