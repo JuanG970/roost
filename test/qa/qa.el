@@ -201,6 +201,15 @@ Return nil when it isn't on screen."
             (append unread-command-events (list (list 'down-mouse-1 posn) (list 'mouse-1 posn))))
       t)))
 
+(defun qa-sidebar-to-top ()
+  "Scroll the sidebar to its top, as the mouse wheel would.
+With many tasks and Roost's menu open below, its headings can be out of
+sight."
+  (when-let* ((window (get-buffer-window roost--sidebar-buffer)))
+    (set-window-start window 1)
+    (set-window-point window 1)
+    t))
+
 (defun qa-click-terminal ()
   "Click in the first terminal on screen, as to type in it.
 Return nil when no terminal is on screen."
