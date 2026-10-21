@@ -5618,9 +5618,15 @@ passed everything, as GitHub said a minute after.  STATUS, fields of its
                   (setq reply (cons success failure)))))
        (roost-review task)
        (should (equal requests '((nil "look" ((id . "0123456789abcdef"))))))
-       ;; Magit opens once the host has recorded it, with what changed.
+       ;; Magit opens once the host has recorded it, with what changed,
+       ;; for the task as it is then, renamed meanwhile or not.
        (should-not opened)
-       (funcall (car reply) (append '((looked (at . "2026-10-03T21:00:00+00:00"))) (roost-test--task)))
+       (let (activated)
+         (cl-letf (((symbol-function 'roost--activate-workspace)
+                    (lambda (task) (push (roost--field task 'name) activated))))
+           (funcall (car reply) (append '((looked (at . "2026-10-03T21:00:00+00:00")) (name . "fixed auth"))
+                                        (roost-test--task))))
+         (should (equal activated '("fixed auth"))))
        (should (equal (length opened) 1))
        (should (equal (alist-get 'at (roost--field (gethash (roost--key task) roost--tasks) 'looked))
                       "2026-10-03T21:00:00+00:00"))

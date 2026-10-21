@@ -4692,10 +4692,13 @@ questions you left open in the minibuffer, as `roost-open-task' does."
                       ;; Not once you have opened something else, or gone
                       ;; to another window or buffer, as `roost-open-task'.
                       (when (= generation roost--open-generation)
-                        (if (not (and (eq (selected-window) window) (eq (window-buffer window) shown)))
-                            (message "Roost: didn't open Magit on %s, as you went to another window or buffer while its host replied"
-                                     (roost--field task 'name))
-                          (roost--magit-status task))))))))
+                        ;; As it is now: renamed meanwhile, as from another
+                        ;; Emacs, its workspace has the new name.
+                        (let ((task (gethash (roost--key task) roost--tasks task)))
+                          (if (not (and (eq (selected-window) window) (eq (window-buffer window) shown)))
+                              (message "Roost: didn't open Magit on %s, as you went to another window or buffer while its host replied"
+                                       (roost--field task 'name))
+                            (roost--magit-status task)))))))))
       (if (gethash (roost--field task 'host) roost--errors)
           (funcall open)
         (roost--act task "look" nil open
