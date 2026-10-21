@@ -1492,6 +1492,20 @@ go_review = go_view("r", needs_magit=True)
 go_files = go_view("f")
 
 
+def go_changed_file(qa, target):
+    """Click the file TARGET changed, in its panel, which `i' on its row
+    shows beside the terminal on screen."""
+    if qa.host or qa.emacs.eval("(and (require 'magit nil t) t)") != "t":
+        # Magit over TRAMP's ssh method is too slow on a host this far away.
+        raise NotApplicable()
+    to_sidebar(qa)
+    if qa.emacs.eval("(qa-goto-row %s)" % lisp(target)) != "t":
+        raise Stuck("No row for %s in the sidebar" % target)
+    qa.keys("i")
+    qa.wait("its changed file", lambda s: qa.emacs.eval('(and (qa--find-button "notes.py" 0) t)') == "t")
+    qa.click("notes.py")
+
+
 def shows_view(qa, name, mode):
     """Whether the screen shows a MODE buffer of NAME's worktree, selected,
     in NAME's frame.  Where its terminal went, Magit or Dired chose: the
@@ -1538,6 +1552,7 @@ WALK_INTERRUPTERS = [
     # task.
     ("r on another task's row", go_review, "other"),
     ("f on another task's row", go_files, "other"),
+    ("a click on a file in another task's panel", go_changed_file, "other"),
     ("a click on a notification", go_notification, "other"),
     ("a click in the terminal", go_terminal, None),
 ]
@@ -1551,6 +1566,12 @@ def walk_away(qa, repo):
     or kept, and nothing waits unseen."""
     home = start_task(qa, "Sort the notes")
     other = start_task(qa, "Tally the notes")
+    # A change of its own, a file its panel lists.
+    open_task(qa, other)
+    qa.keys("C-c r e")
+    qa.wait("the prompt", lambda s: s["prompt"])
+    qa.type("ask echo '# Tallied' >> notes.py\r")
+    answer_yes(qa, other)
     waiting = new_task(qa, "ask git log")
     qa.status(waiting, "permission")
     timeout = 15 if qa.host else 8
@@ -1577,6 +1598,8 @@ def walk_away(qa, repo):
                 opens = (target + "'s Magit opens", shows_view(qa, target, "magit-status-mode"))
             elif go is go_files:
                 opens = (target + "'s files open", shows_view(qa, target, "dired-mode"))
+            elif go is go_changed_file:
+                opens = (target + "'s diff of the file opens", shows_view(qa, target, "magit-diff-mode"))
             else:
                 opens = ((target + "'s " + ("shell" if shell else "terminal") + " opens", shows(qa, target, shell))
                          if target else (home + "'s terminal stays", shows(qa, home)))

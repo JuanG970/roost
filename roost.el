@@ -6251,7 +6251,12 @@ own.  Each button shows all the file's changes since the task began."
                           path)
                         'follow-link t 'face 'roost-field
                         'help-echo (concat path "\nmouse-1: show its changes")
-                        'action (lambda (_) (roost--diff-file task file)))
+                        'action (lambda (_)
+                                  ;; As for a command you give: a question
+                                  ;; you left open would hold it back.
+                                  (roost--quit-questions-left-open
+                                   (lambda () (roost--diff-file task file)))
+                                  (roost--diff-file task file)))
     (insert "  " counts "\n")))
 
 (defun roost--agent-work-left (task)
